@@ -9,27 +9,72 @@ publish = false
 [workspace.lints.rust]
 unsafe_code = "forbid"
 unused_must_use = "deny"
+let_underscore_drop = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+unit_bindings = "warn"
 
+# Clippy defaults (correctness, suspicious, style, complexity, perf) stay on.
+# Additions are cherry-picked; whole pedantic/restriction groups are too noisy.
 [workspace.lints.clippy]
-# Money is integer ISK; silent truncation or sign loss is a bug.
-cast_possible_truncation = "warn"
-cast_possible_wrap = "warn"
-cast_sign_loss = "warn"
-cast_lossless = "warn"
-float_cmp = "warn"
-# No panics or leftovers in production code (tests may unwrap, see clippy.toml).
+# Silencing: #[allow] is not allowed; a needed exception uses #[expect(lint, reason = "...")].
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+# Swallowed errors.
+let_underscore_must_use = "warn"
+let_underscore_untyped = "warn"
+unused_result_ok = "warn"
+map_err_ignore = "warn"
+# Panics in production code (tests are exempt, see clippy.toml).
 unwrap_used = "warn"
+expect_used = "warn"
 panic = "warn"
+get_unwrap = "warn"
+indexing_slicing = "warn"
+string_slice = "warn"
+unwrap_in_result = "warn"
+panic_in_result_fn = "warn"
+exit = "warn"
+# Leftovers and placeholders.
 todo = "warn"
 unimplemented = "warn"
 dbg_macro = "warn"
 print_stdout = "warn"
 print_stderr = "warn"
-# Errors must not be dropped silently.
-let_underscore_must_use = "warn"
-map_err_ignore = "warn"
-# Readability.
-semicolon_if_nothing_returned = "warn"
-uninlined_format_args = "warn"
-redundant_clone = "warn"
+# Numbers: lossy casts and float comparison.
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+cast_precision_loss = "warn"
+cast_lossless = "warn"
+float_cmp = "warn"
+float_cmp_const = "warn"
+lossy_float_literal = "warn"
+# Hidden behaviour: catch-all match arms, nondeterministic iteration order.
+wildcard_enum_match_arm = "warn"
+match_wildcard_for_single_variants = "warn"
+iter_over_hash_type = "warn"
+mem_forget = "warn"
+# Tests that cannot fail or hide why.
+assertions_on_result_states = "warn"
+ignore_without_reason = "warn"
+should_panic_without_expect = "warn"
+tests_outside_test_module = "warn"
+# Bloat and copy-paste.
 needless_pass_by_value = "warn"
+implicit_clone = "warn"
+redundant_clone = "warn"
+clone_on_ref_ptr = "warn"
+unnecessary_wraps = "warn"
+unused_self = "warn"
+match_same_arms = "warn"
+too_many_lines = "warn"
+fn_params_excessive_bools = "warn"
+struct_excessive_bools = "warn"
+# Consistency.
+uninlined_format_args = "warn"
+semicolon_if_nothing_returned = "warn"
+manual_let_else = "warn"
+redundant_else = "warn"
+items_after_statements = "warn"
+mod_module_files = "warn"
