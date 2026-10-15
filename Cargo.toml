@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+# Money is integer ISK; silent truncation or sign loss is a bug.
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+cast_lossless = "warn"
+float_cmp = "warn"
+# No panics or leftovers in production code (tests may unwrap, see clippy.toml).
+unwrap_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+# Errors must not be dropped silently.
+let_underscore_must_use = "warn"
+map_err_ignore = "warn"
+# Readability.
+semicolon_if_nothing_returned = "warn"
+uninlined_format_args = "warn"
+redundant_clone = "warn"
+needless_pass_by_value = "warn"
