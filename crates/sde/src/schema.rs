@@ -77,10 +77,13 @@ pub(crate) const CREATE_TABLES: &str = "
         activity TEXT NOT NULL,
         bonus_tenths INTEGER NOT NULL,
         rig_size INTEGER NOT NULL,
-        filter_id INTEGER,
         high_tenths INTEGER,
         low_tenths INTEGER NOT NULL,
         null_tenths INTEGER NOT NULL
+    );
+    CREATE TABLE rig_filters (
+        rig_id INTEGER NOT NULL REFERENCES rigs (type_id),
+        filter_id INTEGER
     );
     CREATE TABLE rig_fits (
         rig_id INTEGER NOT NULL REFERENCES rigs (type_id),

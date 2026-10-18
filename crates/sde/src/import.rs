@@ -15,6 +15,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Number;
 
 use crate::error::SdeError;
+use crate::facility::{ENGINEERING_COMPLEX_GROUP, REFINERY_GROUP};
 use crate::schema::{CREATE_TABLES, SCHEMA_VERSION, activity_name};
 
 const SDE_FILE: &str = "_sde.jsonl";
@@ -27,7 +28,7 @@ const MODIFIER_SOURCES_FILE: &str = "industryModifierSources.jsonl";
 const TARGET_FILTERS_FILE: &str = "industryTargetFilters.jsonl";
 
 /// Engineering complexes and refineries: the groups of the structures the app offers.
-const STRUCTURE_GROUPS: [u32; 2] = [1404, 1406];
+const STRUCTURE_GROUPS: [u32; 2] = [ENGINEERING_COMPLEX_GROUP, REFINERY_GROUP];
 const RIG_CATEGORY: u32 = 66;
 
 /// Dogma attributes, as in the download. Values are read as exact decimals at the stated places.
@@ -474,8 +475,8 @@ struct RigRow {
     /// Material bonus in tenths of a percent, negative.
     bonus_tenths: i32,
     rig_size: u8,
-    /// `None` when the rig covers every product.
-    filter_id: Option<TypeId>,
+    /// One entry per material list entry; `None` covers every product.
+    filter_ids: BTreeSet<Option<TypeId>>,
     /// Security multipliers in tenths. Reactions have no high security multiplier.
     high_tenths: Option<u32>,
     low_tenths: u32,
@@ -588,6 +589,8 @@ struct MaterialSources {
 
 #[derive(Deserialize)]
 struct MaterialSource {
+    #[serde(rename = "dogmaAttributeID")]
+    attribute_id: Option<u32>,
     #[serde(rename = "filterID")]
     filter_id: Option<TypeId>,
 }
@@ -611,18 +614,22 @@ impl Facilities {
             .iter()
             .map(|group| (group.id, group.category_id))
             .collect();
+        let modifiers = read_modifier_sources(source)?;
+        // A rig-category type without a material entry is not a rig: its attributes are not read.
         let wanted: BTreeMap<TypeId, u32> = types
             .iter()
             .filter(|row| {
                 row.published
                     && (STRUCTURE_GROUPS.contains(&row.group_id)
-                        || category_of.get(&row.group_id) == Some(&RIG_CATEGORY))
+                        || (category_of.get(&row.group_id) == Some(&RIG_CATEGORY)
+                            && modifiers
+                                .get(&row.id)
+                                .is_some_and(|record| rig_material(record).is_some())))
             })
             .map(|row| (row.id, row.group_id))
             .collect();
 
         let dogma = read_dogma(source, &wanted)?;
-        let modifiers = read_modifier_sources(source)?;
         let mut structures = Vec::new();
         let mut rigs = Vec::new();
         let mut rig_fits = Vec::new();
@@ -700,7 +707,12 @@ fn structure_row(
 ) -> Result<StructureRow, SdeError> {
     let has_material = record
         .and_then(|record| record.manufacturing.as_ref())
-        .is_some_and(|sources| !sources.material.is_empty());
+        .is_some_and(|sources| {
+            sources
+                .material
+                .iter()
+                .any(|entry| entry.attribute_id == Some(ATTR_STRUCTURE_MATERIAL))
+        });
     Ok(StructureRow {
         type_id: id,
         rig_size: attributes.number(ATTR_RIG_SIZE, 0)?,
@@ -712,49 +724,57 @@ fn structure_row(
     })
 }
 
-/// A rig: a type with a material bonus. `None` for a type that is not a rig.
+/// A rig: a type with a material bonus. `None` for a type that is not a rig, and for a rig whose
+/// bonus or security values the download does not give: such a rig is left out, not an error.
 fn rig_row(
     id: TypeId,
     attributes: &Dogma,
     record: Option<&ModifierSourceRecord>,
 ) -> Result<Option<RigRow>, SdeError> {
-    let Some((activity, entry)) = record.and_then(rig_material) else {
+    let Some((activity, entries)) = record.and_then(rig_material) else {
         return Ok(None);
     };
-    let (bonus_attribute, high_tenths) = match activity {
-        Activity::Manufacturing => (
-            ATTR_RIG_MATERIAL_MANUFACTURING,
-            Some(attributes.number(ATTR_HIGH_SECURITY, 1)?),
-        ),
-        Activity::Reaction => (
-            ATTR_RIG_MATERIAL_REACTION,
-            attributes.optional_number(ATTR_HIGH_SECURITY, 1)?,
-        ),
+    let bonus_attribute = match activity {
+        Activity::Manufacturing => ATTR_RIG_MATERIAL_MANUFACTURING,
+        Activity::Reaction => ATTR_RIG_MATERIAL_REACTION,
+    };
+    let high_tenths: Option<u32> = attributes.optional_number(ATTR_HIGH_SECURITY, 1)?;
+    let high_tenths = match (activity, high_tenths) {
+        (Activity::Manufacturing, None) => return Ok(None),
+        (_, high) => high,
+    };
+    let bonus_tenths = attributes.optional_number::<i32>(bonus_attribute, 1)?;
+    let low_tenths = attributes.optional_number::<u32>(ATTR_LOW_SECURITY, 1)?;
+    let null_tenths = attributes.optional_number::<u32>(ATTR_NULL_SECURITY, 1)?;
+    let (Some(bonus_tenths), Some(low_tenths), Some(null_tenths)) =
+        (bonus_tenths, low_tenths, null_tenths)
+    else {
+        return Ok(None);
     };
     Ok(Some(RigRow {
         type_id: id,
         activity,
-        bonus_tenths: attributes.number(bonus_attribute, 1)?,
+        bonus_tenths,
         rig_size: attributes.number(ATTR_RIG_SIZE, 0)?,
-        filter_id: entry.filter_id,
+        filter_ids: entries.iter().map(|entry| entry.filter_id).collect(),
         high_tenths,
-        low_tenths: attributes.number(ATTR_LOW_SECURITY, 1)?,
-        null_tenths: attributes.number(ATTR_NULL_SECURITY, 1)?,
+        low_tenths,
+        null_tenths,
     }))
 }
 
-/// The activity and first material entry of a rig. Manufacturing first; a rig with a bonus for
-/// both would be read as manufacturing.
-fn rig_material(record: &ModifierSourceRecord) -> Option<(Activity, &MaterialSource)> {
-    if let Some(entry) = record.manufacturing.as_ref().and_then(first_material) {
-        return Some((Activity::Manufacturing, entry));
+/// The activity and material entries of a rig. Manufacturing first; a rig with a bonus for both
+/// would be read as manufacturing.
+fn rig_material(record: &ModifierSourceRecord) -> Option<(Activity, &[MaterialSource])> {
+    if let Some(entries) = record.manufacturing.as_ref().and_then(non_empty_material) {
+        return Some((Activity::Manufacturing, entries));
     }
-    let entry = record.reaction.as_ref().and_then(first_material)?;
-    Some((Activity::Reaction, entry))
+    let entries = record.reaction.as_ref().and_then(non_empty_material)?;
+    Some((Activity::Reaction, entries))
 }
 
-fn first_material(sources: &MaterialSources) -> Option<&MaterialSource> {
-    sources.material.first()
+fn non_empty_material(sources: &MaterialSources) -> Option<&[MaterialSource]> {
+    Some(sources.material.as_slice()).filter(|entries| !entries.is_empty())
 }
 
 /// The group ids a rig fits, from its fitting attributes.
@@ -1017,21 +1037,25 @@ fn write_facilities(tx: &Transaction<'_>, facilities: &Facilities) -> Result<(),
         structures.execute(params![row.type_id, row.rig_size, row.manufacturing_bonus])?;
     }
     let mut rigs = tx.prepare(
-        "INSERT INTO rigs (type_id, activity, bonus_tenths, rig_size, filter_id, high_tenths,
+        "INSERT INTO rigs (type_id, activity, bonus_tenths, rig_size, high_tenths,
                            low_tenths, null_tenths)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )?;
+    let mut rig_filters =
+        tx.prepare("INSERT INTO rig_filters (rig_id, filter_id) VALUES (?1, ?2)")?;
     for row in &facilities.rigs {
         rigs.execute(params![
             row.type_id,
             activity_name(row.activity),
             row.bonus_tenths,
             row.rig_size,
-            row.filter_id,
             row.high_tenths,
             row.low_tenths,
             row.null_tenths
         ])?;
+        for filter_id in &row.filter_ids {
+            rig_filters.execute(params![row.type_id, filter_id])?;
+        }
     }
     let mut fits = tx.prepare("INSERT INTO rig_fits (rig_id, group_id) VALUES (?1, ?2)")?;
     for &(rig_id, group_id) in &facilities.rig_fits {

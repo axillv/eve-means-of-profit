@@ -3,12 +3,14 @@
 //! [`import`] reads a download and writes a fresh database. [`Sde`] answers queries from it.
 
 pub mod error;
+pub mod facility;
 pub mod fetch;
 pub mod import;
 pub mod query;
 pub mod schema;
 
 pub use error::SdeError;
+pub use facility::{Facility, FacilityError, Rig, Security, Structure, StructureKind};
 pub use fetch::{
     Fetch, FetchError, HttpFetch, LATEST_URL, download_and_import, latest_build, needs_update,
     update_due, zip_url,

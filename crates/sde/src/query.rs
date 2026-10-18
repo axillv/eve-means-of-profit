@@ -13,7 +13,7 @@ use crate::schema::{SCHEMA_VERSION, activity_from_name};
 
 /// An open, read-only view of an imported database.
 pub struct Sde {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 /// The build the database was imported from.
