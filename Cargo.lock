@@ -288,6 +288,15 @@ name = "profit-core"
 version = "0.1.0"
 
 [[package]]
+name = "profit-jeve"
+version = "0.1.0"
+dependencies = [
+ "profit-core",
+ "rusqlite",
+ "tempfile",
+]
+
+[[package]]
 name = "profit-market"
 version = "0.1.0"
 dependencies = [
