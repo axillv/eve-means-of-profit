@@ -1,0 +1,9 @@
+{"_key": 2, "name": {"de": "Interstellar", "en": "Celestial", "es": "Celestial", "fr": "Céleste", "ja": "セレスチャル", "ko": "천체", "ru": "Небесное тело", "zh": "天体"}, "published": true}
+{"_key": 4, "iconID": 22, "name": {"de": "Material", "en": "Material", "es": "Material", "fr": "Matériau", "ja": "資源", "ko": "자원", "ru": "Материал", "zh": "材料"}, "published": true}
+{"_key": 6, "name": {"de": "Schiff", "en": "Ship", "es": "Nave", "fr": "Vaisseau", "ja": "艦船", "ko": "함선", "ru": "Корабль", "zh": "舰船"}, "published": true}
+{"_key": 9, "iconID": 21, "name": {"de": "Blueprint", "en": "Blueprint", "es": "Plano", "fr": "Plan de construction", "ja": "ブループリント", "ko": "블루프린트", "ru": "Чертеж", "zh": "蓝图"}, "published": true}
+{"_key": 17, "iconID": 0, "name": {"de": "Bedarfsartikel", "en": "Commodity", "es": "Mercancía", "fr": "Marchandise", "ja": "商品", "ko": "물품", "ru": "Товар", "zh": "常用物品"}, "published": true}
+{"_key": 18, "iconID": 0, "name": {"de": "Drohne", "en": "Drone", "es": "Dron", "fr": "Drone", "ja": "ドローン", "ko": "드론", "ru": "Дрон", "zh": "无人机"}, "published": true}
+{"_key": 43, "name": {"de": "Planetarische Güter", "en": "Planetary Commodities", "es": "Mercancías planetarias", "fr": "Marchandises planétaires", "ja": "惑星商品", "ko": "행성 생산품", "ru": "Планетарные товары", "zh": "行星商品"}, "published": true}
+{"_key": 65, "name": {"de": "Struktur", "en": "Structure", "es": "Estructura", "fr": "Structure", "ja": "ストラクチャ", "ko": "구조물", "ru": "Сооружения", "zh": "建筑"}, "published": true}
+{"_key": 66, "name": {"de": "Strukturmodul", "en": "Structure Module", "es": "Módulo de estructura", "fr": "Module de structure", "ja": "ストラクチャモジュール", "ko": "구조물 모듈", "ru": "Блоки сооружений", "zh": "建筑装备"}, "published": true}
