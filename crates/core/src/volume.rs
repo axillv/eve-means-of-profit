@@ -43,7 +43,7 @@ impl Volume {
         i64::try_from(product).ok().map(Volume)
     }
 
-    /// The exact volume, ungrouped, without trailing decimal zeros.
+    /// The exact volume, ungrouped, without trailing decimal zeros. `parse_decimal` reads back any volume that is not negative.
     pub fn to_plain(self) -> String {
         plain(self.0)
     }
@@ -109,6 +109,7 @@ mod tests {
         assert_eq!(v(25).to_plain(), "0.0025");
         assert_eq!(v(272_890_000).to_plain(), "27289");
         assert_eq!(v(0).to_plain(), "0");
+        assert_eq!(v(-25).to_plain(), "-0.0025");
         assert_eq!(
             Volume::parse_decimal(&v(i64::MAX).to_plain()),
             Ok(v(i64::MAX))

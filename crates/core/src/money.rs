@@ -310,6 +310,7 @@ mod tests {
         assert_eq!(Rate::parse_percent("0.5"), Ok(Rate::from_ppm(5000)));
         assert_eq!(Rate::parse_percent("3.375"), Ok(Rate::from_ppm(33_750)));
         assert_eq!(Rate::parse_percent("100"), Ok(Rate::from_ppm(1_000_000)));
+        assert_eq!(Rate::parse_percent("0"), Ok(Rate::from_ppm(0)));
         assert_eq!(Rate::parse_percent(" 0 "), Ok(Rate::from_ppm(0)));
         assert_eq!(
             Rate::parse_percent("100.0000"),

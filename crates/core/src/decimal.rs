@@ -40,8 +40,6 @@ impl std::error::Error for ParseNumberError {}
 const SCALE: u32 = 4;
 /// One whole unit as a count of 10^-4 units (10^`SCALE`).
 pub(crate) const UNIT: u64 = 10_u64.pow(SCALE);
-/// Exponents beyond this are clamped; no real value can use more.
-const MAX_EXPONENT: i64 = 100_000;
 
 /// Which spellings `parse_scaled` accepts.
 #[derive(Debug, Clone, Copy)]
@@ -87,8 +85,9 @@ pub(crate) fn parse_scaled(text: &str, grammar: Grammar) -> Result<i64, ParseNum
             .ok_or(ParseNumberError::OutOfRange)?;
     }
     let shift = exponent
-        .saturating_add(i64::from(SCALE))
-        .saturating_sub(len_i64(kept)?);
+        .checked_add(i64::from(SCALE))
+        .and_then(|shift| shift.checked_sub(len_i64(kept).ok()?))
+        .ok_or(ParseNumberError::OutOfRange)?;
     to_signed(shift_decimal(value, shift)?, negative)
 }
 
@@ -101,7 +100,7 @@ fn split_fraction(mantissa: &str) -> Result<(&str, &str), ParseNumberError> {
     }
 }
 
-/// Parses the digits after `e`, with an optional sign. Huge exponents are clamped.
+/// Parses the digits after `e`, with an optional sign. An exponent beyond `i64` is out of range.
 fn parse_exponent(text: &str) -> Result<i64, ParseNumberError> {
     let (negative, digits) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -110,19 +109,22 @@ fn parse_exponent(text: &str) -> Result<i64, ParseNumberError> {
     if !all_digits(digits) {
         return Err(ParseNumberError::Invalid);
     }
-    let magnitude = digits
-        .chars()
-        .filter_map(|c| c.to_digit(10))
-        .fold(0_i64, |acc, digit| {
-            acc.saturating_mul(10)
-                .saturating_add(i64::from(digit))
-                .min(MAX_EXPONENT)
-        });
-    Ok(if negative {
-        magnitude.saturating_neg()
-    } else {
-        magnitude
-    })
+    let mut value: i64 = 0;
+    for digit in digits.chars().filter_map(|c| c.to_digit(10)) {
+        let digit = i64::from(digit);
+        // Accumulating with the final sign lets `-9223372036854775808` fit.
+        value = value
+            .checked_mul(10)
+            .and_then(|v| {
+                if negative {
+                    v.checked_sub(digit)
+                } else {
+                    v.checked_add(digit)
+                }
+            })
+            .ok_or(ParseNumberError::OutOfRange)?;
+    }
+    Ok(value)
 }
 
 fn all_digits(text: &str) -> bool {
@@ -321,15 +323,33 @@ mod tests {
         assert_eq!(parse_scaled("25e-4", GAME), Ok(25));
         assert_eq!(parse_scaled("0.010000", GAME), Ok(100));
         assert_eq!(parse_scaled("1.50000e1", GAME), Ok(150_000));
-        assert_eq!(parse_scaled("0e99999999999999999999", GAME), Ok(0));
+        assert_eq!(
+            parse_scaled("0e99999999999999999999", GAME),
+            Err(ParseNumberError::OutOfRange)
+        );
         assert_eq!(
             parse_scaled("1e-99999999999999999999", GAME),
-            Err(ParseNumberError::TooManyDecimals)
+            Err(ParseNumberError::OutOfRange)
         );
         assert_eq!(
             parse_scaled("1e99999999999999999999", GAME),
             Err(ParseNumberError::OutOfRange)
         );
+        assert_eq!(
+            parse_scaled("1e9223372036854775807", GAME),
+            Err(ParseNumberError::OutOfRange)
+        );
+        assert_eq!(
+            parse_scaled("1e-9223372036854775808", GAME),
+            Err(ParseNumberError::TooManyDecimals)
+        );
+        assert_eq!(
+            parse_scaled("0.00001e-9223372036854775808", GAME),
+            Err(ParseNumberError::OutOfRange)
+        );
+        // Leading fraction zeros and a large exponent cancel exactly.
+        let long = format!("0.{}1e100006", "0".repeat(100_001));
+        assert_eq!(parse_scaled(&long, GAME), Ok(100_000_000));
         for text in ["1e", "1e+", "1e-", "1e1.5", "e1", "1e1e1", "1ee1"] {
             assert_eq!(
                 parse_scaled(text, GAME),
@@ -341,13 +361,21 @@ mod tests {
     }
 
     #[test]
-    fn exponents_are_signed_and_clamped() {
+    fn exponents_are_signed_and_checked() {
         assert_eq!(parse_exponent("12"), Ok(12));
         assert_eq!(parse_exponent("+12"), Ok(12));
         assert_eq!(parse_exponent("-12"), Ok(-12));
-        assert_eq!(parse_exponent("99999999999999999999"), Ok(100_000));
-        assert_eq!(parse_exponent("-99999999999999999999"), Ok(-100_000));
-        assert_eq!(parse_exponent("100001"), Ok(100_000));
+        assert_eq!(parse_exponent("100001"), Ok(100_001));
+        assert_eq!(parse_exponent("9223372036854775807"), Ok(i64::MAX));
+        assert_eq!(parse_exponent("-9223372036854775808"), Ok(i64::MIN));
+        assert_eq!(
+            parse_exponent("9223372036854775808"),
+            Err(ParseNumberError::OutOfRange)
+        );
+        assert_eq!(
+            parse_exponent("-99999999999999999999"),
+            Err(ParseNumberError::OutOfRange)
+        );
         assert_eq!(parse_exponent(""), Err(ParseNumberError::Invalid));
         assert_eq!(parse_exponent("-"), Err(ParseNumberError::Invalid));
     }
