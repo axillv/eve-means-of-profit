@@ -12,6 +12,7 @@ profit-core = { version = "0.1.0", path = "../core" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["arbitrary_precision"] }
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
