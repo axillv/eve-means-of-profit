@@ -7,4 +7,5 @@ pub mod industry;
 pub mod money;
 pub mod paste;
 pub mod plan;
+pub mod stock;
 pub mod volume;
