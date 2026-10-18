@@ -47,6 +47,11 @@ pub enum SdeError {
         line: usize,
         group_id: u32,
     },
+    /// A structure or rig is in the download's lists but has no record in the attribute file.
+    NoDogma {
+        file: String,
+        type_id: TypeId,
+    },
     /// A number is too large to store in the database.
     TooLarge {
         value: u64,
@@ -98,6 +103,9 @@ impl fmt::Display for SdeError {
                 f,
                 "{file} line {line}: group {group_id} is not in groups.jsonl"
             ),
+            Self::NoDogma { file, type_id } => {
+                write!(f, "{file}: type {type_id} has no attribute record")
+            }
             Self::TooLarge { value } => write!(f, "the number {value} is too large to store"),
             Self::Sqlite(error) => write!(f, "database error: {error}"),
             Self::NotImported => f.write_str("the static data is not imported with this version"),
@@ -118,6 +126,7 @@ impl std::error::Error for SdeError {
             | Self::BadNumber { .. }
             | Self::UnknownType { .. }
             | Self::UnknownGroup { .. }
+            | Self::NoDogma { .. }
             | Self::TooLarge { .. }
             | Self::NotImported => None,
         }

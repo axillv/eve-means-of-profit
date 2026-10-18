@@ -22,6 +22,27 @@ const CATEGORIES_FILE: &str = "categories.jsonl";
 const GROUPS_FILE: &str = "groups.jsonl";
 const TYPES_FILE: &str = "types.jsonl";
 const BLUEPRINTS_FILE: &str = "blueprints.jsonl";
+const TYPE_DOGMA_FILE: &str = "typeDogma.jsonl";
+const MODIFIER_SOURCES_FILE: &str = "industryModifierSources.jsonl";
+const TARGET_FILTERS_FILE: &str = "industryTargetFilters.jsonl";
+
+/// Engineering complexes and refineries: the groups of the structures the app offers.
+const STRUCTURE_GROUPS: [u32; 2] = [1404, 1406];
+const RIG_CATEGORY: u32 = 66;
+
+/// Dogma attributes, as in the download. Values are read as exact decimals at the stated places.
+const ATTR_RIG_SIZE: u32 = 1547;
+const ATTR_STRUCTURE_MATERIAL: u32 = 2600;
+const ATTR_RIG_MATERIAL_MANUFACTURING: u32 = 2594;
+const ATTR_RIG_MATERIAL_REACTION: u32 = 2714;
+const ATTR_HIGH_SECURITY: u32 = 2355;
+const ATTR_LOW_SECURITY: u32 = 2356;
+const ATTR_NULL_SECURITY: u32 = 2357;
+/// The groups a rig fits, one per attribute.
+const RIG_FIT_ATTRIBUTES: [u32; 20] = [
+    1298, 1299, 1300, 1301, 1872, 1879, 1880, 1881, 2065, 2396, 2476, 2477, 2478, 2479, 2480, 2481,
+    2482, 2483, 2484, 2485,
+];
 
 /// What an import read and wrote.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +54,8 @@ pub struct ImportReport {
     pub categories: usize,
     pub recipes: usize,
     pub material_rows: usize,
+    pub structures: usize,
+    pub rigs: usize,
     /// Recipes made by unpublished blueprints. They are not imported.
     pub skipped_unpublished: usize,
     /// Recipes that lost to a blueprint with a lower id for the same product.
@@ -126,6 +149,7 @@ struct Download {
     recipes: Vec<RecipeRow>,
     skipped_unpublished: usize,
     duplicates: usize,
+    facilities: Facilities,
 }
 
 impl Download {
@@ -135,6 +159,7 @@ impl Download {
         let groups = read_rows(source, GROUPS_FILE, GroupRow::from_record)?;
         let types = read_types(source, &groups)?;
         let recipes = Recipes::from_blueprints(&types, parse_file(source, BLUEPRINTS_FILE)?)?;
+        let facilities = Facilities::read(source, &types, &groups)?;
         Ok(Self {
             build_number,
             release_date,
@@ -144,6 +169,7 @@ impl Download {
             skipped_unpublished: recipes.skipped_unpublished,
             duplicates: recipes.duplicates,
             recipes: recipes.by_product.into_values().collect(),
+            facilities,
         })
     }
 
@@ -160,6 +186,8 @@ impl Download {
                 .iter()
                 .map(|row| row.recipe.materials.len())
                 .sum(),
+            structures: self.facilities.structures.len(),
+            rigs: self.facilities.rigs.len(),
             skipped_unpublished: self.skipped_unpublished,
             duplicates: self.duplicates,
         }
@@ -425,6 +453,321 @@ fn recipe_from_activity(
     })
 }
 
+/// The structures, rigs and target filters the facility queries read.
+struct Facilities {
+    structures: Vec<StructureRow>,
+    rigs: Vec<RigRow>,
+    rig_fits: Vec<(TypeId, u32)>,
+    filters: Vec<FilterRow>,
+}
+
+struct StructureRow {
+    type_id: TypeId,
+    rig_size: u8,
+    /// Material bonus for manufacturing, in hundredths. `None` when the structure has none.
+    manufacturing_bonus: Option<u32>,
+}
+
+struct RigRow {
+    type_id: TypeId,
+    activity: Activity,
+    /// Material bonus in tenths of a percent, negative.
+    bonus_tenths: i32,
+    rig_size: u8,
+    /// `None` when the rig covers every product.
+    filter_id: Option<TypeId>,
+    /// Security multipliers in tenths. Reactions have no high security multiplier.
+    high_tenths: Option<u32>,
+    low_tenths: u32,
+    null_tenths: u32,
+}
+
+struct FilterRow {
+    id: TypeId,
+    category_ids: Vec<u32>,
+    group_ids: Vec<u32>,
+}
+
+/// The attributes of one type, as the text the download gives each value.
+struct Dogma {
+    line: usize,
+    values: BTreeMap<u32, String>,
+}
+
+impl Dogma {
+    /// Attribute `id` as an exact integer at `decimals` decimal places. Absent is `None`. Text that
+    /// is not exact at that scale, or does not fit `T`, is `BadNumber`.
+    fn optional_number<T: TryFrom<i64>>(
+        &self,
+        id: u32,
+        decimals: u32,
+    ) -> Result<Option<T>, SdeError> {
+        let Some(text) = self.values.get(&id) else {
+            return Ok(None);
+        };
+        let bad = || SdeError::BadNumber {
+            file: TYPE_DOGMA_FILE.to_owned(),
+            line: self.line,
+            field: format!("attribute {id}"),
+            text: text.clone(),
+        };
+        let value = exact_scaled(text, decimals).ok_or_else(bad)?;
+        let number = T::try_from(value).ok().ok_or_else(bad)?;
+        Ok(Some(number))
+    }
+
+    fn number<T: TryFrom<i64>>(&self, id: u32, decimals: u32) -> Result<T, SdeError> {
+        self.optional_number(id, decimals)?
+            .ok_or_else(|| SdeError::MissingField {
+                file: TYPE_DOGMA_FILE.to_owned(),
+                line: self.line,
+                field: format!("attribute {id}"),
+            })
+    }
+}
+
+/// The number in `text` with `decimals` decimal places, read from its digits. `None` when it has
+/// more decimal places than that, unless the extra ones are zeros, or does not fit an `i64`.
+fn exact_scaled(text: &str, decimals: u32) -> Option<i64> {
+    let (negative, unsigned) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    if whole.is_empty() || !digits(whole) || !digits(fraction) {
+        return None;
+    }
+    let width = usize::try_from(decimals).ok()?;
+    let (kept, dropped) = if fraction.len() > width {
+        fraction.split_at(width)
+    } else {
+        (fraction, "")
+    };
+    if dropped.bytes().any(|byte| byte != b'0') {
+        return None;
+    }
+    let magnitude: i64 = format!("{whole}{kept:0<width$}").parse().ok()?;
+    if negative {
+        magnitude.checked_neg()
+    } else {
+        Some(magnitude)
+    }
+}
+
+#[derive(Deserialize)]
+struct DogmaRecord {
+    #[serde(rename = "_key")]
+    key: Option<TypeId>,
+    #[serde(rename = "dogmaAttributes", default)]
+    attributes: Vec<DogmaAttribute>,
+}
+
+#[derive(Deserialize)]
+struct DogmaAttribute {
+    #[serde(rename = "attributeID")]
+    id: u32,
+    value: Number,
+}
+
+#[derive(Deserialize)]
+struct ModifierSourceRecord {
+    #[serde(rename = "_key")]
+    key: Option<TypeId>,
+    #[serde(default)]
+    manufacturing: Option<MaterialSources>,
+    #[serde(default)]
+    reaction: Option<MaterialSources>,
+}
+
+#[derive(Deserialize)]
+struct MaterialSources {
+    #[serde(default)]
+    material: Vec<MaterialSource>,
+}
+
+#[derive(Deserialize)]
+struct MaterialSource {
+    #[serde(rename = "filterID")]
+    filter_id: Option<TypeId>,
+}
+
+#[derive(Deserialize)]
+struct TargetFilterRecord {
+    #[serde(rename = "_key")]
+    key: Option<TypeId>,
+    #[serde(rename = "categoryIDs", default)]
+    category_ids: Vec<u32>,
+    #[serde(rename = "groupIDs", default)]
+    group_ids: Vec<u32>,
+}
+
+impl Facilities {
+    /// Reads the published structures and rigs of the download, and the target filters. A rig is a
+    /// published type in the rig category with a material bonus; a structure is one of the
+    /// structure groups.
+    fn read(source: &mut Source, types: &[TypeRow], groups: &[GroupRow]) -> Result<Self, SdeError> {
+        let category_of: BTreeMap<u32, u32> = groups
+            .iter()
+            .map(|group| (group.id, group.category_id))
+            .collect();
+        let wanted: BTreeMap<TypeId, u32> = types
+            .iter()
+            .filter(|row| {
+                row.published
+                    && (STRUCTURE_GROUPS.contains(&row.group_id)
+                        || category_of.get(&row.group_id) == Some(&RIG_CATEGORY))
+            })
+            .map(|row| (row.id, row.group_id))
+            .collect();
+
+        let dogma = read_dogma(source, &wanted)?;
+        let modifiers = read_modifier_sources(source)?;
+        let mut structures = Vec::new();
+        let mut rigs = Vec::new();
+        let mut rig_fits = Vec::new();
+        for (&id, &group_id) in &wanted {
+            let attributes = dogma.get(&id).ok_or_else(|| SdeError::NoDogma {
+                file: TYPE_DOGMA_FILE.to_owned(),
+                type_id: id,
+            })?;
+            let record = modifiers.get(&id);
+            if STRUCTURE_GROUPS.contains(&group_id) {
+                structures.push(structure_row(id, attributes, record)?);
+            } else if let Some(rig) = rig_row(id, attributes, record)? {
+                rig_fits.extend(fit_groups(id, attributes)?);
+                rigs.push(rig);
+            }
+        }
+        let filters = read_filters(source)?;
+        Ok(Self {
+            structures,
+            rigs,
+            rig_fits,
+            filters,
+        })
+    }
+}
+
+/// The attributes of the wanted types, by type id.
+fn read_dogma(
+    source: &mut Source,
+    wanted: &BTreeMap<TypeId, u32>,
+) -> Result<BTreeMap<TypeId, Dogma>, SdeError> {
+    let mut dogma = BTreeMap::new();
+    for (line, record) in parse_file::<DogmaRecord>(source, TYPE_DOGMA_FILE)? {
+        let id = required(record.key, TYPE_DOGMA_FILE, line, "_key")?;
+        if wanted.contains_key(&id) {
+            let values = record
+                .attributes
+                .into_iter()
+                .map(|attribute| (attribute.id, attribute.value.to_string()))
+                .collect();
+            dogma.insert(id, Dogma { line, values });
+        }
+    }
+    Ok(dogma)
+}
+
+fn read_modifier_sources(
+    source: &mut Source,
+) -> Result<BTreeMap<TypeId, ModifierSourceRecord>, SdeError> {
+    let mut modifiers = BTreeMap::new();
+    for (line, record) in parse_file::<ModifierSourceRecord>(source, MODIFIER_SOURCES_FILE)? {
+        let id = required(record.key, MODIFIER_SOURCES_FILE, line, "_key")?;
+        modifiers.insert(id, record);
+    }
+    Ok(modifiers)
+}
+
+fn read_filters(source: &mut Source) -> Result<Vec<FilterRow>, SdeError> {
+    let mut filters = Vec::new();
+    for (line, record) in parse_file::<TargetFilterRecord>(source, TARGET_FILTERS_FILE)? {
+        filters.push(FilterRow {
+            id: required(record.key, TARGET_FILTERS_FILE, line, "_key")?,
+            category_ids: record.category_ids,
+            group_ids: record.group_ids,
+        });
+    }
+    Ok(filters)
+}
+
+/// A structure: its size, and its manufacturing material bonus when its modifier source has one.
+fn structure_row(
+    id: TypeId,
+    attributes: &Dogma,
+    record: Option<&ModifierSourceRecord>,
+) -> Result<StructureRow, SdeError> {
+    let has_material = record
+        .and_then(|record| record.manufacturing.as_ref())
+        .is_some_and(|sources| !sources.material.is_empty());
+    Ok(StructureRow {
+        type_id: id,
+        rig_size: attributes.number(ATTR_RIG_SIZE, 0)?,
+        manufacturing_bonus: if has_material {
+            Some(attributes.number(ATTR_STRUCTURE_MATERIAL, 2)?)
+        } else {
+            None
+        },
+    })
+}
+
+/// A rig: a type with a material bonus. `None` for a type that is not a rig.
+fn rig_row(
+    id: TypeId,
+    attributes: &Dogma,
+    record: Option<&ModifierSourceRecord>,
+) -> Result<Option<RigRow>, SdeError> {
+    let Some((activity, entry)) = record.and_then(rig_material) else {
+        return Ok(None);
+    };
+    let (bonus_attribute, high_tenths) = match activity {
+        Activity::Manufacturing => (
+            ATTR_RIG_MATERIAL_MANUFACTURING,
+            Some(attributes.number(ATTR_HIGH_SECURITY, 1)?),
+        ),
+        Activity::Reaction => (
+            ATTR_RIG_MATERIAL_REACTION,
+            attributes.optional_number(ATTR_HIGH_SECURITY, 1)?,
+        ),
+    };
+    Ok(Some(RigRow {
+        type_id: id,
+        activity,
+        bonus_tenths: attributes.number(bonus_attribute, 1)?,
+        rig_size: attributes.number(ATTR_RIG_SIZE, 0)?,
+        filter_id: entry.filter_id,
+        high_tenths,
+        low_tenths: attributes.number(ATTR_LOW_SECURITY, 1)?,
+        null_tenths: attributes.number(ATTR_NULL_SECURITY, 1)?,
+    }))
+}
+
+/// The activity and first material entry of a rig. Manufacturing first; a rig with a bonus for
+/// both would be read as manufacturing.
+fn rig_material(record: &ModifierSourceRecord) -> Option<(Activity, &MaterialSource)> {
+    if let Some(entry) = record.manufacturing.as_ref().and_then(first_material) {
+        return Some((Activity::Manufacturing, entry));
+    }
+    let entry = record.reaction.as_ref().and_then(first_material)?;
+    Some((Activity::Reaction, entry))
+}
+
+fn first_material(sources: &MaterialSources) -> Option<&MaterialSource> {
+    sources.material.first()
+}
+
+/// The group ids a rig fits, from its fitting attributes.
+fn fit_groups(id: TypeId, attributes: &Dogma) -> Result<Vec<(TypeId, u32)>, SdeError> {
+    let mut groups = Vec::new();
+    for attribute in RIG_FIT_ATTRIBUTES {
+        if let Some(group) = attributes.optional_number::<u32>(attribute, 0)? {
+            groups.push((id, group));
+        }
+    }
+    Ok(groups)
+}
+
 /// Reads the build number and release date from the first line of `_sde.jsonl`.
 fn read_build(source: &mut Source) -> Result<(u64, String), SdeError> {
     let (line, record) = parse_file::<BuildRecord>(source, SDE_FILE)?
@@ -659,6 +1002,51 @@ fn write_rows(tx: &Transaction<'_>, download: &Download) -> Result<(), SdeError>
                 type_id,
                 sql_int(quantity)?
             ])?;
+        }
+    }
+    write_facilities(tx, &download.facilities)?;
+    Ok(())
+}
+
+fn write_facilities(tx: &Transaction<'_>, facilities: &Facilities) -> Result<(), SdeError> {
+    let mut structures = tx.prepare(
+        "INSERT INTO structures (type_id, rig_size, manufacturing_bonus_hundredths)
+         VALUES (?1, ?2, ?3)",
+    )?;
+    for row in &facilities.structures {
+        structures.execute(params![row.type_id, row.rig_size, row.manufacturing_bonus])?;
+    }
+    let mut rigs = tx.prepare(
+        "INSERT INTO rigs (type_id, activity, bonus_tenths, rig_size, filter_id, high_tenths,
+                           low_tenths, null_tenths)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    )?;
+    for row in &facilities.rigs {
+        rigs.execute(params![
+            row.type_id,
+            activity_name(row.activity),
+            row.bonus_tenths,
+            row.rig_size,
+            row.filter_id,
+            row.high_tenths,
+            row.low_tenths,
+            row.null_tenths
+        ])?;
+    }
+    let mut fits = tx.prepare("INSERT INTO rig_fits (rig_id, group_id) VALUES (?1, ?2)")?;
+    for &(rig_id, group_id) in &facilities.rig_fits {
+        fits.execute(params![rig_id, group_id])?;
+    }
+    let mut filter_categories =
+        tx.prepare("INSERT INTO filter_categories (filter_id, category_id) VALUES (?1, ?2)")?;
+    let mut filter_groups =
+        tx.prepare("INSERT INTO filter_groups (filter_id, group_id) VALUES (?1, ?2)")?;
+    for filter in &facilities.filters {
+        for &category_id in &filter.category_ids {
+            filter_categories.execute(params![filter.id, category_id])?;
+        }
+        for &group_id in &filter.group_ids {
+            filter_groups.execute(params![filter.id, group_id])?;
         }
     }
     Ok(())

@@ -73,6 +73,8 @@ mod tests {
             categories: 9,
             recipes: 12,
             material_rows: 54,
+            structures: 5,
+            rigs: 6,
             skipped_unpublished: 1,
             duplicates: 0,
         }
