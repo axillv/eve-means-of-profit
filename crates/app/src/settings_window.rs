@@ -17,12 +17,11 @@ pub fn show(ctx: &Context, open: &mut bool, shared: &mut Shared, data_dir: &Path
             ui.label("Density");
             let mut density = shared.density;
             for choice in [Density::Sparse, Density::Normal, Density::Dense] {
-                if ui
+                let picked = ui
                     .radio_value(&mut density, choice, density_label(choice))
-                    .changed()
-                {
+                    .changed();
+                if picked && shared.change_settings(|settings| settings.density = choice) {
                     shared.density = choice;
-                    shared.change_settings(|settings| settings.density = choice);
                 }
             }
             ui.add_space(8.0);

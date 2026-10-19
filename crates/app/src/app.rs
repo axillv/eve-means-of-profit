@@ -88,16 +88,21 @@ pub struct Shared {
 }
 
 impl Shared {
-    /// Changes the saved settings. A save that fails becomes an error notice.
-    pub fn change_settings(&mut self, change: impl FnOnce(&mut Settings)) {
+    /// Changes the saved settings. Returns whether the change was saved; a save that fails
+    /// becomes an error notice.
+    pub fn change_settings(&mut self, change: impl FnOnce(&mut Settings)) -> bool {
         let saved = self.store.settings().and_then(|mut settings| {
             change(&mut settings);
             self.store.save_settings(&settings)
         });
-        if let Err(error) = saved {
-            self.notices.push(Notice::error(format!(
-                "Could not save the settings: {error}"
-            )));
+        match saved {
+            Ok(()) => true,
+            Err(error) => {
+                self.notices.push(Notice::error(format!(
+                    "Could not save the settings: {error}"
+                )));
+                false
+            }
         }
     }
 }
@@ -368,6 +373,11 @@ impl App {
                     } else {
                         self.startup = Startup::Ready;
                     }
+                }
+                Err(error) if update => {
+                    self.shared.notices.push(Notice::error(format!(
+                        "Could not open the game data: {error}"
+                    )));
                 }
                 Err(error) => {
                     self.fail(format!("Could not open the game data: {error}"));

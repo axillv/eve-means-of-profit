@@ -90,3 +90,14 @@ fn fraction(done: u64, total: Option<u64>) -> f32 {
         u16::try_from(u128::from(done.min(total)) * 1000 / u128::from(total)).unwrap_or(1000);
     f32::from(permille) / 1000.0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_zero_total_gives_no_progress() {
+        assert_eq!(fraction(0, Some(0)), 0.0);
+        assert_eq!(fraction(5, Some(0)), 0.0);
+    }
+}

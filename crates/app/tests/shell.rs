@@ -65,6 +65,8 @@ mod tests {
         pause: Duration,
         asked: Arc<Mutex<Vec<String>>>,
         hold: Option<(usize, Mutex<Receiver<()>>)>,
+        /// When set, the download fails with this network error before sending anything.
+        fail_download: Option<String>,
     }
 
     impl Fake {
@@ -75,7 +77,13 @@ mod tests {
                 pause: Duration::from_millis(20),
                 asked: Arc::new(Mutex::new(Vec::new())),
                 hold: None,
+                fail_download: None,
             }
+        }
+
+        fn failing_download(mut self, reason: &str) -> Self {
+            self.fail_download = Some(reason.to_owned());
+            self
         }
 
         fn paused(mut self, pause: Duration) -> Self {
@@ -116,6 +124,9 @@ mod tests {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(url.to_owned());
+            if let Some(reason) = &self.fail_download {
+                return Err(FetchError::Network(reason.clone()));
+            }
             let total = u64::try_from(self.zip.len()).unwrap_or(u64::MAX);
             let piece_len = self.zip.len().div_ceil(4);
             let mut done = 0;
@@ -137,6 +148,18 @@ mod tests {
                 if progress(done, Some(total)).is_break() {
                     return Err(FetchError::Cancelled);
                 }
+            }
+            // A hold on the chunk after the last one stops the download between the last byte and
+            // the end of the reply, which is where the start-up shows "Importing game data…".
+            if let Some((chunk, release)) = &self.hold
+                && *chunk == self.zip.chunks(piece_len).count()
+                && release
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .recv()
+                    .is_err()
+            {
+                return Err(FetchError::Cancelled);
             }
             Ok(done)
         }
@@ -294,6 +317,77 @@ mod tests {
         assert!(folders.sde_db().is_file());
         let mut store = Store::open(&folders.user_db(), NOW).unwrap();
         assert_eq!(store.settings().unwrap().last_sde_check, Some(NOW));
+    }
+
+    #[test]
+    fn the_rail_offers_build_and_setup_once_the_pages_are_shown() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(990_000);
+        let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
+        until(&mut harness, "the build pages", build_page_shown);
+        assert_eq!(harness.query_all_by_label("Build").count(), 1);
+        assert_eq!(harness.query_all_by_label("Setup").count(), 1);
+        harness.get_by_label("Setup").click();
+        until(&mut harness, "the setup panels", |h| shown(h, "Price rule"));
+        harness.get_by_label("Build").click();
+        until(&mut harness, "the build pages again", build_page_shown);
+    }
+
+    #[test]
+    fn the_locked_pages_show_each_panel_title_once_and_no_tab_bar() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(990_000);
+        let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
+        until(&mut harness, "the build pages", build_page_shown);
+        for panel in ["Plans", "Pasted stock", "Plan", "Steps", "Buy list"] {
+            assert_eq!(harness.query_all_by_label(panel).count(), 1, "{panel}");
+        }
+        harness.get_by_label("Setup").click();
+        until(&mut harness, "the setup panels", |h| shown(h, "Price rule"));
+        for panel in ["Facilities", "Freight services", "Price rule"] {
+            assert_eq!(harness.query_all_by_label(panel).count(), 1, "{panel}");
+        }
+    }
+
+    #[test]
+    fn a_failed_first_download_shows_the_error_and_try_again() {
+        let folders = Folders::new();
+        let fake = Fake::new(Latest::Body(latest_body(BUILD))).failing_download("connection reset");
+        let mut harness = start(fake, &folders);
+        let text = "Could not get the game data: cannot reach the server: connection reset";
+        until(&mut harness, "the error text", |h| shown(h, text));
+        assert_eq!(harness.query_all_by_label(text).count(), 2);
+        assert!(shown(&harness, "ERROR"));
+        assert!(shown(&harness, "Try again"));
+    }
+
+    #[test]
+    fn the_status_line_shows_the_update_progress_while_the_download_runs() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(900_000);
+        let (release, gate) = mpsc::channel();
+        let fake = Fake::new(Latest::Body(latest_body(3_607_800))).held(1, gate);
+        let mut harness = start(fake, &folders);
+        until(&mut harness, "the notice", |h| {
+            shown(h, "Game data build 3607800 is available.")
+        });
+        harness.get_by_label("Update").click();
+        until(&mut harness, "the update progress", |h| {
+            h.query_all_by_label_contains("Updating game data:")
+                .next()
+                .is_some()
+        });
+        release
+            .send(())
+            .expect("the download is waiting for the release");
+        until(&mut harness, "the update error", |h| {
+            h.query_all_by_label_contains("Could not update the game data: ")
+                .next()
+                .is_some()
+        });
     }
 
     #[test]
@@ -498,5 +592,55 @@ mod tests {
             )
         });
         harness.snapshot("shell-status-error");
+    }
+
+    #[test]
+    fn the_importing_screen_shows_until_the_import_ends() {
+        let folders = Folders::new();
+        let (release, gate) = mpsc::channel();
+        let fake = Fake::new(Latest::Body(latest_body(BUILD))).held(4, gate);
+        let mut harness = start(fake, &folders);
+        until(&mut harness, "the importing text", |h| {
+            shown(h, "Importing game data…")
+        });
+        release
+            .send(())
+            .expect("the download is waiting for the release");
+        until(&mut harness, "the build pages", build_page_shown);
+    }
+
+    #[test]
+    fn a_failed_daily_check_shows_an_error_notice() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(900_000);
+        let mut harness = start(Fake::new(Latest::Status(503)), &folders);
+        until(&mut harness, "the check error", |h| {
+            shown(
+                h,
+                "Could not check for new game data: the server answered with status 503",
+            )
+        });
+        assert!(shown(&harness, "ERROR"));
+    }
+
+    #[test]
+    fn update_downloads_in_the_background_and_a_bad_download_is_reported() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(900_000);
+        let mut harness = start(Fake::new(Latest::Body(latest_body(3_607_800))), &folders);
+        until(&mut harness, "the notice", |h| {
+            shown(h, "Game data build 3607800 is available.")
+        });
+        harness.get_by_label("Update").click();
+        // The fixture zip is build 3607705, so the update is refused after the download.
+        until(&mut harness, "the update error", |h| {
+            shown(
+                h,
+                "Could not update the game data: the download is build 3607705, but build 3607800 was asked for",
+            )
+        });
+        assert!(!shown(&harness, "Update"));
     }
 }
