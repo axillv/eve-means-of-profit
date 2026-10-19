@@ -54,6 +54,106 @@ pub(crate) struct Grammar {
 
 /// Parses trimmed decimal text into a count of 10^-4 units, exact or an error.
 pub(crate) fn parse_scaled(text: &str, grammar: Grammar) -> Result<i64, ParseNumberError> {
+    parse_to_scale(text, grammar, SCALE)
+}
+
+/// Parses trimmed decimal text into a count of 10^-`scale` units, exact or an error.
+pub(crate) fn parse_to_scale(
+    text: &str,
+    grammar: Grammar,
+    scale: u32,
+) -> Result<i64, ParseNumberError> {
+    let parts = split_number(text, grammar)?;
+    if !grammar.game_data && len_i64(parts.fraction)? > i64::from(scale) {
+        return Err(ParseNumberError::TooManyDecimals);
+    }
+    let kept = parts.fraction.trim_end_matches('0');
+    let digits = parts
+        .integer
+        .chars()
+        .chain(kept.chars())
+        .filter_map(|c| c.to_digit(10));
+    let mut value: u128 = 0;
+    for digit in digits {
+        value = value
+            .checked_mul(10)
+            .and_then(|v| v.checked_add(u128::from(digit)))
+            .ok_or(ParseNumberError::OutOfRange)?;
+    }
+    let shift = parts
+        .exponent
+        .checked_add(i64::from(scale))
+        .and_then(|shift| shift.checked_sub(len_i64(kept).ok()?))
+        .ok_or(ParseNumberError::OutOfRange)?;
+    to_signed(shift_decimal(value, shift)?, parts.negative)
+}
+
+/// Parses game data text exactly, then rounds to a count of 10^-4 units, half away from zero.
+///
+/// Only the first digit past the fourth decimal is looked at: from 5 up the value rounds up, so
+/// the digits after it cannot change the result. The place of the decimal point is worked out as
+/// a number, not by moving digit by digit, so long text and large exponents stay cheap.
+pub(crate) fn parse_rounded(text: &str, grammar: Grammar) -> Result<i64, ParseNumberError> {
+    let parts = split_number(text, grammar)?;
+    let mut significant = parts
+        .integer
+        .chars()
+        .chain(parts.fraction.chars())
+        .filter_map(|c| c.to_digit(10))
+        .skip_while(|digit| *digit == 0);
+    // The rounded value keeps at most 19 digits and the first dropped digit is at most the 20th,
+    // so the first 20 significant digits decide everything.
+    let head: Vec<u32> = significant.by_ref().take(20).collect();
+    if head.is_empty() {
+        return Ok(0);
+    }
+    let count = head
+        .len()
+        .checked_add(significant.count())
+        .ok_or(ParseNumberError::OutOfRange)?;
+    // Digits before the decimal point of the value in 10^-4 units: the count shifted by the
+    // exponent, minus the decimals of the text, plus the four decimals kept.
+    let shift = i128::from(parts.exponent)
+        .checked_sub(i128::from(len_i64(parts.fraction)?))
+        .and_then(|shift| shift.checked_add(i128::from(SCALE)))
+        .ok_or(ParseNumberError::OutOfRange)?;
+    let places = i128::try_from(count)
+        .ok()
+        .and_then(|count| count.checked_add(shift))
+        .ok_or(ParseNumberError::OutOfRange)?;
+    if places < 0 {
+        // Below 0.1 units: rounds to zero.
+        return Ok(0);
+    }
+    let places = usize::try_from(places)
+        .ok()
+        .filter(|places| *places <= 19)
+        .ok_or(ParseNumberError::OutOfRange)?;
+    let mut kept: u128 = 0;
+    for position in 0..places {
+        // Past the significant digits the value has zeros.
+        let digit = head.get(position).copied().unwrap_or(0);
+        kept = kept
+            .checked_mul(10)
+            .and_then(|v| v.checked_add(u128::from(digit)))
+            .ok_or(ParseNumberError::OutOfRange)?;
+    }
+    if head.get(places).copied().unwrap_or(0) >= 5 {
+        kept = kept.checked_add(1).ok_or(ParseNumberError::OutOfRange)?;
+    }
+    to_signed(kept, parts.negative)
+}
+
+/// The parts of a number: sign, integer digits, fraction digits (never ending in `.`), power of ten.
+struct Parts<'a> {
+    negative: bool,
+    integer: &'a str,
+    fraction: &'a str,
+    exponent: i64,
+}
+
+/// Checks the shape of number text under `grammar` and splits it into parts.
+fn split_number(text: &str, grammar: Grammar) -> Result<Parts<'_>, ParseNumberError> {
     if text.is_empty() {
         return Err(ParseNumberError::Empty);
     }
@@ -69,26 +169,12 @@ pub(crate) fn parse_scaled(text: &str, grammar: Grammar) -> Result<i64, ParseNum
     if !valid_integer(integer, grammar.grouping) || !fraction_ok {
         return Err(ParseNumberError::Invalid);
     }
-    if !grammar.game_data && len_i64(fraction)? > i64::from(SCALE) {
-        return Err(ParseNumberError::TooManyDecimals);
-    }
-    let kept = fraction.trim_end_matches('0');
-    let digits = integer
-        .chars()
-        .chain(kept.chars())
-        .filter_map(|c| c.to_digit(10));
-    let mut value: u128 = 0;
-    for digit in digits {
-        value = value
-            .checked_mul(10)
-            .and_then(|v| v.checked_add(u128::from(digit)))
-            .ok_or(ParseNumberError::OutOfRange)?;
-    }
-    let shift = exponent
-        .checked_add(i64::from(SCALE))
-        .and_then(|shift| shift.checked_sub(len_i64(kept).ok()?))
-        .ok_or(ParseNumberError::OutOfRange)?;
-    to_signed(shift_decimal(value, shift)?, negative)
+    Ok(Parts {
+        negative,
+        integer,
+        fraction,
+        exponent,
+    })
 }
 
 /// Splits `12.345` into its integer and fraction digits; a fraction is never empty.

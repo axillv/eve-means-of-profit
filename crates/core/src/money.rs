@@ -6,11 +6,16 @@
     clippy::integer_division
 )]
 
-use crate::decimal::{Grammar, ParseNumberError, UNIT, div_round, fixed_2, parse_scaled, plain};
+use crate::decimal::{
+    Grammar, ParseNumberError, UNIT, div_round, fixed_2, parse_rounded, parse_scaled,
+    parse_to_scale, plain,
+};
 use crate::volume::Volume;
 
 /// A rate of 100% in parts per million.
 const FULL_RATE_PPM: u32 = 1_000_000;
+/// Decimals a fraction of one keeps: a rate is counted in parts per million.
+const PPM_DECIMALS: u32 = 6;
 
 /// An amount of ISK, counted in ten-thousandths of ISK (0.0001).
 ///
@@ -49,6 +54,19 @@ impl Money {
             game_data: true,
         };
         parse_scaled(text.trim(), grammar).map(Money)
+    }
+
+    /// Parses number text from ESI and jEve, long floats included: `3.1391360812857907`, `6.04675937223E9`.
+    ///
+    /// Any number of decimals and an exponent are accepted. The exact value is rounded once, half
+    /// away from zero, to 0.0001 ISK; a result that does not fit is `OutOfRange`.
+    pub fn parse_decimal_rounded(text: &str) -> Result<Money, ParseNumberError> {
+        let grammar = Grammar {
+            negative: true,
+            grouping: false,
+            game_data: true,
+        };
+        parse_rounded(text.trim(), grammar).map(Money)
     }
 
     pub fn checked_add(self, other: Money) -> Option<Money> {
@@ -125,6 +143,24 @@ impl Rate {
             .ok_or(ParseNumberError::OutOfRange)
     }
 
+    /// Parses a fraction of one as game data writes it: `0.1672` is 16.72%.
+    ///
+    /// Exact up to six decimals; more decimals are `TooManyDecimals`, not rounded. Below 0 or
+    /// above 1 is `OutOfRange`.
+    pub fn parse_fraction(text: &str) -> Result<Rate, ParseNumberError> {
+        let grammar = Grammar {
+            negative: true,
+            grouping: false,
+            game_data: true,
+        };
+        let ppm = parse_to_scale(text.trim(), grammar, PPM_DECIMALS)?;
+        u32::try_from(ppm)
+            .ok()
+            .filter(|ppm| *ppm <= FULL_RATE_PPM)
+            .map(Rate)
+            .ok_or(ParseNumberError::OutOfRange)
+    }
+
     /// The exact percentage without trailing zeros; `parse_percent` reads it back.
     pub fn to_percent_string(self) -> String {
         plain(i64::from(self.0))
@@ -190,6 +226,67 @@ mod tests {
         assert_eq!(Money::parse_decimal("+1"), Err(Invalid));
         assert_eq!(Money::parse_decimal("1e20"), Err(OutOfRange));
         assert_eq!(Money::parse_decimal(""), Err(Empty));
+    }
+
+    #[test]
+    fn long_decimals_round_to_the_ten_thousandth() {
+        let read = Money::parse_decimal_rounded;
+        assert_eq!(read("3.1391360812857907"), Ok(m(31_391)));
+        assert_eq!(read("20964.106768525708"), Ok(m(209_641_068)));
+        assert_eq!(read("41616.53506156706"), Ok(m(416_165_351)));
+        assert_eq!(read("9.0"), Ok(m(90_000)));
+        assert_eq!(read("478.6"), Ok(m(4_786_000)));
+    }
+
+    #[test]
+    fn long_decimals_round_half_away_from_zero() {
+        let read = Money::parse_decimal_rounded;
+        assert_eq!(read("0.00005"), Ok(m(1)));
+        assert_eq!(read("-0.00005"), Ok(m(-1)));
+        assert_eq!(read("0.000049999999"), Ok(m(0)));
+        assert_eq!(read("-0.000049999999"), Ok(m(0)));
+        assert_eq!(read("0.00015"), Ok(m(2)));
+        assert_eq!(read("0.000150000000000000000001"), Ok(m(2)));
+        assert_eq!(read("0.00014999"), Ok(m(1)));
+    }
+
+    #[test]
+    fn long_decimals_read_exponents() {
+        let read = Money::parse_decimal_rounded;
+        assert_eq!(read("6.04675937223E9"), Ok(m(60_467_593_722_300)));
+        assert_eq!(read("2.252799953559E10"), Ok(m(225_279_995_355_900)));
+        assert_eq!(read("1.23456789e8"), Ok(m(1_234_567_890_000)));
+        assert_eq!(read("5e-5"), Ok(m(1)));
+        assert_eq!(read("1e-5"), Ok(m(0)));
+        assert_eq!(read("1E+3"), Ok(m(10_000_000)));
+        assert_eq!(read("1e-100000"), Ok(m(0)));
+        assert_eq!(read("0.30000000000000004"), Ok(m(3_000)));
+    }
+
+    #[test]
+    fn long_decimals_check_the_range() {
+        let read = Money::parse_decimal_rounded;
+        assert_eq!(read("922337203685477.58074"), Ok(m(i64::MAX)));
+        assert_eq!(read("922337203685477.58075"), Err(OutOfRange));
+        assert_eq!(read("-922337203685477.58085"), Err(OutOfRange));
+        assert_eq!(read("1e100000"), Err(OutOfRange));
+        let tiny = format!("0.{}1", "0".repeat(10_000));
+        assert_eq!(read(&tiny), Ok(m(0)));
+    }
+
+    #[test]
+    fn long_decimals_name_what_is_wrong() {
+        let read = Money::parse_decimal_rounded;
+        assert_eq!(read(""), Err(Empty));
+        assert_eq!(read("  "), Err(Empty));
+        for text in ["abc", "1.2.3", "1,000.5", "--1", "1e"] {
+            assert_eq!(read(text), Err(Invalid), "{text}");
+        }
+    }
+
+    #[test]
+    fn parse_decimal_still_refuses_a_fifth_decimal() {
+        assert_eq!(Money::parse_decimal("3.13913"), Err(TooManyDecimals));
     }
 
     #[test]
@@ -321,6 +418,22 @@ mod tests {
         assert_eq!(Rate::parse_percent("-1"), Err(Invalid));
         assert_eq!(Rate::parse_percent("1%"), Err(Invalid));
         assert_eq!(Rate::parse_percent(""), Err(Empty));
+    }
+
+    #[test]
+    fn fraction_reads_game_data_rates() {
+        let read = Rate::parse_fraction;
+        assert_eq!(read("0.1672"), Ok(Rate::from_ppm(167_200)));
+        assert_eq!(read("0.0014"), Ok(Rate::from_ppm(1_400)));
+        assert_eq!(read("0.0679"), Ok(Rate::from_ppm(67_900)));
+        assert_eq!(read("0"), Ok(Rate::from_ppm(0)));
+        assert_eq!(read("1"), Ok(Rate::from_ppm(1_000_000)));
+        assert_eq!(read("1.0"), Ok(Rate::from_ppm(1_000_000)));
+        assert_eq!(read("1.6e-1"), Ok(Rate::from_ppm(160_000)));
+        assert_eq!(read("0.0000001"), Err(TooManyDecimals));
+        assert_eq!(read("1.000001"), Err(OutOfRange));
+        assert_eq!(read("-0.1"), Err(OutOfRange));
+        assert_eq!(read(""), Err(Empty));
     }
 
     #[test]
