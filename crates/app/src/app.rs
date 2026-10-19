@@ -7,6 +7,7 @@
 pub mod build;
 pub mod dock;
 pub mod first_run;
+pub mod layout;
 pub mod rail;
 pub mod settings_window;
 pub mod setup;
