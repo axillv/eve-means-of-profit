@@ -1323,6 +1323,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "profit-store"
+version = "0.1.0"
+dependencies = [
+ "profit-core",
+ "profit-market",
+ "profit-sde",
+ "rusqlite",
+ "tempfile",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
