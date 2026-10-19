@@ -94,5 +94,7 @@ impl<T: Copy, B: FnMut(&mut Ui, T)> TabViewer for Locked<T, B> {
             });
         });
         (self.body)(ui, *tab);
+        // A copy asked for on a panel with no table is dropped, not kept for a table shown later.
+        ui.data_mut(|data| data.remove_temp::<bool>(copy_request(id)));
     }
 }

@@ -245,17 +245,21 @@ fn draw_header(
     }
 }
 
-/// A triangle for the sort direction, on the side of the cell away from its text.
-fn sort_mark(ui: &Ui, cell: Rect, kind: ColumnKind, direction: Direction, color: Color32) {
+/// The corners of the sort triangle for the sort direction, on the side of the cell away from its text.
+pub fn sort_mark_points(cell: Rect, kind: ColumnKind, direction: Direction) -> Vec<Pos2> {
     let x = match kind {
         ColumnKind::Text => cell.max.x - MARK_INSET,
         ColumnKind::Number | ColumnKind::Money => cell.min.x + MARK_INSET,
     };
     let centre = pos2(x, cell.center().y);
-    let points = match direction {
+    match direction {
         Direction::Ascending => triangle(centre, 3.0, -3.0),
         Direction::Descending => triangle(centre, -3.0, 3.0),
-    };
+    }
+}
+
+fn sort_mark(ui: &Ui, cell: Rect, kind: ColumnKind, direction: Direction, color: Color32) {
+    let points = sort_mark_points(cell, kind, direction);
     ui.painter()
         .add(Shape::convex_polygon(points, color, PathStroke::NONE));
 }
@@ -348,6 +352,7 @@ fn draw_row(
     );
 
     // The arrow sits in the first column, after the indent of this row's depth.
+    // Depths past 65,535 levels are indented as 65,535: no tree is that deep, and the list still draws.
     let depth = f32::from(u16::try_from(row.depth).unwrap_or(u16::MAX));
     let mut arrow = None;
     for (position, (column, cell)) in look

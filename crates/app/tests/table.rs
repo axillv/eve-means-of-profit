@@ -16,7 +16,7 @@ mod tests {
         Cell, Column, ColumnKind, Direction, Row, row_height, row_range, sort_order, span, to_tsv,
         visible,
     };
-    use eve_means_of_profit::table::{Table, TableResponse};
+    use eve_means_of_profit::table::{Table, TableResponse, sort_mark_points};
     use eve_means_of_profit::theme::Style;
     use profit_core::money::Money;
     use profit_store::Density;
@@ -553,6 +553,54 @@ mod tests {
         assert_eq!(copied.len(), 1);
         assert!(copied[0].starts_with("Item\tNeed\tValue\nHobgoblin II\t10\t1000\n"));
         assert!(copied[0].ends_with("Rifter\t31\t2.125"));
+    }
+
+    #[test]
+    fn the_sort_triangle_points_up_when_ascending_and_down_when_descending() {
+        // A 100 by 20 cell, centred at y 10. Text marks sit at the right end, the others at the left.
+        let cell = egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 20.0));
+        assert_eq!(
+            sort_mark_points(cell, ColumnKind::Text, Direction::Ascending),
+            vec![pos2(88.0, 13.0), pos2(96.0, 13.0), pos2(92.0, 7.0)]
+        );
+        assert_eq!(
+            sort_mark_points(cell, ColumnKind::Text, Direction::Descending),
+            vec![pos2(88.0, 7.0), pos2(96.0, 7.0), pos2(92.0, 13.0)]
+        );
+        assert_eq!(
+            sort_mark_points(cell, ColumnKind::Money, Direction::Ascending),
+            vec![pos2(4.0, 13.0), pos2(12.0, 13.0), pos2(8.0, 7.0)]
+        );
+        assert_eq!(
+            sort_mark_points(cell, ColumnKind::Money, Direction::Descending),
+            vec![pos2(4.0, 7.0), pos2(12.0, 7.0), pos2(8.0, 13.0)]
+        );
+        assert_eq!(
+            sort_mark_points(cell, ColumnKind::Number, Direction::Descending),
+            vec![pos2(4.0, 7.0), pos2(12.0, 7.0), pos2(8.0, 13.0)]
+        );
+    }
+
+    #[test]
+    fn a_sort_change_and_a_fold_change_each_ask_for_a_repaint() {
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let mut harness = table_harness(
+            test_rows(),
+            None,
+            Density::Normal,
+            vec2(800.0, 400.0),
+            None,
+            &seen,
+        );
+        harness.run();
+        harness.get_by_label("Need").click();
+        harness.run_steps(1);
+        assert!(harness.ctx.has_requested_repaint());
+        harness.run();
+        let text = harness.get_by_label("Particle Accelerator Unit").rect();
+        click_at(&harness, pos2(text.min.x - 7.0, text.center().y));
+        harness.run_steps(1);
+        assert!(harness.ctx.has_requested_repaint());
     }
 
     #[test]

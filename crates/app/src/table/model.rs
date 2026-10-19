@@ -211,8 +211,8 @@ pub fn span(scroll_y: f32, view_height: f32, row_height: f32, count: usize) -> S
     }
     let top_edge = scroll_y.max(0.0);
     let bottom_edge = top_edge + view_height.max(0.0);
-    // The rows are walked, not converted: the index of a row is counted, so no decimal is turned
-    // into a whole number. Each row's top is the sum of the heights above it.
+    // Each row's top is the sum of the heights above it, accumulated in `f32`. The sum is exact
+    // for whole-point heights up to about 16.7 million points, far beyond any list shown here.
     let mut first = None; // (index, top, top of the row above) of the first row that touches the view
     let mut last = None; // index of the first row that starts below the view
     let mut above = 0.0_f32;
