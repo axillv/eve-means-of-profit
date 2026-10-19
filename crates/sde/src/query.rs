@@ -108,14 +108,28 @@ impl Sde {
     /// (words split at spaces and `-`), then any other match. Ties: the shorter name, then the name,
     /// then the id.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<TypeId>, SdeError> {
+        self.ranked_ids(
+            "SELECT type_id, name, name_lower FROM types
+             WHERE published = 1 AND instr(name_lower, ?1) > 0",
+            query,
+            limit,
+        )
+    }
+
+    /// The ids that `sql` selects for `query`, best match first, at most `limit` of them. `sql`
+    /// selects `(id, name, name_lower)` rows that contain the query as `?1`, already trimmed and
+    /// lower case. The rank and the ties are the same for every search.
+    pub(crate) fn ranked_ids(
+        &self,
+        sql: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<TypeId>, SdeError> {
         let needle = query.trim().to_lowercase();
         if needle.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
-        let mut statement = self.conn.prepare(
-            "SELECT type_id, name, name_lower FROM types
-             WHERE published = 1 AND instr(name_lower, ?1) > 0",
-        )?;
+        let mut statement = self.conn.prepare(sql)?;
         let mut ranked = statement
             .query_map(params![needle], |row| {
                 Ok((

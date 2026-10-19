@@ -47,6 +47,13 @@ pub enum SdeError {
         line: usize,
         group_id: u32,
     },
+    /// A map record refers to a system or region that the download does not list.
+    BadReference {
+        file: String,
+        line: usize,
+        field: String,
+        id: u32,
+    },
     /// A structure or rig is in the download's lists but has no record in the attribute file.
     NoDogma {
         file: String,
@@ -103,6 +110,12 @@ impl fmt::Display for SdeError {
                 f,
                 "{file} line {line}: group {group_id} is not in groups.jsonl"
             ),
+            Self::BadReference {
+                file,
+                line,
+                field,
+                id,
+            } => write!(f, "{file} line {line}: {field} {id} is not in the download"),
             Self::NoDogma { file, type_id } => {
                 write!(f, "{file}: type {type_id} has no attribute record")
             }
@@ -126,6 +139,7 @@ impl std::error::Error for SdeError {
             | Self::BadNumber { .. }
             | Self::UnknownType { .. }
             | Self::UnknownGroup { .. }
+            | Self::BadReference { .. }
             | Self::NoDogma { .. }
             | Self::TooLarge { .. }
             | Self::NotImported => None,

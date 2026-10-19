@@ -6,6 +6,7 @@ pub mod error;
 pub mod facility;
 pub mod fetch;
 pub mod import;
+pub mod map;
 pub mod query;
 pub mod schema;
 
@@ -16,4 +17,5 @@ pub use fetch::{
     update_due, zip_url,
 };
 pub use import::{ImportReport, import};
+pub use map::{MapError, RouteKind, SolarSystem, StarMap};
 pub use query::{Item, Sde, SdeBuild};

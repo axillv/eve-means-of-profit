@@ -77,6 +77,9 @@ mod tests {
             rigs: 6,
             skipped_unpublished: 1,
             duplicates: 0,
+            systems: 88,
+            stargates: 224,
+            regions: 1,
         }
     }
 
