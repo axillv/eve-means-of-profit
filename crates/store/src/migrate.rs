@@ -9,8 +9,12 @@ use rusqlite::{Connection, params};
 
 use crate::error::{Result, StoreError};
 
-/// Every schema change, oldest first: (version, name, SQL). Version 1 creates the first schema.
-pub(crate) const MIGRATIONS: &[(u32, &str, &str)] = &[(1, "initial", INITIAL_SCHEMA)];
+/// Every schema change, oldest first: (version, name, SQL). Version 1 creates the first schema and
+/// version 2 the net worth history.
+pub(crate) const MIGRATIONS: &[(u32, &str, &str)] = &[
+    (1, "initial", INITIAL_SCHEMA),
+    (2, "net worth", NET_WORTH_SCHEMA),
+];
 
 const INITIAL_SCHEMA: &str = "
 CREATE TABLE facilities (
@@ -75,6 +79,56 @@ CREATE TABLE settings (
     default_price_rule INTEGER NOT NULL,
     density INTEGER NOT NULL,
     last_sde_check INTEGER
+);
+";
+
+const NET_WORTH_SCHEMA: &str = "
+CREATE TABLE item_sets (
+    id INTEGER PRIMARY KEY
+);
+CREATE TABLE item_set_items (
+    set_id INTEGER NOT NULL REFERENCES item_sets (id),
+    type_id INTEGER NOT NULL CHECK (type_id >= 0),
+    units INTEGER NOT NULL CHECK (units >= 0),
+    PRIMARY KEY (set_id, type_id)
+);
+CREATE TABLE net_worth_records (
+    id INTEGER PRIMARY KEY,
+    character_id INTEGER CHECK (character_id >= 0),
+    character_name TEXT CHECK (length(character_name) > 0),
+    at INTEGER NOT NULL,
+    kind INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 2),
+    wallet INTEGER CHECK (wallet >= 0),
+    sell_orders INTEGER CHECK (sell_orders >= 0),
+    buy_escrow INTEGER CHECK (buy_escrow >= 0),
+    assets_set INTEGER REFERENCES item_sets (id),
+    jobs_set INTEGER REFERENCES item_sets (id),
+    CHECK ((character_id IS NULL) <> (character_name IS NULL))
+);
+CREATE INDEX net_worth_records_by_at ON net_worth_records (at);
+CREATE INDEX net_worth_records_by_character ON net_worth_records (character_id, character_name, at);
+CREATE TABLE net_worth_imported (
+    record_id INTEGER NOT NULL REFERENCES net_worth_records (id),
+    part INTEGER NOT NULL CHECK (part BETWEEN 0 AND 7),
+    amount INTEGER NOT NULL CHECK (amount >= 0),
+    PRIMARY KEY (record_id, part)
+) WITHOUT ROWID;
+CREATE TABLE item_prices (
+    day INTEGER NOT NULL,
+    type_id INTEGER NOT NULL CHECK (type_id >= 0),
+    lowest_sell INTEGER CHECK (lowest_sell >= 0),
+    highest_buy INTEGER CHECK (highest_buy >= 0),
+    average INTEGER CHECK (average >= 0),
+    PRIMARY KEY (day, type_id)
+) WITHOUT ROWID;
+CREATE INDEX item_prices_by_type ON item_prices (type_id, day);
+CREATE TABLE net_worth_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    basis INTEGER NOT NULL CHECK (basis BETWEEN 0 AND 3)
+);
+CREATE TABLE net_worth_shown (
+    id INTEGER PRIMARY KEY,
+    part INTEGER NOT NULL UNIQUE CHECK (part BETWEEN 0 AND 7)
 );
 ";
 
@@ -219,5 +273,74 @@ mod tests {
         assert_eq!(version_of(&path), 1);
         assert_eq!(migration_rows(&path), 1);
         assert!(dir.path().join("eve.db.before-v2").exists());
+    }
+
+    fn hobgoblin() -> crate::PlanRecord {
+        crate::PlanRecord {
+            id: 0,
+            name: "Hobgoblin 10".to_owned(),
+            product: 2456,
+            quantity: 10,
+            build: std::collections::BTreeSet::from([2454]),
+            me: std::collections::BTreeMap::from([(2456, 2)]),
+            manufacturing: None,
+            reactions: None,
+            price_rule: profit_market::book::PriceRule::LowestSell,
+            route: None,
+            service: None,
+            packing: profit_core::freight::Packing::FillOnly,
+            pasted_stock: "Tritanium\t1,000".to_owned(),
+            created_at: 1_000,
+            updated_at: 1_000,
+        }
+    }
+
+    #[test]
+    fn a_version_one_file_is_kept_aside_and_upgraded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eve.db");
+        let plan = hobgoblin();
+        let mut store = open_with(&path, 1_000, &[(1, "initial", INITIAL_SCHEMA)]).expect("v1");
+        let id = store.create_plan(&plan, 1_000).expect("plan");
+        drop(store);
+        let before = std::fs::read(&path).expect("read");
+
+        let mut upgraded = Store::open(&path, 5_000).expect("upgrade");
+
+        assert_eq!(
+            std::fs::read(dir.path().join("eve.db.before-v2")).expect("backup"),
+            before
+        );
+        assert_eq!(version_of(&path), 2);
+        let conn = Connection::open(&path).expect("open");
+        let rows: Vec<(u32, String, i64)> = conn
+            .prepare("SELECT version, name, applied_at FROM migrations ORDER BY version")
+            .expect("prepare")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(
+            rows,
+            vec![
+                (1, "initial".to_owned(), 1_000),
+                (2, "net worth".to_owned(), 5_000)
+            ]
+        );
+        assert_eq!(
+            upgraded.plan(id).expect("plan"),
+            Some(crate::PlanRecord { id, ..plan })
+        );
+    }
+
+    #[test]
+    fn a_new_file_starts_at_version_two_without_a_backup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eve.db");
+
+        drop(Store::open(&path, 1_000).expect("open"));
+
+        assert_eq!(version_of(&path), 2);
+        assert!(!dir.path().join("eve.db.before-v2").exists());
     }
 }

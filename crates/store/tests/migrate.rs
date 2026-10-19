@@ -25,16 +25,19 @@ mod tests {
     }
 
     #[test]
-    fn new_file_is_at_version_one_with_no_backup() {
+    fn new_file_is_at_the_newest_version_with_no_backup() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("eve.db");
 
         drop(Store::open(&path, 1_000).expect("open"));
 
-        assert_eq!(version_of(&path), 1);
+        assert_eq!(version_of(&path), 2);
         assert_eq!(
             migration_rows(&path),
-            vec![(1, "initial".to_owned(), 1_000)]
+            vec![
+                (1, "initial".to_owned(), 1_000),
+                (2, "net worth".to_owned(), 1_000)
+            ]
         );
         assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 1);
     }
@@ -50,7 +53,10 @@ mod tests {
 
         assert_eq!(
             migration_rows(&path),
-            vec![(1, "initial".to_owned(), 1_000)]
+            vec![
+                (1, "initial".to_owned(), 1_000),
+                (2, "net worth".to_owned(), 1_000)
+            ]
         );
         assert_eq!(std::fs::read(&path).expect("read"), before);
         assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 1);
@@ -73,7 +79,7 @@ mod tests {
             err,
             profit_store::StoreError::NewerSchema {
                 found: 99,
-                known: 1
+                known: 2
             }
         ));
         assert_eq!(std::fs::read(&path).expect("read"), before);
