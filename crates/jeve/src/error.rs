@@ -34,6 +34,9 @@ pub enum JeveError {
     },
     /// The Tracker file is not JSON, or not the object-of-lists shape jEveAssets writes.
     TrackerNotJson { reason: String },
+    /// The stockpile file cannot be read; the reason is in words the owner can act on, and never
+    /// quotes the file's other settings.
+    StockpilesBad(String),
     /// Any other SQLite error.
     Sqlite(rusqlite::Error),
 }
@@ -90,6 +93,7 @@ impl fmt::Display for JeveError {
                 f,
                 "the Tracker file is not in the format this app reads: {reason}"
             ),
+            Self::StockpilesBad(reason) => write!(f, "cannot read the stockpiles: {reason}"),
             Self::Sqlite(error) => write!(f, "could not read the profile: {error}"),
         }
     }
@@ -106,7 +110,8 @@ impl std::error::Error for JeveError {
             | Self::BadValue { .. }
             | Self::TooManyRows { .. }
             | Self::TrackerBadData { .. }
-            | Self::TrackerNotJson { .. } => None,
+            | Self::TrackerNotJson { .. }
+            | Self::StockpilesBad(_) => None,
         }
     }
 }

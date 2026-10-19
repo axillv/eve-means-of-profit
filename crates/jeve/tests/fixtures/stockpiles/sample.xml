@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<settings>
+<proxy address="127.0.0.1" password="secret-do-not-read"/>
+<stockpiles>
+<stockpile name="Kit" multiplier="1.0" stockpilegroup="Drones" matchall="false">
+<item typeid="34" minimum="1.0E7" runs="false" ignoremultiplier="false"/>
+<item typeid="2456" minimum="2.5" runs="false" ignoremultiplier="true"/>
+<item typeid="-2457" minimum="1.0" runs="false" ignoremultiplier="false"/>
+<item typeid="2457" minimum="10.0" runs="true" ignoremultiplier="false"/>
+<item typeid="0" minimum="0.0" runs="false" ignoremultiplier="false"/>
+<item typeid="99999999" minimum="5.0" runs="false" ignoremultiplier="false"/>
+<stockpilefilter locationid="60003760" sellingcontracts="false" soldcontracts="false" buyingcontracts="false" boughtcontracts="false" exclude="false" inventory="true" sellorders="true" buyorders="false" buytransactions="false" selltransactions="false" jobs="false">
+<owner ownerid="2112000001"/>
+<container container="Sell" includecontainer="false"/>
+</stockpilefilter>
+<stockpilefilter locationid="20000020" sellingcontracts="false" soldcontracts="false" buyingcontracts="false" boughtcontracts="false" exclude="false" inventory="true" sellorders="false" buyorders="false" buytransactions="false" selltransactions="false" jobs="false"/>
+<stockpilefilter locationid="30000142" sellingcontracts="false" soldcontracts="false" buyingcontracts="false" boughtcontracts="false" exclude="true" inventory="true" sellorders="false" buyorders="false" buytransactions="false" selltransactions="false" jobs="false"/>
+<stockpilefilter locationid="10000002" sellingcontracts="true" soldcontracts="false" buyingcontracts="false" boughtcontracts="false" exclude="false" inventory="false" sellorders="false" buyorders="false" buytransactions="false" selltransactions="false" jobs="false"/>
+</stockpile>
+<stockpile name="Weekly" multiplier="2.0" matchall="false">
+<item typeid="35" minimum="7.0" runs="false" ignoremultiplier="true"/>
+<subpile name="Kit" minimum="3.0"/>
+<subpile name="Missing" minimum="1.0"/>
+</stockpile>
+<stockpile name="Half" multiplier="1.5" matchall="false">
+<item typeid="34" minimum="100.0" runs="false" ignoremultiplier="false"/>
+<item typeid="34" minimum="50.0" runs="false" ignoremultiplier="false"/>
+<subpile name="Weekly" minimum="0.5"/>
+<stockpilefilter locationid="0" sellingcontracts="false" soldcontracts="false" buyingcontracts="false" boughtcontracts="false" exclude="false" inventory="true" sellorders="false" buyorders="false" buytransactions="false" selltransactions="false" jobs="true"/>
+</stockpile>
+</stockpiles>
+</settings>

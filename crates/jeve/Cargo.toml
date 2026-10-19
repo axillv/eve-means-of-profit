@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 profit-core = { version = "0.1.0", path = "../core" }
+roxmltree = "0.21.1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = "1.0.229"
 serde_json = { version = "1.0.154", features = ["arbitrary_precision"] }
