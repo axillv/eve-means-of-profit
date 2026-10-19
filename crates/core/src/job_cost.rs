@@ -157,6 +157,7 @@ pub fn job_cost(
     adjusted: &BTreeMap<TypeId, Money>,
     setup: &CostSetup,
 ) -> Result<StepCost, JobCostError> {
+    check_multiplier(setup)?;
     if runs == 0 {
         return Ok(StepCost::none());
     }
@@ -199,6 +200,16 @@ pub fn step_cost(
     };
     let last = job_cost(materials, split.last_job_runs, adjusted, setup)?;
     full.plus(last)
+}
+
+/// A structure multiplier above 100 hundredths is an error, whatever the run count.
+fn check_multiplier(setup: &CostSetup) -> Result<(), JobCostError> {
+    match setup.structure_multiplier {
+        Some(multiplier) if multiplier > FULL_MULTIPLIER => {
+            Err(JobCostError::BadMultiplier(multiplier))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// The system, bonus, tax and surcharge parts of a job whose estimated item value is `item_value`.
@@ -500,6 +511,15 @@ mod tests {
             job_cost(
                 &[(1, 1)],
                 10,
+                &prices(&[(1, "1")]),
+                &setup(167_200, Some(101), 0)
+            ),
+            Err(JobCostError::BadMultiplier(101))
+        );
+        assert_eq!(
+            job_cost(
+                &[(1, 1)],
+                0,
                 &prices(&[(1, "1")]),
                 &setup(167_200, Some(101), 0)
             ),
