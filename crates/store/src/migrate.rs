@@ -9,12 +9,14 @@ use rusqlite::{Connection, params};
 
 use crate::error::{Result, StoreError};
 
-/// Every schema change, oldest first: (version, name, SQL). Version 1 creates the first schema and
-/// version 2 the net worth history and version 3 the structure names the user typed.
+/// Every schema change, oldest first: (version, name, SQL). Version 1 creates the first schema,
+/// version 2 the net worth history, version 3 the structure names the user typed and version 4
+/// the stockpiles.
 pub(crate) const MIGRATIONS: &[(u32, &str, &str)] = &[
     (1, "initial", INITIAL_SCHEMA),
     (2, "net worth", NET_WORTH_SCHEMA),
     (3, "structure names", STRUCTURE_NAMES_SCHEMA),
+    (4, "stockpiles", STOCKPILES_SCHEMA),
 ];
 
 const INITIAL_SCHEMA: &str = "
@@ -139,6 +141,48 @@ CREATE TABLE structure_names (
     name TEXT NOT NULL,
     set_at INTEGER NOT NULL
 );
+";
+
+const STOCKPILES_SCHEMA: &str = "
+CREATE TABLE stockpiles (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL CHECK (length(name) > 0),
+    group_name TEXT,
+    multiplier INTEGER NOT NULL CHECK (multiplier >= 1),
+    position INTEGER NOT NULL CHECK (position >= 0)
+);
+CREATE TABLE stockpile_targets (
+    stockpile INTEGER NOT NULL REFERENCES stockpiles (id) ON DELETE CASCADE,
+    type INTEGER NOT NULL CHECK (type >= 0),
+    units INTEGER NOT NULL CHECK (units >= 1),
+    ignore_multiplier INTEGER NOT NULL CHECK (ignore_multiplier IN (0, 1)),
+    PRIMARY KEY (stockpile, type)
+) WITHOUT ROWID;
+CREATE TABLE stockpile_includes (
+    parent INTEGER NOT NULL REFERENCES stockpiles (id) ON DELETE CASCADE,
+    child INTEGER NOT NULL REFERENCES stockpiles (id) ON DELETE RESTRICT,
+    count INTEGER NOT NULL CHECK (count >= 1),
+    PRIMARY KEY (parent, child),
+    CHECK (parent <> child)
+) WITHOUT ROWID;
+CREATE TABLE stockpile_filters (
+    id INTEGER PRIMARY KEY,
+    stockpile INTEGER NOT NULL REFERENCES stockpiles (id) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    place_kind INTEGER NOT NULL CHECK (place_kind BETWEEN 0 AND 3),
+    place_id INTEGER CHECK (place_id >= 0),
+    assets INTEGER NOT NULL CHECK (assets IN (0, 1)),
+    sell_orders INTEGER NOT NULL CHECK (sell_orders IN (0, 1)),
+    buy_orders INTEGER NOT NULL CHECK (buy_orders IN (0, 1)),
+    jobs INTEGER NOT NULL CHECK (jobs IN (0, 1)),
+    CHECK ((place_kind = 0) = (place_id IS NULL)),
+    CHECK (assets + sell_orders + buy_orders + jobs >= 1)
+);
+CREATE TABLE stockpile_filter_characters (
+    filter INTEGER NOT NULL REFERENCES stockpile_filters (id) ON DELETE CASCADE,
+    character INTEGER NOT NULL CHECK (character >= 0),
+    PRIMARY KEY (filter, character)
+) WITHOUT ROWID;
 ";
 
 /// An open database. Every method on it runs in one transaction.
@@ -328,16 +372,17 @@ mod tests {
         let mut upgraded = Store::open(&path, 5_000).expect("upgrade");
 
         assert_eq!(
-            std::fs::read(dir.path().join("eve.db.before-v3")).expect("backup"),
+            std::fs::read(dir.path().join("eve.db.before-v4")).expect("backup"),
             before
         );
-        assert_eq!(version_of(&path), 3);
+        assert_eq!(version_of(&path), 4);
         assert_eq!(
             migrations_of(&path),
             vec![
                 (1, "initial".to_owned(), 1_000),
                 (2, "net worth".to_owned(), 5_000),
-                (3, "structure names".to_owned(), 5_000)
+                (3, "structure names".to_owned(), 5_000),
+                (4, "stockpiles".to_owned(), 5_000)
             ]
         );
         assert_eq!(
@@ -359,17 +404,17 @@ mod tests {
         let id = store.create_plan(&plan, 1_000).expect("plan");
         drop(store);
         let before = std::fs::read(&path).expect("read");
-        let backup = dir.path().join("eve.db.before-v3");
+        let backup = dir.path().join("eve.db.before-v4");
 
         let mut upgraded = Store::open(&path, 1_792_404_000).expect("upgrade");
 
         assert_eq!(std::fs::read(&backup).expect("backup"), before);
-        assert_eq!(version_of(&path), 3);
+        assert_eq!(version_of(&path), 4);
         assert_eq!(
             migrations_of(&path).last(),
-            Some(&(3, "structure names".to_owned(), 1_792_404_000))
+            Some(&(4, "stockpiles".to_owned(), 1_792_404_000))
         );
-        assert_eq!(migrations_of(&path).len(), 3);
+        assert_eq!(migrations_of(&path).len(), 4);
         assert_eq!(
             upgraded.plan(id).expect("plan"),
             Some(crate::PlanRecord { id, ..plan })
@@ -382,13 +427,47 @@ mod tests {
     }
 
     #[test]
+    fn a_version_three_file_gets_the_stockpile_tables_and_a_backup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eve.db");
+        let three = &MIGRATIONS[..3];
+        drop(open_with(&path, 1_000, three).expect("v3"));
+        let before = std::fs::read(&path).expect("read");
+
+        drop(Store::open(&path, 2_000).expect("upgrade"));
+
+        assert_eq!(
+            std::fs::read(dir.path().join("eve.db.before-v4")).expect("backup"),
+            before
+        );
+        assert_eq!(version_of(&path), 4);
+        let conn = Connection::open(&path).expect("open");
+        for table in [
+            "stockpiles",
+            "stockpile_targets",
+            "stockpile_includes",
+            "stockpile_filters",
+            "stockpile_filter_characters",
+        ] {
+            let found: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .expect("table");
+            assert_eq!(found, 1, "{table}");
+        }
+    }
+
+    #[test]
     fn a_new_file_starts_at_the_newest_version_without_a_backup() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("eve.db");
 
         drop(Store::open(&path, 1_000).expect("open"));
 
-        assert_eq!(version_of(&path), 3);
-        assert!(!dir.path().join("eve.db.before-v3").exists());
+        assert_eq!(version_of(&path), 4);
+        assert!(!dir.path().join("eve.db.before-v4").exists());
     }
 }

@@ -1,5 +1,5 @@
-//! The user's own data: plans, facilities, freight routes, settings and net worth history, in one
-//! SQLite file.
+//! The user's own data: plans, facilities, freight routes, settings, net worth history and
+//! stockpiles, in one SQLite file.
 //!
 //! [`Store::open`] creates the file or upgrades it. Each method runs in one transaction. Names are
 //! trimmed and unique ignoring case. Money, volumes and rates are whole numbers.
@@ -11,6 +11,7 @@ pub mod migrate;
 pub mod net_worth;
 pub mod plans;
 pub mod settings;
+pub mod stockpiles;
 pub mod structure_names;
 
 use rusqlite::Transaction;
