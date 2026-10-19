@@ -7,6 +7,7 @@ use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
 
 use crate::build::BuildPanel;
 use crate::setup::SetupPanel;
+use crate::table::copy_request;
 use crate::theme::Style;
 
 /// The Build page: Plans over Pasted stock on the left; Plan on top, then Steps beside Buy list.
@@ -81,9 +82,16 @@ impl<T: Copy, B: FnMut(&mut Ui, T)> TabViewer for Locked<T, B> {
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut T) {
+        let id = self.id(tab);
+        let title = (self.title)(*tab);
         ui.horizontal(|ui| {
-            ui.strong((self.title)(*tab));
-            ui.menu_button("⋯", |_ui| {});
+            ui.strong(title);
+            ui.menu_button("⋯", |ui| {
+                if ui.button("Copy as TSV").clicked() {
+                    ui.data_mut(|data| data.insert_temp(copy_request(id), true));
+                    ui.close();
+                }
+            });
         });
         (self.body)(ui, *tab);
     }

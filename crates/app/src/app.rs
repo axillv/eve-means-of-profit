@@ -12,6 +12,7 @@ pub mod rail;
 pub mod settings_window;
 pub mod setup;
 pub mod status;
+pub mod table;
 pub mod theme;
 pub mod worker;
 
