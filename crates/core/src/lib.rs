@@ -9,6 +9,7 @@ pub mod industry;
 pub mod invention;
 pub mod job_cost;
 pub mod money;
+pub mod net_worth;
 pub mod paste;
 pub mod plan;
 pub mod stock;
