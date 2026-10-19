@@ -26,6 +26,14 @@ pub enum JeveError {
     },
     /// A table has more rows than the counts in this app can hold.
     TooManyRows { table: &'static str },
+    /// A point of the Tracker history has a missing, non-numeric or out-of-range value.
+    TrackerBadData {
+        owner: String,
+        index: usize,
+        field: &'static str,
+    },
+    /// The Tracker file is not JSON, or not the object-of-lists shape jEveAssets writes.
+    TrackerNotJson { reason: String },
     /// Any other SQLite error.
     Sqlite(rusqlite::Error),
 }
@@ -68,6 +76,20 @@ impl fmt::Display for JeveError {
             Self::TooManyRows { table } => {
                 write!(f, "the {table} table has more rows than this app can count")
             }
+            Self::TrackerBadData {
+                owner,
+                index,
+                field,
+            } => write!(
+                f,
+                "the Tracker history of {owner} has a missing, non-numeric or out-of-range {field} value at point {}",
+                // The index is below a list length, which is at most isize::MAX, so index + 1 cannot saturate.
+                index.saturating_add(1)
+            ),
+            Self::TrackerNotJson { reason } => write!(
+                f,
+                "the Tracker file is not in the format this app reads: {reason}"
+            ),
             Self::Sqlite(error) => write!(f, "could not read the profile: {error}"),
         }
     }
@@ -82,7 +104,9 @@ impl std::error::Error for JeveError {
             | Self::Busy
             | Self::Layout { .. }
             | Self::BadValue { .. }
-            | Self::TooManyRows { .. } => None,
+            | Self::TooManyRows { .. }
+            | Self::TrackerBadData { .. }
+            | Self::TrackerNotJson { .. } => None,
         }
     }
 }

@@ -116,6 +116,8 @@ INSERT INTO blueprints (accountid, itemid, locationid, typeid, flagid, flagstrin
             | JeveError::Busy
             | JeveError::Layout { .. }
             | JeveError::TooManyRows { .. }
+            | JeveError::TrackerBadData { .. }
+            | JeveError::TrackerNotJson { .. }
             | JeveError::Sqlite(_) => None,
         }
     }
