@@ -7,6 +7,7 @@ pub mod format;
 pub mod freight;
 pub mod industry;
 pub mod invention;
+pub mod job_cost;
 pub mod money;
 pub mod paste;
 pub mod plan;
