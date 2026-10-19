@@ -10,6 +10,7 @@ pub mod http;
 pub mod industry;
 pub mod jwt;
 pub mod pkce;
+pub mod places;
 pub mod saved;
 pub mod secrets;
 pub mod token;

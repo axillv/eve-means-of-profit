@@ -153,7 +153,7 @@ impl<'a> Client<'a> {
                     retry_after_seconds: wait,
                 })
             }
-            401 | 403 => Err(EsiError::Forbidden {
+            403 => Err(EsiError::Forbidden {
                 route: route.to_owned(),
             }),
             404 => Err(EsiError::NotFound {

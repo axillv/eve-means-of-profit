@@ -480,7 +480,7 @@ mod tests {
         ));
         assert!(matches!(
             second_wallet_error(failed(401, &[])),
-            EsiError::Forbidden { .. }
+            EsiError::Unexpected { status: 401, .. }
         ));
         assert!(matches!(
             second_wallet_error(failed(404, &[])),
