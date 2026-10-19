@@ -8,6 +8,7 @@ pub mod freight;
 pub mod industry;
 pub mod invention;
 pub mod job_cost;
+pub mod make_or_buy;
 pub mod money;
 pub mod net_worth;
 pub mod paste;
