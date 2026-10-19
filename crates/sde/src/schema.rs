@@ -5,7 +5,7 @@
 use profit_core::industry::Activity;
 
 /// Written to `PRAGMA user_version`. A database with any other value is not read.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// The text stored for an activity in `recipes.activity`.
 pub(crate) fn activity_name(activity: Activity) -> &'static str {
@@ -118,4 +118,9 @@ pub(crate) const CREATE_TABLES: &str = "
         to_system INTEGER NOT NULL REFERENCES systems (system_id)
     );
     CREATE INDEX stargates_from_system ON stargates (from_system);
+    CREATE TABLE stations (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        system_id INTEGER NOT NULL
+    );
 ";

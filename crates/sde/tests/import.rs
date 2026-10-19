@@ -80,6 +80,7 @@ mod tests {
             systems: 88,
             stargates: 224,
             regions: 1,
+            stations: 1,
         }
     }
 

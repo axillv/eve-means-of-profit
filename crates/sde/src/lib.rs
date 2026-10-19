@@ -9,6 +9,7 @@ pub mod import;
 pub mod map;
 pub mod query;
 pub mod schema;
+pub mod stations;
 
 pub use error::SdeError;
 pub use facility::{Facility, FacilityError, Rig, Security, Structure, StructureKind};
@@ -19,3 +20,4 @@ pub use fetch::{
 pub use import::{ImportReport, import};
 pub use map::{MapError, RouteKind, SolarSystem, StarMap};
 pub use query::{Item, Sde, SdeBuild};
+pub use stations::Station;

@@ -3,7 +3,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::{ErrorKind, Read};
+use std::io::{BufRead, BufReader, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -17,6 +17,7 @@ use serde_json::Number;
 use crate::error::SdeError;
 use crate::facility::{ENGINEERING_COMPLEX_GROUP, REFINERY_GROUP};
 use crate::schema::{CREATE_TABLES, SCHEMA_VERSION, activity_name};
+use crate::stations::{self, Station};
 
 const SDE_FILE: &str = "_sde.jsonl";
 const CATEGORIES_FILE: &str = "categories.jsonl";
@@ -67,6 +68,7 @@ pub struct ImportReport {
     pub systems: usize,
     pub stargates: usize,
     pub regions: usize,
+    pub stations: usize,
 }
 
 /// Reads the download at `source` and writes a fresh database at `db`.
@@ -88,7 +90,7 @@ pub fn import(source: &Path, db: &Path) -> Result<ImportReport, SdeError> {
 }
 
 /// Where the files come from: a directory, or a zip with the files at its root.
-enum Source {
+pub(crate) enum Source {
     Directory(PathBuf),
     Zip {
         path: PathBuf,
@@ -117,22 +119,12 @@ impl Source {
         match self {
             Self::Directory(dir) => {
                 let path = dir.join(name);
-                fs::read_to_string(&path).map_err(|source| {
-                    if source.kind() == ErrorKind::NotFound {
-                        SdeError::MissingFile(name.to_owned())
-                    } else {
-                        SdeError::Io { path, source }
-                    }
-                })
+                fs::read_to_string(&path).map_err(|source| file_error(name, path, source))
             }
             Self::Zip { path, archive } => {
-                let mut entry = archive.by_name(name).map_err(|error| {
-                    if matches!(error, zip::result::ZipError::FileNotFound) {
-                        SdeError::MissingFile(name.to_owned())
-                    } else {
-                        SdeError::Zip(error)
-                    }
-                })?;
+                let mut entry = archive
+                    .by_name(name)
+                    .map_err(|error| zip_error(name, error))?;
                 let mut text = String::new();
                 entry
                     .read_to_string(&mut text)
@@ -144,6 +136,73 @@ impl Source {
             }
         }
     }
+
+    /// Calls `visit` with each non-blank line of a `.jsonl` file, parsed as `R`. The file is read one
+    /// line at a time, so it is never held whole. Lines count from 1.
+    pub(crate) fn each_record<R: DeserializeOwned>(
+        &mut self,
+        name: &str,
+        mut visit: impl FnMut(usize, R) -> Result<(), SdeError>,
+    ) -> Result<(), SdeError> {
+        match self {
+            Self::Directory(dir) => {
+                let path = dir.join(name);
+                let file =
+                    File::open(&path).map_err(|source| file_error(name, path.clone(), source))?;
+                each_line(BufReader::new(file), name, &path, &mut visit)
+            }
+            Self::Zip { path, archive } => {
+                let entry = archive
+                    .by_name(name)
+                    .map_err(|error| zip_error(name, error))?;
+                each_line(BufReader::new(entry), name, path, &mut visit)
+            }
+        }
+    }
+}
+
+/// The error for a file of a directory that cannot be read. A missing file is `MissingFile`.
+fn file_error(name: &str, path: PathBuf, source: std::io::Error) -> SdeError {
+    if source.kind() == ErrorKind::NotFound {
+        SdeError::MissingFile(name.to_owned())
+    } else {
+        SdeError::Io { path, source }
+    }
+}
+
+/// The error for a file of a zip that cannot be read. A missing file is `MissingFile`.
+fn zip_error(name: &str, error: zip::result::ZipError) -> SdeError {
+    if matches!(error, zip::result::ZipError::FileNotFound) {
+        SdeError::MissingFile(name.to_owned())
+    } else {
+        SdeError::Zip(error)
+    }
+}
+
+/// Each non-blank line of `reader`, parsed as `R`, with its line number. Lines count from 1.
+fn each_line<R: DeserializeOwned>(
+    reader: impl BufRead,
+    file: &str,
+    path: &Path,
+    visit: &mut impl FnMut(usize, R) -> Result<(), SdeError>,
+) -> Result<(), SdeError> {
+    for (index, text) in reader.lines().enumerate() {
+        let text = text.map_err(|source| SdeError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if text.trim().is_empty() {
+            continue;
+        }
+        let line = index + 1;
+        let record = serde_json::from_str(&text).map_err(|error| SdeError::Json {
+            file: file.to_owned(),
+            line,
+            message: error.to_string(),
+        })?;
+        visit(line, record)?;
+    }
+    Ok(())
 }
 
 /// The whole download, read and checked. Nothing here refers to the database.
@@ -158,6 +217,7 @@ struct Download {
     duplicates: usize,
     facilities: Facilities,
     map: MapData,
+    stations: Vec<Station>,
 }
 
 impl Download {
@@ -169,6 +229,12 @@ impl Download {
         let recipes = Recipes::from_blueprints(&types, parse_file(source, BLUEPRINTS_FILE)?)?;
         let facilities = Facilities::read(source, &types, &groups)?;
         let map = MapData::read(source)?;
+        let system_names: BTreeMap<u32, String> = map
+            .systems
+            .iter()
+            .map(|row| (row.id, row.name.clone()))
+            .collect();
+        let stations = stations::read(source, &system_names)?;
         Ok(Self {
             build_number,
             release_date,
@@ -180,6 +246,7 @@ impl Download {
             recipes: recipes.by_product.into_values().collect(),
             facilities,
             map,
+            stations,
         })
     }
 
@@ -203,6 +270,7 @@ impl Download {
             systems: self.map.systems.len(),
             stargates: self.map.gates.len(),
             regions: self.map.regions.len(),
+            stations: self.stations.len(),
         }
     }
 }
@@ -274,8 +342,8 @@ struct TypeRecord {
 }
 
 #[derive(Deserialize)]
-struct LocalizedName {
-    en: Option<String>,
+pub(crate) struct LocalizedName {
+    pub(crate) en: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -950,7 +1018,11 @@ impl GateRow {
     }
 }
 
-fn english_name(name: Option<LocalizedName>, file: &str, line: usize) -> Result<String, SdeError> {
+pub(crate) fn english_name(
+    name: Option<LocalizedName>,
+    file: &str,
+    line: usize,
+) -> Result<String, SdeError> {
     name.and_then(|name| name.en)
         .ok_or_else(|| SdeError::MissingEnglishName {
             file: file.to_owned(),
@@ -958,7 +1030,7 @@ fn english_name(name: Option<LocalizedName>, file: &str, line: usize) -> Result<
         })
 }
 
-fn bad_reference(file: &str, line: usize, field: &str, id: u32) -> SdeError {
+pub(crate) fn bad_reference(file: &str, line: usize, field: &str, id: u32) -> SdeError {
     SdeError::BadReference {
         file: file.to_owned(),
         line,
@@ -1057,7 +1129,7 @@ fn read_rows<R: DeserializeOwned, T>(
         .collect()
 }
 
-fn parse_file<R: DeserializeOwned>(
+pub(crate) fn parse_file<R: DeserializeOwned>(
     source: &mut Source,
     file: &str,
 ) -> Result<Vec<(usize, R)>, SdeError> {
@@ -1083,7 +1155,12 @@ fn parse_lines<R: DeserializeOwned>(file: &str, text: &str) -> Result<Vec<(usize
     Ok(records)
 }
 
-fn required<T>(value: Option<T>, file: &str, line: usize, field: &str) -> Result<T, SdeError> {
+pub(crate) fn required<T>(
+    value: Option<T>,
+    file: &str,
+    line: usize,
+    field: &str,
+) -> Result<T, SdeError> {
     value.ok_or_else(|| SdeError::MissingField {
         file: file.to_owned(),
         line,
@@ -1248,6 +1325,15 @@ fn write_rows(tx: &Transaction<'_>, download: &Download) -> Result<(), SdeError>
     }
     write_facilities(tx, &download.facilities)?;
     write_map(tx, &download.map)?;
+    write_stations(tx, &download.stations)?;
+    Ok(())
+}
+
+fn write_stations(tx: &Transaction<'_>, stations: &[Station]) -> Result<(), SdeError> {
+    let mut rows = tx.prepare("INSERT INTO stations (id, name, system_id) VALUES (?1, ?2, ?3)")?;
+    for station in stations {
+        rows.execute(params![station.id, station.name, station.system_id])?;
+    }
     Ok(())
 }
 
