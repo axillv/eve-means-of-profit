@@ -10,6 +10,7 @@ pub mod freight;
 pub mod migrate;
 pub mod net_worth;
 pub mod plans;
+pub mod reservations;
 pub mod settings;
 pub mod stockpiles;
 pub mod structure_names;
@@ -22,6 +23,8 @@ pub use freight::{RouteRow, ServiceRow};
 pub use migrate::Store;
 pub use net_worth::{ImportReport, NetWorthSettings, PriceHistory};
 pub use plans::{PlanRecord, PlanSummary};
+pub use reservations::PlanStock;
+pub(crate) use reservations::copy_scope;
 pub use settings::{Density, Settings};
 
 /// Trims a name and refuses an empty one.

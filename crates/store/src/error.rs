@@ -34,6 +34,8 @@ pub enum StoreError {
     NotAStructure(i64),
     /// A stockpile the store will not keep, with the reason the user can read.
     InvalidStockpile(String),
+    /// A plan's stock source the store will not keep, with the reason the user can read.
+    InvalidPlanStock(String),
     /// The names along an include loop, the first one repeated at the end.
     StockpileLoop(Vec<String>),
     /// A stored value that Rust cannot turn back into its type.
@@ -59,7 +61,9 @@ impl fmt::Display for StoreError {
             Self::NotFound => write!(f, "not found"),
             Self::TooLarge => write!(f, "the number is too large to store"),
             Self::NotAStructure(id) => write!(f, "{id} is not a structure"),
-            Self::InvalidStockpile(reason) => write!(f, "{reason}"),
+            Self::InvalidStockpile(reason) | Self::InvalidPlanStock(reason) => {
+                write!(f, "{reason}")
+            }
             Self::StockpileLoop(names) => {
                 write!(f, "includes itself: {}", names.join(" → "))
             }
@@ -83,6 +87,7 @@ impl std::error::Error for StoreError {
             | Self::TooLarge
             | Self::NotAStructure(_)
             | Self::InvalidStockpile(_)
+            | Self::InvalidPlanStock(_)
             | Self::StockpileLoop(_)
             | Self::BadData(_) => None,
         }

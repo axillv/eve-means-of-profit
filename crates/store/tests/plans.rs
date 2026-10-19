@@ -204,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicates_are_numbered_and_listed_in_name_order() {
+    fn duplicates_are_numbered_and_listed_in_creation_order() {
         let (_dir, _path, mut store) = open_temp();
         let original = store
             .create_plan(&plan_named("Hobgoblin 10"), 1_000)
@@ -216,9 +216,9 @@ mod tests {
             names(&mut store),
             vec![
                 "Hobgoblin 10",
+                "Hobgoblin 10 (copy)",
                 "Hobgoblin 10 (copy 2)",
                 "Hobgoblin 10 (copy 3)",
-                "Hobgoblin 10 (copy)",
             ]
         );
     }

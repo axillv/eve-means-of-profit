@@ -10,13 +10,14 @@ use rusqlite::{Connection, params};
 use crate::error::{Result, StoreError};
 
 /// Every schema change, oldest first: (version, name, SQL). Version 1 creates the first schema,
-/// version 2 the net worth history, version 3 the structure names the user typed and version 4
-/// the stockpiles.
+/// version 2 the net worth history, version 3 the structure names the user typed, version 4 the
+/// stockpiles and version 5 the reservations.
 pub(crate) const MIGRATIONS: &[(u32, &str, &str)] = &[
     (1, "initial", INITIAL_SCHEMA),
     (2, "net worth", NET_WORTH_SCHEMA),
     (3, "structure names", STRUCTURE_NAMES_SCHEMA),
     (4, "stockpiles", STOCKPILES_SCHEMA),
+    (5, "reservations", RESERVATIONS_SCHEMA),
 ];
 
 const INITIAL_SCHEMA: &str = "
@@ -185,6 +186,36 @@ CREATE TABLE stockpile_filter_characters (
 ) WITHOUT ROWID;
 ";
 
+/// Reservations: the order of the Plans list, each plan's stock source and scope, and the running
+/// jobs assigned to plans. Also each stockpile's Short mode. The Plans list order is one position
+/// per plan, counted from 0 in the order the plans were listed before this version.
+const RESERVATIONS_SCHEMA: &str = "
+ALTER TABLE plans ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+UPDATE plans SET position = (
+    SELECT COUNT(*) FROM plans other
+    WHERE lower(other.name) < lower(plans.name)
+        OR (lower(other.name) = lower(plans.name) AND other.id < plans.id)
+);
+ALTER TABLE plans ADD COLUMN reserve INTEGER NOT NULL DEFAULT 0 CHECK (reserve IN (0, 1));
+ALTER TABLE plans ADD COLUMN stock_source INTEGER NOT NULL DEFAULT 0 CHECK (stock_source IN (0, 1));
+CREATE TABLE plan_stock_characters (
+    plan_id INTEGER NOT NULL REFERENCES plans (id) ON DELETE CASCADE,
+    character_id INTEGER NOT NULL CHECK (character_id > 0),
+    PRIMARY KEY (plan_id, character_id)
+) WITHOUT ROWID;
+CREATE TABLE plan_stock_places (
+    plan_id INTEGER NOT NULL REFERENCES plans (id) ON DELETE CASCADE,
+    location_id INTEGER NOT NULL,
+    PRIMARY KEY (plan_id, location_id)
+) WITHOUT ROWID;
+CREATE TABLE job_assignments (
+    job_id INTEGER PRIMARY KEY,
+    plan_id INTEGER NOT NULL REFERENCES plans (id) ON DELETE CASCADE,
+    assigned_at INTEGER NOT NULL
+);
+ALTER TABLE stockpiles ADD COLUMN short_mode INTEGER NOT NULL DEFAULT 0 CHECK (short_mode IN (0, 1));
+";
+
 /// An open database. Every method on it runs in one transaction.
 #[derive(Debug)]
 pub struct Store {
@@ -285,6 +316,43 @@ mod tests {
             .expect("rows")
     }
 
+    /// Writes a plan straight into an old file, with the columns the first schema holds. The
+    /// store's code cannot write there: insert names columns later versions added.
+    fn raw_plan_row(path: &Path, plan: &crate::PlanRecord) -> i64 {
+        let conn = Connection::open(path).expect("open");
+        conn.execute(
+            "INSERT INTO plans (name, product, quantity, price_rule, packing, pasted_stock, \
+             created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                plan.name,
+                plan.product,
+                i64::try_from(plan.quantity).expect("quantity"),
+                crate::plans::price_rule_code(plan.price_rule),
+                crate::plans::packing_code(plan.packing),
+                plan.pasted_stock,
+                plan.created_at,
+                plan.updated_at
+            ],
+        )
+        .expect("insert plan");
+        let id = conn.last_insert_rowid();
+        for type_id in &plan.build {
+            conn.execute(
+                "INSERT INTO plan_build (plan_id, type_id) VALUES (?1, ?2)",
+                rusqlite::params![id, i64::from(*type_id)],
+            )
+            .expect("insert build");
+        }
+        for (type_id, me) in &plan.me {
+            conn.execute(
+                "INSERT INTO plan_me (plan_id, type_id, me) VALUES (?1, ?2, ?3)",
+                rusqlite::params![id, i64::from(*type_id), i64::from(*me)],
+            )
+            .expect("insert me");
+        }
+        id
+    }
+
     #[test]
     fn upgrade_keeps_a_copy_of_the_old_file() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -305,7 +373,7 @@ mod tests {
     fn failed_upgrade_keeps_the_old_version_and_its_backup() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("eve.db");
-        let mut store = open_with(&path, 1_000, &[(1, "initial", INITIAL_SCHEMA)]).expect("v1");
+        drop(open_with(&path, 1_000, &[(1, "initial", INITIAL_SCHEMA)]).expect("v1"));
         let plan = crate::PlanRecord {
             id: 0,
             name: "Hobgoblin 10".to_owned(),
@@ -323,8 +391,7 @@ mod tests {
             created_at: 1_000,
             updated_at: 1_000,
         };
-        let id = store.create_plan(&plan, 1_000).expect("plan");
-        drop(store);
+        let id = raw_plan_row(&path, &plan);
 
         let broken: &[(u32, &str, &str)] = &[(1, "initial", INITIAL_SCHEMA), (2, "broken", BROKEN)];
         let err = open_with(&path, 2_000, broken).expect_err("must fail");
@@ -364,25 +431,25 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("eve.db");
         let plan = hobgoblin();
-        let mut store = open_with(&path, 1_000, &[(1, "initial", INITIAL_SCHEMA)]).expect("v1");
-        let id = store.create_plan(&plan, 1_000).expect("plan");
-        drop(store);
+        drop(open_with(&path, 1_000, &[(1, "initial", INITIAL_SCHEMA)]).expect("v1"));
+        let id = raw_plan_row(&path, &plan);
         let before = std::fs::read(&path).expect("read");
 
         let mut upgraded = Store::open(&path, 5_000).expect("upgrade");
 
         assert_eq!(
-            std::fs::read(dir.path().join("eve.db.before-v4")).expect("backup"),
+            std::fs::read(dir.path().join("eve.db.before-v5")).expect("backup"),
             before
         );
-        assert_eq!(version_of(&path), 4);
+        assert_eq!(version_of(&path), 5);
         assert_eq!(
             migrations_of(&path),
             vec![
                 (1, "initial".to_owned(), 1_000),
                 (2, "net worth".to_owned(), 5_000),
                 (3, "structure names".to_owned(), 5_000),
-                (4, "stockpiles".to_owned(), 5_000)
+                (4, "stockpiles".to_owned(), 5_000),
+                (5, "reservations".to_owned(), 5_000)
             ]
         );
         assert_eq!(
@@ -400,21 +467,20 @@ mod tests {
             (1, "initial", INITIAL_SCHEMA),
             (2, "net worth", NET_WORTH_SCHEMA),
         ];
-        let mut store = open_with(&path, 1_000, two).expect("v2");
-        let id = store.create_plan(&plan, 1_000).expect("plan");
-        drop(store);
+        drop(open_with(&path, 1_000, two).expect("v2"));
+        let id = raw_plan_row(&path, &plan);
         let before = std::fs::read(&path).expect("read");
-        let backup = dir.path().join("eve.db.before-v4");
+        let backup = dir.path().join("eve.db.before-v5");
 
         let mut upgraded = Store::open(&path, 1_792_404_000).expect("upgrade");
 
         assert_eq!(std::fs::read(&backup).expect("backup"), before);
-        assert_eq!(version_of(&path), 4);
+        assert_eq!(version_of(&path), 5);
         assert_eq!(
             migrations_of(&path).last(),
-            Some(&(4, "stockpiles".to_owned(), 1_792_404_000))
+            Some(&(5, "reservations".to_owned(), 1_792_404_000))
         );
-        assert_eq!(migrations_of(&path).len(), 4);
+        assert_eq!(migrations_of(&path).len(), 5);
         assert_eq!(
             upgraded.plan(id).expect("plan"),
             Some(crate::PlanRecord { id, ..plan })
@@ -437,10 +503,10 @@ mod tests {
         drop(Store::open(&path, 2_000).expect("upgrade"));
 
         assert_eq!(
-            std::fs::read(dir.path().join("eve.db.before-v4")).expect("backup"),
+            std::fs::read(dir.path().join("eve.db.before-v5")).expect("backup"),
             before
         );
-        assert_eq!(version_of(&path), 4);
+        assert_eq!(version_of(&path), 5);
         let conn = Connection::open(&path).expect("open");
         for table in [
             "stockpiles",
@@ -448,6 +514,9 @@ mod tests {
             "stockpile_includes",
             "stockpile_filters",
             "stockpile_filter_characters",
+            "plan_stock_characters",
+            "plan_stock_places",
+            "job_assignments",
         ] {
             let found: i64 = conn
                 .query_row(
@@ -467,7 +536,7 @@ mod tests {
 
         drop(Store::open(&path, 1_000).expect("open"));
 
-        assert_eq!(version_of(&path), 4);
-        assert!(!dir.path().join("eve.db.before-v4").exists());
+        assert_eq!(version_of(&path), 5);
+        assert!(!dir.path().join("eve.db.before-v5").exists());
     }
 }

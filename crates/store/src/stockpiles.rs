@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use profit_core::reserve::ShortMode;
 use profit_core::stockpile::{
     Characters, Filter, Include, Place, Source, Stockpile, Target, include_loop,
 };
@@ -19,6 +20,14 @@ const FILTERS: &str = "stockpile_filters";
 
 fn invalid(reason: &str) -> StoreError {
     StoreError::InvalidStockpile(reason.to_owned())
+}
+
+/// The stored code of a stockpile's Short mode.
+fn short_mode_code(mode: ShortMode) -> i64 {
+    match mode {
+        ShortMode::AfterPlans => 0,
+        ShortMode::RightNow => 1,
+    }
 }
 
 /// The stored kind and place id of a filter's place. Everywhere has no place id.
@@ -421,6 +430,42 @@ impl Store {
                 "UPDATE stockpiles SET position = ?2 WHERE id = ?1",
                 params![id, position],
             )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Whether a stockpile's Short counts stock after the plans' claims or right now. An unknown
+    /// stockpile, or one holding a mode this app cannot name, is refused.
+    pub fn short_mode(&mut self, stockpile_id: i64) -> Result<ShortMode> {
+        let tx = self.conn.transaction()?;
+        let stored: Option<i64> = tx
+            .query_row(
+                "SELECT short_mode FROM stockpiles WHERE id = ?1",
+                params![stockpile_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mode = match stored {
+            None => return Err(StoreError::NotFound),
+            Some(0) => ShortMode::AfterPlans,
+            Some(1) => ShortMode::RightNow,
+            Some(code) => return Err(bad_code(TABLE, stockpile_id, "short_mode", code)),
+        };
+        tx.commit()?;
+        Ok(mode)
+    }
+
+    /// Sets whether a stockpile's Short counts stock after the plans' claims or right now. An
+    /// unknown stockpile is refused.
+    pub fn set_short_mode(&mut self, stockpile_id: i64, mode: ShortMode) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE stockpiles SET short_mode = ?2 WHERE id = ?1",
+            params![stockpile_id, short_mode_code(mode)],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound);
         }
         tx.commit()?;
         Ok(())

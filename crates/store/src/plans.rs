@@ -10,8 +10,8 @@ use rusqlite::{OptionalExtension, Row, Transaction, params};
 use crate::error::{Result, StoreError};
 use crate::migrate::Store;
 use crate::{
-    bad_code, clean_name, ensure_free, from_stored, id_names, is_taken, missing_reference,
-    to_stored_u64,
+    bad_code, clean_name, copy_scope, ensure_free, from_stored, id_names, is_taken,
+    missing_reference, to_stored_u64,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +63,7 @@ pub(crate) fn price_rule_from_code(code: i64) -> Option<PriceRule> {
     }
 }
 
-fn packing_code(packing: Packing) -> i64 {
+pub(crate) fn packing_code(packing: Packing) -> i64 {
     match packing {
         Packing::FillOnly => 0,
         Packing::TopUp => 1,
@@ -206,13 +206,15 @@ fn write_sets(tx: &Transaction<'_>, id: i64, plan: &PlanRecord) -> Result<()> {
     Ok(())
 }
 
-/// Inserts a new plan row with both times set to `now`, then its sets. Returns its id.
+/// Inserts a new plan row with both times set to `now`, then its sets. The plan goes last in the
+/// list. Returns its id.
 fn insert_plan(tx: &Transaction<'_>, plan: &PlanRecord, name: &str, now: i64) -> Result<i64> {
     let quantity = to_stored_u64(plan.quantity)?;
     tx.execute(
         "INSERT INTO plans (name, product, quantity, manufacturing, reactions, price_rule, route, \
-            service, packing, pasted_stock, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+            service, packing, pasted_stock, created_at, updated_at, position) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, \
+            (SELECT COALESCE(MAX(position), -1) + 1 FROM plans))",
         params![
             name,
             i64::from(plan.product),
@@ -291,12 +293,13 @@ impl Store {
         Ok(plan)
     }
 
-    /// All plans, ordered by name ignoring case, then id.
+    /// All plans, in list order: by position, then id.
     pub fn plans(&mut self) -> Result<Vec<PlanSummary>> {
         let tx = self.conn.transaction()?;
         let raw = {
-            let mut stmt =
-                tx.prepare("SELECT id, name, product, quantity, updated_at FROM plans")?;
+            let mut stmt = tx.prepare(
+                "SELECT id, name, product, quantity, updated_at FROM plans ORDER BY position, id",
+            )?;
             let rows = stmt.query_map([], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -308,7 +311,7 @@ impl Store {
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        let mut plans = raw
+        let plans = raw
             .into_iter()
             .map(|(id, name, product, quantity, updated_at)| {
                 Ok(PlanSummary {
@@ -320,9 +323,27 @@ impl Store {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        plans.sort_by_cached_key(|plan| (plan.name.to_lowercase(), plan.id));
         tx.commit()?;
         Ok(plans)
+    }
+
+    /// Puts the plans in the given order. The list must hold every plan exactly once; otherwise
+    /// nothing is written.
+    pub fn set_plan_order(&mut self, order: &[i64]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let known: BTreeSet<i64> = plan_names(&tx)?.into_iter().map(|(id, _)| id).collect();
+        let asked: BTreeSet<i64> = order.iter().copied().collect();
+        if order.len() != known.len() || asked != known {
+            return Err(StoreError::NotFound);
+        }
+        for (position, id) in (0_i64..).zip(order) {
+            tx.execute(
+                "UPDATE plans SET position = ?2 WHERE id = ?1",
+                params![id, position],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn rename_plan(&mut self, id: i64, name: &str) -> Result<()> {
@@ -340,7 +361,8 @@ impl Store {
         Ok(())
     }
 
-    /// Copies a plan as `<name> (copy)`, or the first free `<name> (copy N)` after it.
+    /// Copies a plan as `<name> (copy)`, or the first free `<name> (copy N)` after it, at the end
+    /// of the list. The copy keeps the stock source and scope, has Reserve off and no assignments.
     pub fn duplicate_plan(&mut self, id: i64, now: i64) -> Result<i64> {
         let tx = self.conn.transaction()?;
         let Some(plan) = read_plan(&tx, id)? else {
@@ -360,6 +382,7 @@ impl Store {
             copy += 1;
         };
         let new_id = insert_plan(&tx, &plan, &name, now)?;
+        copy_scope(&tx, id, new_id)?;
         tx.commit()?;
         Ok(new_id)
     }

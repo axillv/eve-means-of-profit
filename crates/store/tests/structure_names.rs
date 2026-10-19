@@ -36,13 +36,13 @@ mod tests {
     }
 
     #[test]
-    fn a_new_file_is_at_version_four_with_no_names() {
+    fn a_new_file_is_at_version_five_with_no_names() {
         let (_dir, path, _store) = open_temp();
         let conn = Connection::open(&path).expect("open");
         let version: u32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         assert_eq!(row_count(&path), 0);
     }
 
