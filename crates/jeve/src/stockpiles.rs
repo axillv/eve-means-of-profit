@@ -786,6 +786,10 @@ struct Decimal {
 
 impl Decimal {
     fn parse(text: &str) -> Option<Decimal> {
+        let (negative, text) = match text.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, text),
+        };
         let (mantissa, exponent) = match text.split_once(['e', 'E']) {
             Some((mantissa, exponent)) => (mantissa, parse_exponent(exponent)?),
             None => (text, 0),
@@ -800,6 +804,13 @@ impl Decimal {
         let fraction_len = fraction.map_or(0, str::len);
         let digits = format!("{whole}{}", fraction.unwrap_or(""));
         let exponent = exponent.checked_sub(i128::try_from(fraction_len).ok()?)?;
+        // Every use treats zero or less the same way, so a minus sign is read as zero.
+        if negative {
+            return Some(Decimal {
+                digits: String::new(),
+                exponent: 0,
+            });
+        }
         Some(Decimal {
             digits: digits.trim_start_matches('0').to_owned(),
             exponent,
@@ -885,9 +896,19 @@ mod tests {
     }
 
     #[test]
+    fn a_minus_sign_is_read_as_zero() {
+        for text in ["-1", "-0.5", "-0", "-1.0E7"] {
+            assert!(
+                Decimal::parse(text).is_some_and(|value| value.is_zero()),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
     fn numbers_that_are_not_decimals_are_refused() {
         for text in [
-            "", "1,5", "-1", "+1", "1.", ".5", "1E", "1E+5", "1.5.5", "abc",
+            "", "1,5", "-", "--1", "+1", "1.", ".5", "1E", "1E+5", "1.5.5", "abc",
         ] {
             assert_eq!(Decimal::parse(text), None, "{text}");
         }

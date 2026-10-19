@@ -511,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn a_filter_with_a_missing_switch_reads_it_as_no() {
+    fn a_filter_with_only_inventory_on_has_no_notes() {
         let xml = one(
             r#"<stockpile name="Switch"><stockpilefilter locationid="0" inventory="true" sellorders="false" buyorders="false" jobs="false"/></stockpile>"#,
         );
@@ -519,7 +519,23 @@ mod tests {
         let result = import(&xml, &[]).expect("import");
 
         assert_eq!(only_stockpile(&result).filters.len(), 1);
+        assert_eq!(
+            only_stockpile(&result).filters[0].sources,
+            sources(&[Source::Assets])
+        );
         assert!(notes(&result).is_empty());
+    }
+
+    #[test]
+    fn a_filter_without_its_inventory_switch_fails_the_import() {
+        let xml = one(
+            r#"<stockpile name="Kit"><stockpilefilter locationid="0" sellorders="false" buyorders="false" jobs="false"/></stockpile>"#,
+        );
+
+        assert_eq!(
+            failure(&xml),
+            "cannot read the stockpiles: stockpile \"Kit\": a filter has no inventory"
+        );
     }
 
     #[test]
@@ -625,6 +641,25 @@ mod tests {
 
         assert_eq!(only_stockpile(&result).multiplier, 1);
         assert_eq!(notes(&result), vec![note("Zero", "multiplier 0 set to 1")]);
+    }
+
+    #[test]
+    fn a_negative_multiplier_and_target_are_read_as_zero() {
+        let xml = one(
+            r#"<stockpile name="Negative" multiplier="-2"><item typeid="34" minimum="-1"/></stockpile>"#,
+        );
+
+        let result = import(&xml, &[]).expect("import");
+
+        assert_eq!(only_stockpile(&result).multiplier, 1);
+        assert!(only_stockpile(&result).targets.is_empty());
+        assert_eq!(
+            notes(&result),
+            vec![
+                note("Negative", "multiplier 0 set to 1"),
+                note("Negative", "Tritanium: target 0 left out"),
+            ]
+        );
     }
 
     #[test]
