@@ -39,6 +39,24 @@ pub enum EsiError {
     UnknownCharacter(u64),
     /// The system could not give random bytes for a login.
     Random(String),
+    /// EVE refused the request: the character has not given the app this permission, or the login was revoked.
+    Forbidden { route: String },
+    /// EVE has nothing at this address.
+    NotFound { route: String },
+    /// Too many failed requests from the app; EVE asks it to send nothing until the reset.
+    ErrorLimited { reset_seconds: u64 },
+    /// EVE is limiting this character's requests of this kind; retry after the given seconds.
+    RateLimited { retry_after_seconds: u64 },
+    /// EVE answered with a status this app does not expect.
+    Unexpected { status: u16, route: String },
+    /// The pages of one list changed while they were being read.
+    Inconsistent { route: String },
+    /// EVE sent a value that cannot be read; `text` is the value as sent.
+    BadData {
+        route: String,
+        field: &'static str,
+        text: String,
+    },
 }
 
 impl EsiError {
@@ -83,6 +101,29 @@ impl fmt::Display for EsiError {
             Self::Keychain(reason) => write!(f, "the system keychain failed: {reason}"),
             Self::UnknownCharacter(id) => write!(f, "no character with id {id} is added"),
             Self::Random(reason) => write!(f, "could not get random bytes: {reason}"),
+            Self::Forbidden { route } => write!(
+                f,
+                "EVE refused {route}: the character has not given the app this permission, or the login was revoked"
+            ),
+            Self::NotFound { route } => write!(f, "EVE has nothing at {route}"),
+            Self::ErrorLimited { reset_seconds } => write!(
+                f,
+                "EVE asked the app to stop for {reset_seconds} s after too many failed requests"
+            ),
+            Self::RateLimited {
+                retry_after_seconds,
+            } => write!(
+                f,
+                "EVE is limiting this character's requests; try again in {retry_after_seconds} s"
+            ),
+            Self::Unexpected { status, route } => write!(f, "EVE answered {status} to {route}"),
+            Self::Inconsistent { route } => write!(
+                f,
+                "EVE's pages for {route} changed while they were read; try again"
+            ),
+            Self::BadData { route, field, text } => {
+                write!(f, "EVE sent an unreadable {field} for {route}: {text}")
+            }
         }
     }
 }
