@@ -1,0 +1,6 @@
+#!/bin/sh
+# Run the test suite before anything is pushed.
+# Enable once per clone: git config core.hooksPath .githooks
+set -e
+command -v cargo >/dev/null || { echo "pre-push: cargo not found, skipping tests" >&2; exit 0; }
+cargo test --workspace --quiet

@@ -1,0 +1,7 @@
+#!/bin/sh
+# Formatting and lint checks: cargo fmt and clippy with warnings denied.
+# Enable once per clone: git config core.hooksPath .githooks
+set -e
+command -v cargo >/dev/null || { echo "pre-commit: cargo not found, skipping checks" >&2; exit 0; }
+cargo fmt --all --check || { echo "pre-commit: formatting differs; run: cargo fmt --all" >&2; exit 1; }
+cargo clippy --workspace --all-targets --quiet -- -D warnings
