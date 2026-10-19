@@ -11,6 +11,7 @@ pub mod migrate;
 pub mod net_worth;
 pub mod plans;
 pub mod settings;
+pub mod structure_names;
 
 use rusqlite::Transaction;
 

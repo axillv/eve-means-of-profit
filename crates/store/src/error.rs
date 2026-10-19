@@ -30,6 +30,8 @@ pub enum StoreError {
     },
     NotFound,
     TooLarge,
+    /// The id is not a structure, so it cannot take a name the user typed.
+    NotAStructure(i64),
     /// A stored value that Rust cannot turn back into its type.
     BadData(String),
 }
@@ -52,6 +54,7 @@ impl fmt::Display for StoreError {
             Self::InUse { plans } => write!(f, "still used by: {}", plans.join(", ")),
             Self::NotFound => write!(f, "not found"),
             Self::TooLarge => write!(f, "the number is too large to store"),
+            Self::NotAStructure(id) => write!(f, "{id} is not a structure"),
             Self::BadData(what) => write!(f, "stored data cannot be read: {what}"),
         }
     }
@@ -70,6 +73,7 @@ impl std::error::Error for StoreError {
             | Self::InUse { .. }
             | Self::NotFound
             | Self::TooLarge
+            | Self::NotAStructure(_)
             | Self::BadData(_) => None,
         }
     }

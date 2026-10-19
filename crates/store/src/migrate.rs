@@ -10,10 +10,11 @@ use rusqlite::{Connection, params};
 use crate::error::{Result, StoreError};
 
 /// Every schema change, oldest first: (version, name, SQL). Version 1 creates the first schema and
-/// version 2 the net worth history.
+/// version 2 the net worth history and version 3 the structure names the user typed.
 pub(crate) const MIGRATIONS: &[(u32, &str, &str)] = &[
     (1, "initial", INITIAL_SCHEMA),
     (2, "net worth", NET_WORTH_SCHEMA),
+    (3, "structure names", STRUCTURE_NAMES_SCHEMA),
 ];
 
 const INITIAL_SCHEMA: &str = "
@@ -132,6 +133,14 @@ CREATE TABLE net_worth_shown (
 );
 ";
 
+const STRUCTURE_NAMES_SCHEMA: &str = "
+CREATE TABLE structure_names (
+    structure_id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    set_at INTEGER NOT NULL
+);
+";
+
 /// An open database. Every method on it runs in one transaction.
 #[derive(Debug)]
 pub struct Store {
@@ -218,6 +227,17 @@ mod tests {
     fn migration_rows(path: &Path) -> i64 {
         let conn = Connection::open(path).expect("open");
         conn.query_row("SELECT count(*) FROM migrations", [], |row| row.get(0))
+            .expect("rows")
+    }
+
+    /// The (version, name, applied_at) rows of the migrations table, oldest first.
+    fn migrations_of(path: &Path) -> Vec<(u32, String, i64)> {
+        let conn = Connection::open(path).expect("open");
+        conn.prepare("SELECT version, name, applied_at FROM migrations ORDER BY version")
+            .expect("prepare")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
             .expect("rows")
     }
 
@@ -308,23 +328,16 @@ mod tests {
         let mut upgraded = Store::open(&path, 5_000).expect("upgrade");
 
         assert_eq!(
-            std::fs::read(dir.path().join("eve.db.before-v2")).expect("backup"),
+            std::fs::read(dir.path().join("eve.db.before-v3")).expect("backup"),
             before
         );
-        assert_eq!(version_of(&path), 2);
-        let conn = Connection::open(&path).expect("open");
-        let rows: Vec<(u32, String, i64)> = conn
-            .prepare("SELECT version, name, applied_at FROM migrations ORDER BY version")
-            .expect("prepare")
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .expect("query")
-            .collect::<rusqlite::Result<_>>()
-            .expect("rows");
+        assert_eq!(version_of(&path), 3);
         assert_eq!(
-            rows,
+            migrations_of(&path),
             vec![
                 (1, "initial".to_owned(), 1_000),
-                (2, "net worth".to_owned(), 5_000)
+                (2, "net worth".to_owned(), 5_000),
+                (3, "structure names".to_owned(), 5_000)
             ]
         );
         assert_eq!(
@@ -334,13 +347,48 @@ mod tests {
     }
 
     #[test]
-    fn a_new_file_starts_at_version_two_without_a_backup() {
+    fn a_version_two_file_is_kept_aside_and_upgraded_to_three() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eve.db");
+        let plan = hobgoblin();
+        let two: &[(u32, &str, &str)] = &[
+            (1, "initial", INITIAL_SCHEMA),
+            (2, "net worth", NET_WORTH_SCHEMA),
+        ];
+        let mut store = open_with(&path, 1_000, two).expect("v2");
+        let id = store.create_plan(&plan, 1_000).expect("plan");
+        drop(store);
+        let before = std::fs::read(&path).expect("read");
+        let backup = dir.path().join("eve.db.before-v3");
+
+        let mut upgraded = Store::open(&path, 1_792_404_000).expect("upgrade");
+
+        assert_eq!(std::fs::read(&backup).expect("backup"), before);
+        assert_eq!(version_of(&path), 3);
+        assert_eq!(
+            migrations_of(&path).last(),
+            Some(&(3, "structure names".to_owned(), 1_792_404_000))
+        );
+        assert_eq!(migrations_of(&path).len(), 3);
+        assert_eq!(
+            upgraded.plan(id).expect("plan"),
+            Some(crate::PlanRecord { id, ..plan })
+        );
+        drop(upgraded);
+
+        std::fs::remove_file(&backup).expect("remove");
+        drop(Store::open(&path, 1_792_404_500).expect("reopen"));
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn a_new_file_starts_at_the_newest_version_without_a_backup() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("eve.db");
 
         drop(Store::open(&path, 1_000).expect("open"));
 
-        assert_eq!(version_of(&path), 2);
-        assert!(!dir.path().join("eve.db.before-v2").exists());
+        assert_eq!(version_of(&path), 3);
+        assert!(!dir.path().join("eve.db.before-v3").exists());
     }
 }
