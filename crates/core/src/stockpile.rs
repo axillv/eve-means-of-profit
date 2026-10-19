@@ -307,7 +307,7 @@ pub fn have(
 }
 
 /// True when some filter takes this entry: its character, its place and the entry's source.
-fn matches_any(
+pub(crate) fn matches_any(
     filters: &[Filter],
     character: CharacterId,
     place: LocationId,
