@@ -1,0 +1,23 @@
+HTTP/2 200 
+date: Sun, 18 Oct 2026 23:33:35 GMT
+content-type: application/json; charset=UTF-8
+content-length: 1957392
+access-control-allow-origin: *
+access-control-expose-headers: Etag, Retry-After, X-Compatibility-Date, X-Esi-Error-Limit-Remain, X-Esi-Error-Limit-Reset, X-Pages, X-Ratelimit-Group, X-Ratelimit-Limit, X-Ratelimit-Remaining, X-Ratelimit-Used
+cache-control: public
+content-language: en
+etag: "86b17197eebd558678c3ce6481100bf0c83c9b55e2da0ea708374884"
+expires: Sun, 18 Oct 2026 23:53:55 GMT
+last-modified: Sun, 18 Oct 2026 22:53:55 GMT
+strict-transport-security: max-age=31536000
+vary: X-Tenant
+vary: Accept-Language
+vary: X-Compatibility-Date
+x-compatibility-date: 2020-01-01
+x-esi-cache-status: HIT
+x-esi-request-id: 8de09bcf-3b97-4523-b2a0-3cd287a1b121
+x-ratelimit-group: industry
+x-ratelimit-limit: 150/15m
+x-ratelimit-remaining: 148
+x-ratelimit-used: 2
+

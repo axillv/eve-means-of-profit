@@ -7,6 +7,7 @@ pub mod characters;
 pub mod client;
 pub mod error;
 pub mod http;
+pub mod industry;
 pub mod jwt;
 pub mod pkce;
 pub mod saved;

@@ -69,7 +69,18 @@ impl<'a> Client<'a> {
         path: &str,
         group: &str,
     ) -> Result<Answer, EsiError> {
-        let request = request(Method::Get, path, token, None);
+        let request = request(Method::Get, path, Some(token), None);
+        self.send(now, &request, path, group)
+    }
+
+    /// GET `path` with no login, for public data. Same rules as [`Client::get_json`], without the `Authorization` header.
+    pub fn get_public_json(
+        &mut self,
+        now: i64,
+        path: &str,
+        group: &str,
+    ) -> Result<Answer, EsiError> {
+        let request = request(Method::Get, path, None, None);
         self.send(now, &request, path, group)
     }
 
@@ -84,7 +95,7 @@ impl<'a> Client<'a> {
     ) -> Result<Answer, EsiError> {
         let bytes = serde_json::to_vec(body)
             .map_err(|error| bad_data(route_of(path), "request body", &error.to_string()))?;
-        let request = request(Method::Post, path, token, Some(bytes));
+        let request = request(Method::Post, path, Some(token), Some(bytes));
         self.send(now, &request, path, group)
     }
 
@@ -166,18 +177,23 @@ pub(crate) fn bad_data(route: &str, field: &'static str, text: &str) -> EsiError
     }
 }
 
-fn request(method: Method, path: &str, token: &AccessToken, body: Option<Vec<u8>>) -> HttpRequest {
-    let mut headers = vec![
-        ("Accept".to_owned(), "application/json".to_owned()),
-        (
+fn request(
+    method: Method,
+    path: &str,
+    token: Option<&AccessToken>,
+    body: Option<Vec<u8>>,
+) -> HttpRequest {
+    let mut headers = vec![("Accept".to_owned(), "application/json".to_owned())];
+    if let Some(token) = token {
+        headers.push((
             "Authorization".to_owned(),
             format!("Bearer {}", token.as_str()),
-        ),
-        (
-            "X-Compatibility-Date".to_owned(),
-            COMPATIBILITY_DATE.to_owned(),
-        ),
-    ];
+        ));
+    }
+    headers.push((
+        "X-Compatibility-Date".to_owned(),
+        COMPATIBILITY_DATE.to_owned(),
+    ));
     if body.is_some() {
         headers.push(("Content-Type".to_owned(), "application/json".to_owned()));
     }
