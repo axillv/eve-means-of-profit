@@ -1436,6 +1436,7 @@ dependencies = [
  "egui_dock",
  "egui_kittest",
  "profit-core",
+ "profit-market",
  "profit-sde",
  "profit-store",
  "tempfile",

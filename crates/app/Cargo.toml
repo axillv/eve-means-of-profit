@@ -9,6 +9,7 @@ path = "src/app.rs"
 
 [dependencies]
 profit-core = { version = "0.1.0", path = "../core" }
+profit-market = { version = "0.1.0", path = "../market" }
 profit-sde = { version = "0.1.0", path = "../sde" }
 profit-store = { version = "0.1.0", path = "../store" }
 eframe = "0.36.2"
