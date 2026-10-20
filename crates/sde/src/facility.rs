@@ -217,6 +217,20 @@ struct Setup {
 }
 
 impl Sde {
+    /// The job cost bonus of `structure` in hundredths: 97 is 0.97. `None` for a type with no
+    /// bonus, such as a refinery or an NPC station. It does not check that the type is a structure.
+    pub fn structure_job_cost(&self, structure: TypeId) -> Result<Option<u32>, SdeError> {
+        let multiplier = self
+            .conn
+            .query_row(
+                "SELECT multiplier_hundredths FROM structure_job_costs WHERE type_id = ?1",
+                params![structure],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(multiplier)
+    }
+
     /// The engineering complexes and refineries the app offers, by type id.
     pub fn structures(&self) -> Result<Vec<Structure>, SdeError> {
         let mut statement = self.conn.prepare(

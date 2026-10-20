@@ -68,8 +68,8 @@ mod tests {
         ImportReport {
             build_number: 3_607_705,
             release_date: "2026-10-12T11:08:38Z".to_owned(),
-            types: 76,
-            groups: 27,
+            types: 84,
+            groups: 28,
             categories: 9,
             recipes: 12,
             material_rows: 54,
@@ -81,6 +81,8 @@ mod tests {
             stargates: 224,
             regions: 1,
             stations: 1,
+            decryptors: 8,
+            structure_job_costs: 3,
         }
     }
 

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use profit_core::industry::{Activity, Recipe, TypeId};
+use profit_core::invention::Decryptor;
 use profit_core::volume::Volume;
 use rusqlite::{Connection, Transaction, params};
 use serde::Deserialize;
@@ -34,8 +35,15 @@ const MAP_REGIONS_FILE: &str = "mapRegions.jsonl";
 /// Engineering complexes and refineries: the groups of the structures the app offers.
 const STRUCTURE_GROUPS: [u32; 2] = [ENGINEERING_COMPLEX_GROUP, REFINERY_GROUP];
 const RIG_CATEGORY: u32 = 66;
+/// The group of the eight decryptors the app reads. Other decryptor groups are not read.
+const DECRYPTOR_GROUP_NAME: &str = "Generic Decryptor";
 
 /// Dogma attributes, as in the download. Values are read as exact decimals at the stated places.
+const ATTR_CHANCE: u32 = 1112;
+const ATTR_DECRYPTOR_ME: u32 = 1113;
+const ATTR_DECRYPTOR_TE: u32 = 1114;
+const ATTR_DECRYPTOR_RUNS: u32 = 1124;
+const ATTR_JOB_COST: u32 = 2601;
 const ATTR_RIG_SIZE: u32 = 1547;
 const ATTR_STRUCTURE_MATERIAL: u32 = 2600;
 const ATTR_RIG_MATERIAL_MANUFACTURING: u32 = 2594;
@@ -69,6 +77,8 @@ pub struct ImportReport {
     pub stargates: usize,
     pub regions: usize,
     pub stations: usize,
+    pub decryptors: usize,
+    pub structure_job_costs: usize,
 }
 
 /// Reads the download at `source` and writes a fresh database at `db`.
@@ -218,6 +228,9 @@ struct Download {
     facilities: Facilities,
     map: MapData,
     stations: Vec<Station>,
+    decryptors: Vec<Decryptor>,
+    /// The job cost bonus of each type that has one: its type id and multiplier in hundredths.
+    job_costs: Vec<(TypeId, u32)>,
 }
 
 impl Download {
@@ -226,6 +239,7 @@ impl Download {
         let categories = read_rows(source, CATEGORIES_FILE, CategoryRow::from_record)?;
         let groups = read_rows(source, GROUPS_FILE, GroupRow::from_record)?;
         let types = read_types(source, &groups)?;
+        let (decryptors, job_costs) = read_attributes(source, &types, &groups)?;
         let recipes = Recipes::from_blueprints(&types, parse_file(source, BLUEPRINTS_FILE)?)?;
         let facilities = Facilities::read(source, &types, &groups)?;
         let map = MapData::read(source)?;
@@ -247,6 +261,8 @@ impl Download {
             facilities,
             map,
             stations,
+            decryptors,
+            job_costs,
         })
     }
 
@@ -271,6 +287,8 @@ impl Download {
             stargates: self.map.gates.len(),
             regions: self.map.regions.len(),
             stations: self.stations.len(),
+            decryptors: self.decryptors.len(),
+            structure_job_costs: self.job_costs.len(),
         }
     }
 }
@@ -284,6 +302,8 @@ struct GroupRow {
     id: u32,
     category_id: u32,
     published: bool,
+    /// The English name, if the group has one.
+    name: Option<String>,
 }
 
 struct TypeRow {
@@ -317,13 +337,14 @@ struct CategoryRecord {
     published: Option<bool>,
 }
 
-#[derive(Deserialize, Clone, Copy)]
+#[derive(Deserialize)]
 struct GroupRecord {
     #[serde(rename = "_key")]
     key: Option<u32>,
     #[serde(rename = "categoryID")]
     category_id: Option<u32>,
     published: Option<bool>,
+    name: Option<LocalizedName>,
 }
 
 #[derive(Deserialize)]
@@ -396,6 +417,7 @@ impl GroupRow {
             id: required(record.key, GROUPS_FILE, line, "_key")?,
             category_id: required(record.category_id, GROUPS_FILE, line, "categoryID")?,
             published: required(record.published, GROUPS_FILE, line, "published")?,
+            name: record.name.and_then(|name| name.en),
         })
     }
 }
@@ -597,6 +619,11 @@ impl Dogma {
         Ok(Some(number))
     }
 
+    /// The text the download gives attribute `id`. Empty when there is none.
+    fn text(&self, id: u32) -> String {
+        self.values.get(&id).cloned().unwrap_or_default()
+    }
+
     fn number<T: TryFrom<i64>>(&self, id: u32, decimals: u32) -> Result<T, SdeError> {
         self.optional_number(id, decimals)?
             .ok_or_else(|| SdeError::MissingField {
@@ -754,6 +781,106 @@ fn read_dogma(
         }
     }
     Ok(dogma)
+}
+
+/// The decryptors, and the job cost bonus of every type that has one, as type id and hundredths.
+type Attributes = (Vec<Decryptor>, Vec<(TypeId, u32)>);
+
+/// The decryptors, and the job cost bonus of every type that has one, from the attribute file.
+fn read_attributes(
+    source: &mut Source,
+    types: &[TypeRow],
+    groups: &[GroupRow],
+) -> Result<Attributes, SdeError> {
+    let decryptor_groups: BTreeSet<u32> = groups
+        .iter()
+        .filter(|group| group.name.as_deref() == Some(DECRYPTOR_GROUP_NAME))
+        .map(|group| group.id)
+        .collect();
+    let decryptor_ids: BTreeSet<TypeId> = types
+        .iter()
+        .filter(|row| row.published && decryptor_groups.contains(&row.group_id))
+        .map(|row| row.id)
+        .collect();
+    let mut decryptor_dogma = BTreeMap::new();
+    let mut job_costs = Vec::new();
+    for (line, record) in parse_file::<DogmaRecord>(source, TYPE_DOGMA_FILE)? {
+        let id = required(record.key, TYPE_DOGMA_FILE, line, "_key")?;
+        if let Some(bonus) = record
+            .attributes
+            .iter()
+            .find(|attribute| attribute.id == ATTR_JOB_COST)
+        {
+            job_costs.push((id, job_cost_hundredths(line, &bonus.value.to_string())?));
+        }
+        if decryptor_ids.contains(&id) {
+            let values = record
+                .attributes
+                .iter()
+                .map(|attribute| (attribute.id, attribute.value.to_string()))
+                .collect();
+            decryptor_dogma.insert(id, Dogma { line, values });
+        }
+    }
+    let mut decryptors = Vec::new();
+    for id in decryptor_ids {
+        let dogma = decryptor_dogma
+            .get(&id)
+            .ok_or(SdeError::IncompleteDecryptor {
+                type_id: id,
+                attribute: ATTR_CHANCE,
+            })?;
+        decryptors.push(decryptor_from_dogma(id, dogma)?);
+    }
+    Ok((decryptors, job_costs))
+}
+
+/// A structure's job cost bonus in hundredths: `0.97` is 97. Between 0 and 1, at most 2 decimals.
+fn job_cost_hundredths(line: usize, text: &str) -> Result<u32, SdeError> {
+    let bad = || bad_number(line, ATTR_JOB_COST, text);
+    let value = exact_scaled(text, 2).ok_or_else(bad)?;
+    u32::try_from(value)
+        .ok()
+        .filter(|&hundredths| hundredths <= 100)
+        .ok_or_else(bad)
+}
+
+/// One decryptor from its four attributes. The chance is in hundredths, at most 10.00.
+fn decryptor_from_dogma(type_id: TypeId, dogma: &Dogma) -> Result<Decryptor, SdeError> {
+    let missing = |attribute| SdeError::IncompleteDecryptor { type_id, attribute };
+    let chance: u32 = dogma
+        .optional_number(ATTR_CHANCE, 2)?
+        .ok_or_else(|| missing(ATTR_CHANCE))?;
+    if chance > 1000 {
+        return Err(bad_number(
+            dogma.line,
+            ATTR_CHANCE,
+            &dogma.text(ATTR_CHANCE),
+        ));
+    }
+    Ok(Decryptor {
+        type_id,
+        chance_hundredths: chance,
+        me: dogma
+            .optional_number(ATTR_DECRYPTOR_ME, 0)?
+            .ok_or_else(|| missing(ATTR_DECRYPTOR_ME))?,
+        te: dogma
+            .optional_number(ATTR_DECRYPTOR_TE, 0)?
+            .ok_or_else(|| missing(ATTR_DECRYPTOR_TE))?,
+        runs: dogma
+            .optional_number(ATTR_DECRYPTOR_RUNS, 0)?
+            .ok_or_else(|| missing(ATTR_DECRYPTOR_RUNS))?,
+    })
+}
+
+/// The error for attribute `attribute` of the type at `line` of the attribute file.
+fn bad_number(line: usize, attribute: u32, text: &str) -> SdeError {
+    SdeError::BadNumber {
+        file: TYPE_DOGMA_FILE.to_owned(),
+        line,
+        field: format!("attribute {attribute}"),
+        text: text.to_owned(),
+    }
 }
 
 fn read_modifier_sources(
@@ -1324,8 +1451,32 @@ fn write_rows(tx: &Transaction<'_>, download: &Download) -> Result<(), SdeError>
         }
     }
     write_facilities(tx, &download.facilities)?;
+    write_attributes(tx, download)?;
     write_map(tx, &download.map)?;
     write_stations(tx, &download.stations)?;
+    Ok(())
+}
+
+fn write_attributes(tx: &Transaction<'_>, download: &Download) -> Result<(), SdeError> {
+    let mut decryptors = tx.prepare(
+        "INSERT INTO decryptors (type_id, chance_hundredths, me, te, runs)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )?;
+    for row in &download.decryptors {
+        decryptors.execute(params![
+            row.type_id,
+            row.chance_hundredths,
+            row.me,
+            row.te,
+            row.runs
+        ])?;
+    }
+    let mut job_costs = tx.prepare(
+        "INSERT INTO structure_job_costs (type_id, multiplier_hundredths) VALUES (?1, ?2)",
+    )?;
+    for &(type_id, multiplier) in &download.job_costs {
+        job_costs.execute(params![type_id, multiplier])?;
+    }
     Ok(())
 }
 

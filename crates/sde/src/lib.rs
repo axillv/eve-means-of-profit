@@ -2,6 +2,7 @@
 //!
 //! [`import`] reads a download and writes a fresh database. [`Sde`] answers queries from it.
 
+pub mod decryptor;
 pub mod error;
 pub mod facility;
 pub mod fetch;

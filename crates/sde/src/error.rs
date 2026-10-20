@@ -59,6 +59,11 @@ pub enum SdeError {
         file: String,
         type_id: TypeId,
     },
+    /// A decryptor has no record for one of its four attributes.
+    IncompleteDecryptor {
+        type_id: TypeId,
+        attribute: u32,
+    },
     /// A number is too large to store in the database.
     TooLarge {
         value: u64,
@@ -119,6 +124,9 @@ impl fmt::Display for SdeError {
             Self::NoDogma { file, type_id } => {
                 write!(f, "{file}: type {type_id} has no attribute record")
             }
+            Self::IncompleteDecryptor { type_id, attribute } => {
+                write!(f, "decryptor {type_id} has no attribute {attribute}")
+            }
             Self::TooLarge { value } => write!(f, "the number {value} is too large to store"),
             Self::Sqlite(error) => write!(f, "database error: {error}"),
             Self::NotImported => f.write_str("the static data is not imported with this version"),
@@ -141,6 +149,7 @@ impl std::error::Error for SdeError {
             | Self::UnknownGroup { .. }
             | Self::BadReference { .. }
             | Self::NoDogma { .. }
+            | Self::IncompleteDecryptor { .. }
             | Self::TooLarge { .. }
             | Self::NotImported => None,
         }

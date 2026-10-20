@@ -5,7 +5,7 @@
 use profit_core::industry::Activity;
 
 /// Written to `PRAGMA user_version`. A database with any other value is not read.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// The text stored for an activity in `recipes.activity`.
 pub(crate) fn activity_name(activity: Activity) -> &'static str {
@@ -80,6 +80,17 @@ pub(crate) const CREATE_TABLES: &str = "
         high_tenths INTEGER,
         low_tenths INTEGER NOT NULL,
         null_tenths INTEGER NOT NULL
+    );
+    CREATE TABLE structure_job_costs (
+        type_id INTEGER PRIMARY KEY,
+        multiplier_hundredths INTEGER NOT NULL CHECK (multiplier_hundredths BETWEEN 0 AND 100)
+    );
+    CREATE TABLE decryptors (
+        type_id INTEGER PRIMARY KEY,
+        chance_hundredths INTEGER NOT NULL CHECK (chance_hundredths >= 0),
+        me INTEGER NOT NULL,
+        te INTEGER NOT NULL,
+        runs INTEGER NOT NULL
     );
     CREATE TABLE rig_filters (
         rig_id INTEGER NOT NULL REFERENCES rigs (type_id),
