@@ -2,7 +2,7 @@
 
 use egui::{Button, ComboBox, Id, ScrollArea, Ui};
 use profit_core::industry::{Activity, TypeId};
-use profit_sde::{Facility, Sde, Security, Structure, StructureKind};
+use profit_sde::{Facility, FacilityError, Sde, Security, Structure, StructureKind};
 use profit_store::{FacilityRow, StoreError};
 
 use super::fields::text_field;
@@ -14,6 +14,8 @@ use crate::theme::Style;
 const NPC_STATION: &str = "NPC station";
 /// The most rig dropdowns a form shows: a structure takes at most this many rigs.
 const RIG_SLOTS: usize = 3;
+/// The most facility rows the list shows before it scrolls.
+const TABLE_ROWS: usize = 12;
 
 /// What the panel keeps between frames, in the window's temporary memory.
 #[derive(Debug, Clone, Default)]
@@ -112,6 +114,17 @@ fn draw(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
 
     let style = &cx.style;
     let mut action = toolbar(ui, panel.selected);
+    // The form comes before the list, so it is in view whatever the panel's height.
+    if let Some(form) = panel.form.as_mut() {
+        ui.separator();
+        if let Some(form_action) = draw_form(ui, style, sde, &structures, form) {
+            action = Some(form_action);
+        }
+        ui.separator();
+    }
+    if let Some(message) = &panel.message {
+        ui.colored_label(style.neg, message.as_str());
+    }
     let rows: Vec<Row> = facilities
         .iter()
         .map(|row| facility_row(row, &structures, sde))
@@ -119,21 +132,12 @@ fn draw(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
     let columns = columns();
     let response = Table::new(Id::new("setup facilities"), &columns)
         .selected(panel.selected.and_then(|id| u64::try_from(id).ok()))
+        .fit_rows(TABLE_ROWS)
         .show(ui, style, cx.density, &rows, None);
     if let Some(key) = response.clicked
         && let Ok(id) = i64::try_from(key)
     {
         panel.selected = Some(id);
-    }
-
-    if let Some(form) = panel.form.as_mut() {
-        ui.separator();
-        if let Some(form_action) = draw_form(ui, style, sde, &structures, form) {
-            action = Some(form_action);
-        }
-    }
-    if let Some(message) = &panel.message {
-        ui.colored_label(style.neg, message.as_str());
     }
 
     if let Some(action) = action {
@@ -240,12 +244,35 @@ fn draw_form(
     let error = sde
         .check_facility(&form.facility(), activity_of(structure))
         .err()
-        .map(|error| error.to_string());
+        .map(|error| facility_error_text(sde, &error));
     if let Some(error) = &error {
         ui.colored_label(style.neg, error.as_str());
     }
     let can_save = error.is_none() && !form.name.trim().is_empty();
     save_buttons(ui, can_save)
+}
+
+/// The error text with the rig named, so the player can tell which of the dropdowns it is about.
+fn facility_error_text(sde: &Sde, error: &FacilityError) -> String {
+    let rig_name = |rig: TypeId| match sde.item(rig) {
+        Ok(Some(item)) => item.name,
+        Ok(None) | Err(_) => format!("rig {rig}"),
+    };
+    if let FacilityError::RigGroupTwice(rig) = error {
+        format!(
+            "{} is a second rig of a group that is already fitted",
+            rig_name(*rig)
+        )
+    } else if let FacilityError::RigDoesNotFit { rig, structure } = error {
+        let place = if structure.is_some() {
+            "this structure"
+        } else {
+            "an NPC station"
+        };
+        format!("{} does not fit {place}", rig_name(*rig))
+    } else {
+        error.to_string()
+    }
 }
 
 fn structure_field(ui: &mut Ui, structures: &[Structure], form: &mut Form) {
@@ -301,7 +328,9 @@ fn rig_fields(ui: &mut Ui, sde: &Sde, structure: &Structure, form: &mut Form) {
                 .iter()
                 .find(|rig| Some(rig.type_id) == *choice)
                 .map_or("(none)", |rig| rig.name.as_str());
+            // Rig names are long: use the room there is, up to the length of the longest.
             ComboBox::from_id_salt(("facility rig", slot))
+                .width((ui.available_width() - 24.0).clamp(120.0, 440.0))
                 .selected_text(current)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(choice, None, "(none)");
@@ -332,25 +361,25 @@ fn columns() -> Vec<Column> {
             id: "name",
             label: "Name".to_owned(),
             kind: ColumnKind::Text,
-            width: 200.0,
+            width: 140.0,
         },
         Column {
             id: "structure",
             label: "Structure".to_owned(),
             kind: ColumnKind::Text,
-            width: 150.0,
+            width: 130.0,
         },
         Column {
             id: "security",
             label: "Security".to_owned(),
             kind: ColumnKind::Text,
-            width: 90.0,
+            width: 80.0,
         },
         Column {
             id: "rigs",
             label: "Rigs".to_owned(),
             kind: ColumnKind::Text,
-            width: 320.0,
+            width: 200.0,
         },
     ]
 }

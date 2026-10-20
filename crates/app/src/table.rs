@@ -29,6 +29,8 @@ const ARROW_WIDTH: f32 = 14.0;
 const INDENT: f32 = 14.0;
 /// How far a sort triangle sits in from the edge of its header cell.
 const MARK_INSET: f32 = 8.0;
+/// The room left at each side of a cell's text, so a number does not touch the next column's text.
+const CELL_PAD: f32 = 6.0;
 
 /// What the table reports from one frame.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +71,7 @@ pub struct Table<'a> {
     id: Id,
     columns: &'a [Column],
     selected: Option<u64>,
+    fit_rows: Option<usize>,
 }
 
 impl<'a> Table<'a> {
@@ -77,7 +80,15 @@ impl<'a> Table<'a> {
             id,
             columns,
             selected: None,
+            fit_rows: None,
         }
+    }
+
+    /// Makes the table only as tall as its rows, up to `rows` of them, instead of taking all the
+    /// height the panel has left. A panel with a form under or over the table needs this.
+    pub fn fit_rows(mut self, rows: usize) -> Self {
+        self.fit_rows = Some(rows);
+        self
     }
 
     /// The row to draw as selected.
@@ -108,11 +119,46 @@ impl<'a> Table<'a> {
         footer: Option<&[Cell]>,
         draw: &mut dyn FnMut(&mut Ui, u64, &'static str) -> bool,
     ) -> TableResponse {
+        let panel_width = ui.available_width();
+        let panel_height = ui.available_height();
+        // Columns wider than the panel scroll sideways instead of running into each other.
+        ScrollArea::horizontal()
+            .id_salt(self.id.with("sideways"))
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                self.show_inner(
+                    ui,
+                    (panel_width, panel_height),
+                    style,
+                    density,
+                    rows,
+                    footer,
+                    draw,
+                )
+            })
+            .inner
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the arguments of `show_with`, plus the panel size taken before the scroll area"
+    )]
+    fn show_inner(
+        self,
+        ui: &mut Ui,
+        (panel_width, panel_height): (f32, f32),
+        style: &Style,
+        density: Density,
+        rows: &[Row],
+        footer: Option<&[Cell]>,
+        draw: &mut dyn FnMut(&mut Ui, u64, &'static str) -> bool,
+    ) -> TableResponse {
         let mut state: State =
             ui.data_mut(|data| data.get_temp_mut_or_default::<State>(self.id).clone());
         let sort_before = state.sort;
         let height = row_height(density);
-        let width = ui.available_width();
+        let columns_width: f32 = self.columns.iter().map(|column| column.width).sum();
+        let width = panel_width.max(columns_width);
         let mut response = TableResponse::default();
 
         let (header, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
@@ -144,7 +190,14 @@ impl<'a> Table<'a> {
         };
         // The footer is drawn below the scroll area, so the rows leave room for it.
         let footer_height = if footer.is_some() { height } else { 0.0 };
-        let body = (ui.available_height() - footer_height).max(0.0);
+        let mut body = (panel_height - footer_height - height).max(0.0);
+        if let Some(fit) = self.fit_rows {
+            // A table with no rows keeps one row of room, so it does not vanish.
+            let wanted = shown.len().clamp(1, fit.max(1));
+            // Past 65,535 rows the table is as tall as the panel allows anyway.
+            let content = f32::from(u16::try_from(wanted).unwrap_or(u16::MAX)) * height;
+            body = body.min(content);
+        }
         ScrollArea::vertical()
             .id_salt(self.id)
             .auto_shrink([false, false])
@@ -230,7 +283,7 @@ fn draw_header(
         }
         ui.scope_builder(
             UiBuilder::new()
-                .max_rect(cell)
+                .max_rect(cell.shrink2(vec2(CELL_PAD, 0.0)))
                 .layout(layout_for(column.kind)),
             |ui| {
                 plain_label(ui, &column.label);
@@ -320,7 +373,7 @@ fn draw_footer(ui: &mut Ui, columns: &[Column], cells: &[Cell], rect: Rect, styl
         let text = cells.get(position).map_or("", |cell| cell.text.as_str());
         ui.scope_builder(
             UiBuilder::new()
-                .max_rect(cell)
+                .max_rect(cell.shrink2(vec2(CELL_PAD, 0.0)))
                 .layout(layout_for(column.kind)),
             |ui| {
                 plain_label(ui, text);
@@ -379,7 +432,7 @@ fn draw_row(
         };
         ui.scope_builder(
             UiBuilder::new()
-                .max_rect(content)
+                .max_rect(content.shrink2(vec2(CELL_PAD, 0.0)))
                 .layout(layout_for(column.kind)),
             |ui| {
                 // A cell the callback drew is left as it is.

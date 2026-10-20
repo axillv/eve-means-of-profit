@@ -20,9 +20,7 @@ mod tests {
     use profit_core::money::{Money, Rate};
     use profit_core::volume::Volume;
     use profit_market::book::PriceRule;
-    use profit_sde::{
-        Facility, FacilityError, Fetch, FetchError, RouteKind, Sde, Security, import,
-    };
+    use profit_sde::{Facility, Fetch, FetchError, RouteKind, Sde, Security, import};
     use profit_store::{PlanRecord, Store};
     use tempfile::TempDir;
 
@@ -360,7 +358,8 @@ mod tests {
             0,
         );
 
-        let error = FacilityError::RigGroupTwice(RIGS[3]).to_string();
+        let name = folders.sde().item(RIGS[3]).unwrap().unwrap().name;
+        let error = format!("{name} is a second rig of a group that is already fitted");
         assert!(shown(&harness, &error));
         assert!(disabled(&harness, "Save"));
     }

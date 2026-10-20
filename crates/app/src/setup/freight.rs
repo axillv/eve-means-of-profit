@@ -19,6 +19,8 @@ use crate::theme::Style;
 
 /// How many systems the search under a route field lists.
 const SEARCH_LIMIT: usize = 10;
+/// The most service rows the list shows before it scrolls.
+const TABLE_ROWS: usize = 12;
 
 /// What the panel keeps between frames, in the window's temporary memory.
 #[derive(Clone, Default)]
@@ -204,6 +206,13 @@ fn route_list(
             action = Some(Action::DeleteRoute);
         }
     });
+    if let Some(form) = panel.route_form.as_mut() {
+        ui.separator();
+        if let Some(route_action) = draw_route_form(ui, style, sde, form) {
+            action = Some(route_action);
+        }
+        ui.separator();
+    }
     for route in routes {
         let selected = panel.selected_route == Some(route.id);
         if ui
@@ -211,12 +220,6 @@ fn route_list(
             .clicked()
         {
             action = Some(Action::SelectRoute(route.id));
-        }
-    }
-    if let Some(form) = panel.route_form.as_mut() {
-        ui.separator();
-        if let Some(route_action) = draw_route_form(ui, style, sde, form) {
-            action = Some(route_action);
         }
     }
     action
@@ -258,19 +261,6 @@ fn service_list(
             action = selected.map(Action::DeleteService);
         }
     });
-    let rows: Vec<Row> = services
-        .iter()
-        .map(|service| service_row(service, map, route))
-        .collect();
-    let columns = columns();
-    let response = Table::new(Id::new("setup services"), &columns)
-        .selected(panel.selected_service.and_then(|id| u64::try_from(id).ok()))
-        .show(ui, style, density, &rows, None);
-    if let Some(key) = response.clicked
-        && let Ok(id) = i64::try_from(key)
-    {
-        panel.selected_service = Some(id);
-    }
     if let Some(form) = panel.service_form.as_mut() {
         ui.separator();
         let hint = jumps_text(
@@ -281,6 +271,21 @@ fn service_list(
         if let Some(service_action) = draw_service_form(ui, style, &hint, form) {
             action = Some(service_action);
         }
+        ui.separator();
+    }
+    let rows: Vec<Row> = services
+        .iter()
+        .map(|service| service_row(service, map, route))
+        .collect();
+    let columns = columns();
+    let response = Table::new(Id::new("setup services"), &columns)
+        .selected(panel.selected_service.and_then(|id| u64::try_from(id).ok()))
+        .fit_rows(TABLE_ROWS)
+        .show(ui, style, density, &rows, None);
+    if let Some(key) = response.clicked
+        && let Ok(id) = i64::try_from(key)
+    {
+        panel.selected_service = Some(id);
     }
     action
 }
@@ -525,9 +530,9 @@ fn columns() -> Vec<Column> {
         column("name", "Name", ColumnKind::Text, 130.0),
         column("per_m3", "ISK/m³", ColumnKind::Money, 100.0),
         column("per_jump", "ISK/jump", ColumnKind::Money, 100.0),
-        column("collateral", "Collateral %", ColumnKind::Text, 110.0),
+        column("collateral", "Collateral %", ColumnKind::Number, 110.0),
         column("minimum", "Minimum", ColumnKind::Money, 130.0),
-        column("max_m3", "Max m³", ColumnKind::Text, 110.0),
+        column("max_m3", "Max m³", ColumnKind::Number, 110.0),
         column("max_collateral", "Max collateral", ColumnKind::Money, 150.0),
         column("route", "Route", ColumnKind::Text, 110.0),
         column("jumps", "Jumps", ColumnKind::Text, 110.0),
