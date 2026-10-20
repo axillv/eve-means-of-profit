@@ -13,6 +13,7 @@ pub mod money;
 pub mod net_worth;
 pub mod paste;
 pub mod plan;
+pub mod price_history;
 pub mod reserve;
 pub mod stock;
 pub mod stockpile;
