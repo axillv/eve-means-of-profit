@@ -5,7 +5,7 @@
 use profit_core::industry::Activity;
 
 /// Written to `PRAGMA user_version`. A database with any other value is not read.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// The text stored for an activity in `recipes.activity`.
 pub(crate) fn activity_name(activity: Activity) -> &'static str {
@@ -66,6 +66,28 @@ pub(crate) const CREATE_TABLES: &str = "
         type_id INTEGER NOT NULL,
         quantity INTEGER NOT NULL,
         PRIMARY KEY (product_id, position)
+    );
+    CREATE TABLE invention_products (
+        blueprint_id INTEGER NOT NULL,
+        position INTEGER NOT NULL,
+        product_id INTEGER NOT NULL,
+        probability_ppm INTEGER NOT NULL CHECK (probability_ppm BETWEEN 1 AND 1000000),
+        quantity INTEGER NOT NULL CHECK (quantity >= 1),
+        PRIMARY KEY (blueprint_id, position)
+    );
+    CREATE TABLE invention_materials (
+        blueprint_id INTEGER NOT NULL,
+        position INTEGER NOT NULL,
+        type_id INTEGER NOT NULL,
+        quantity INTEGER NOT NULL CHECK (quantity >= 1),
+        PRIMARY KEY (blueprint_id, position)
+    );
+    CREATE TABLE invention_skills (
+        blueprint_id INTEGER NOT NULL,
+        position INTEGER NOT NULL,
+        type_id INTEGER NOT NULL,
+        level INTEGER NOT NULL CHECK (level BETWEEN 0 AND 5),
+        PRIMARY KEY (blueprint_id, position)
     );
     CREATE TABLE structures (
         type_id INTEGER PRIMARY KEY,

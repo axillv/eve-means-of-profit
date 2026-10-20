@@ -5,10 +5,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, ErrorKind, Read};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use profit_core::industry::{Activity, Recipe, TypeId};
 use profit_core::invention::Decryptor;
+use profit_core::money::Rate;
 use profit_core::volume::Volume;
 use rusqlite::{Connection, Transaction, params};
 use serde::Deserialize;
@@ -17,6 +19,7 @@ use serde_json::Number;
 
 use crate::error::SdeError;
 use crate::facility::{ENGINEERING_COMPLEX_GROUP, REFINERY_GROUP};
+use crate::invention::{InventionActivity, InventionProduct, SkillRequirement};
 use crate::schema::{CREATE_TABLES, SCHEMA_VERSION, activity_name};
 use crate::stations::{self, Station};
 
@@ -79,6 +82,8 @@ pub struct ImportReport {
     pub stations: usize,
     pub decryptors: usize,
     pub structure_job_costs: usize,
+    /// Invention activities with at least one product. Activities without one are not counted.
+    pub invention_activities: usize,
 }
 
 /// Reads the download at `source` and writes a fresh database at `db`.
@@ -231,6 +236,7 @@ struct Download {
     decryptors: Vec<Decryptor>,
     /// The job cost bonus of each type that has one: its type id and multiplier in hundredths.
     job_costs: Vec<(TypeId, u32)>,
+    inventions: Vec<InventionActivity>,
 }
 
 impl Download {
@@ -240,7 +246,9 @@ impl Download {
         let groups = read_rows(source, GROUPS_FILE, GroupRow::from_record)?;
         let types = read_types(source, &groups)?;
         let (decryptors, job_costs) = read_attributes(source, &types, &groups)?;
-        let recipes = Recipes::from_blueprints(&types, parse_file(source, BLUEPRINTS_FILE)?)?;
+        let blueprints: Vec<(usize, BlueprintRecord)> = parse_file(source, BLUEPRINTS_FILE)?;
+        let inventions = read_inventions(&types, &blueprints)?;
+        let recipes = Recipes::from_blueprints(&types, blueprints)?;
         let facilities = Facilities::read(source, &types, &groups)?;
         let map = MapData::read(source)?;
         let system_names: BTreeMap<u32, String> = map
@@ -263,6 +271,7 @@ impl Download {
             stations,
             decryptors,
             job_costs,
+            inventions,
         })
     }
 
@@ -289,6 +298,7 @@ impl Download {
             stations: self.stations.len(),
             decryptors: self.decryptors.len(),
             structure_job_costs: self.job_costs.len(),
+            invention_activities: self.inventions.len(),
         }
     }
 }
@@ -383,7 +393,7 @@ struct BlueprintRecord {
 struct Activities {
     manufacturing: Option<ActivityRecord>,
     reaction: Option<ActivityRecord>,
-    invention: Option<ActivityRecord>,
+    invention: Option<InventionRecord>,
 }
 
 #[derive(Deserialize)]
@@ -400,6 +410,40 @@ struct Quantity {
     #[serde(rename = "typeID")]
     type_id: TypeId,
     quantity: u64,
+}
+
+/// An invention activity. Its numbers are kept as written, so a bad one is named by its field.
+#[derive(Deserialize)]
+struct InventionRecord {
+    #[serde(default)]
+    materials: Vec<InventionMaterialRecord>,
+    #[serde(default)]
+    products: Vec<InventionProductRecord>,
+    #[serde(default)]
+    skills: Vec<SkillRecord>,
+}
+
+#[derive(Deserialize)]
+struct InventionMaterialRecord {
+    #[serde(rename = "typeID")]
+    type_id: TypeId,
+    quantity: Number,
+}
+
+#[derive(Deserialize)]
+struct InventionProductRecord {
+    #[serde(rename = "typeID")]
+    type_id: TypeId,
+    /// Absent for some unpublished blueprints.
+    probability: Option<Number>,
+    quantity: Number,
+}
+
+#[derive(Deserialize)]
+struct SkillRecord {
+    #[serde(rename = "typeID")]
+    type_id: TypeId,
+    level: Number,
 }
 
 impl CategoryRow {
@@ -554,6 +598,95 @@ fn recipe_from_activity(
             .collect(),
         made_by_invention,
     })
+}
+
+/// The invention activities of the blueprints, in file order. An activity with no products is not
+/// kept. A skill must be in `types.jsonl`, because its name is kept with the activity.
+fn read_inventions(
+    types: &[TypeRow],
+    blueprints: &[(usize, BlueprintRecord)],
+) -> Result<Vec<InventionActivity>, SdeError> {
+    let names: BTreeMap<TypeId, &str> = types
+        .iter()
+        .map(|row| (row.id, row.name.as_str()))
+        .collect();
+    let mut activities = Vec::new();
+    for (line, blueprint) in blueprints {
+        let line = *line;
+        let Some(record) = &blueprint.activities.invention else {
+            continue;
+        };
+        if record.products.is_empty() {
+            continue;
+        }
+        // An activity with a product that has no chance cannot be costed, so it is not kept.
+        let Some(chances) = record
+            .products
+            .iter()
+            .map(|product| product.probability.as_ref())
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let mut products = Vec::with_capacity(record.products.len());
+        for (product, chance) in record.products.iter().zip(chances) {
+            products.push(InventionProduct {
+                type_id: product.type_id,
+                probability: probability(chance, line)?,
+                quantity: whole::<u32>(&product.quantity, |value| *value >= 1)
+                    .ok_or_else(|| bad_whole(line, "quantity", &product.quantity))?,
+            });
+        }
+        let mut materials = Vec::with_capacity(record.materials.len());
+        for material in &record.materials {
+            let quantity = whole::<u64>(&material.quantity, |value| *value >= 1)
+                .ok_or_else(|| bad_whole(line, "quantity", &material.quantity))?;
+            materials.push((material.type_id, quantity));
+        }
+        let mut skills = Vec::with_capacity(record.skills.len());
+        for skill in &record.skills {
+            let name = names
+                .get(&skill.type_id)
+                .ok_or_else(|| bad_reference(BLUEPRINTS_FILE, line, "typeID", skill.type_id))?;
+            let level = whole::<u8>(&skill.level, |value| *value <= 5)
+                .ok_or_else(|| bad_whole(line, "level", &skill.level))?;
+            skills.push(SkillRequirement {
+                type_id: skill.type_id,
+                name: (*name).to_owned(),
+                level,
+            });
+        }
+        activities.push(InventionActivity {
+            blueprint: required(blueprint.key, BLUEPRINTS_FILE, line, "_key")?,
+            products,
+            materials,
+            skills,
+        });
+    }
+    Ok(activities)
+}
+
+/// A whole number from its literal text, when `valid` accepts it. Anything else is `None`.
+fn whole<T: FromStr>(number: &Number, valid: impl FnOnce(&T) -> bool) -> Option<T> {
+    number.to_string().parse::<T>().ok().filter(valid)
+}
+
+/// A probability in parts per million, from its literal text: `0.34` is 340,000. Zero, more than
+/// six decimals and values above 1 are refused.
+fn probability(number: &Number, line: usize) -> Result<Rate, SdeError> {
+    Rate::parse_fraction(&number.to_string())
+        .ok()
+        .filter(|rate| rate.ppm() >= 1)
+        .ok_or_else(|| bad_whole(line, "probability", number))
+}
+
+fn bad_whole(line: usize, field: &str, number: &Number) -> SdeError {
+    SdeError::BadNumber {
+        file: BLUEPRINTS_FILE.to_owned(),
+        line,
+        field: field.to_owned(),
+        text: number.to_string(),
+    }
 }
 
 /// The structures, rigs and target filters the facility queries read.
@@ -1450,10 +1583,59 @@ fn write_rows(tx: &Transaction<'_>, download: &Download) -> Result<(), SdeError>
             ])?;
         }
     }
+    write_inventions(tx, &download.inventions)?;
     write_facilities(tx, &download.facilities)?;
     write_attributes(tx, download)?;
     write_map(tx, &download.map)?;
     write_stations(tx, &download.stations)?;
+    Ok(())
+}
+
+/// The invention activities: their products, materials and skills, each in file order.
+fn write_inventions(
+    tx: &Transaction<'_>,
+    inventions: &[InventionActivity],
+) -> Result<(), SdeError> {
+    let mut invention_products = tx.prepare(
+        "INSERT INTO invention_products (blueprint_id, position, product_id, probability_ppm,
+                                         quantity)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )?;
+    let mut invention_materials = tx.prepare(
+        "INSERT INTO invention_materials (blueprint_id, position, type_id, quantity)
+         VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    let mut invention_skills = tx.prepare(
+        "INSERT INTO invention_skills (blueprint_id, position, type_id, level)
+         VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    for activity in inventions {
+        for (position, product) in (0_i64..).zip(&activity.products) {
+            invention_products.execute(params![
+                activity.blueprint,
+                position,
+                product.type_id,
+                product.probability.ppm(),
+                product.quantity
+            ])?;
+        }
+        for (position, &(type_id, quantity)) in (0_i64..).zip(&activity.materials) {
+            invention_materials.execute(params![
+                activity.blueprint,
+                position,
+                type_id,
+                sql_int(quantity)?
+            ])?;
+        }
+        for (position, skill) in (0_i64..).zip(&activity.skills) {
+            invention_skills.execute(params![
+                activity.blueprint,
+                position,
+                skill.type_id,
+                skill.level
+            ])?;
+        }
+    }
     Ok(())
 }
 
