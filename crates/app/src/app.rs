@@ -83,6 +83,8 @@ pub struct Shared {
     pub sde: Option<Sde>,
     pub store: Store,
     pub worker: Worker,
+    /// The Jita prices the Build page reads, shared with the Items and the Orders pages.
+    pub market: Arc<build::prices::Prices>,
     pub style: Style,
     pub density: Density,
     pub notices: Vec<Notice>,
@@ -157,6 +159,9 @@ impl App {
                 sde,
                 store,
                 worker: Worker::spawn(ctx.clone(), config.fetch),
+                market: Arc::new(build::prices::Prices::new(Box::new(
+                    profit_market::http::UreqHttp::new(),
+                ))),
                 style,
                 density: settings.density,
                 notices: Vec::new(),
@@ -199,11 +204,13 @@ impl App {
         }
         self.menu_bar(ui);
         let activity = self.activity();
+        let idle = self.idle_text();
         let clicked = status::show(
             ui,
             &self.shared.style,
             &mut self.shared.notices,
             activity.as_deref(),
+            &idle,
         );
         if let Some(Action::Update { build }) = clicked {
             self.start_update(build);
@@ -285,6 +292,20 @@ impl App {
                 first_run::progress_text(done, total)
             )
         })
+    }
+
+    /// The idle text of the status line: the age of the oldest market price held, when there is one.
+    fn idle_text(&self) -> String {
+        match self.shared.market.oldest_change() {
+            Some(changed) => {
+                let now = (self.shared.clock)();
+                format!(
+                    "Market data: oldest {}",
+                    build::prices::age_text(now.saturating_sub(changed))
+                )
+            }
+            None => status::IDLE_TEXT.to_owned(),
+        }
     }
 
     fn drain_events(&mut self) {

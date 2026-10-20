@@ -7,7 +7,7 @@ use egui::Ui;
 
 use crate::theme::Style;
 
-const IDLE_TEXT: &str = "No market data yet";
+pub const IDLE_TEXT: &str = "No market data yet";
 /// Longer notices are cut to this many characters; the full text shows on hover.
 const CUT_AT: usize = 120;
 
@@ -60,6 +60,7 @@ pub fn show(
     style: &Style,
     notices: &mut Vec<Notice>,
     activity: Option<&str>,
+    idle: &str,
 ) -> Option<Action> {
     let mut action = None;
     let mut dismiss = false;
@@ -89,7 +90,7 @@ pub fn show(
                     dismiss = true;
                 }
             } else {
-                ui.label(IDLE_TEXT);
+                ui.label(idle);
             }
         });
     });

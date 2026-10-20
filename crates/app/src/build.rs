@@ -2,8 +2,10 @@
 //! of steps with what is taken from stock and what is left to buy. [`show`] draws one panel's body;
 //! the dock draws each panel's header.
 
+pub mod buy_list;
 pub mod inputs;
 pub mod plans;
+pub mod prices;
 pub mod state;
 pub mod steps;
 pub mod stock;
@@ -35,13 +37,13 @@ impl BuildPanel {
     }
 }
 
-/// Draws the body of one Build panel. The buy list is still a stub.
+/// Draws the body of one Build panel.
 pub fn show(page: &mut BuildPage, panel: BuildPanel, ui: &mut Ui, cx: &mut Shared) {
     match panel {
         BuildPanel::Plans => plans::show(page, ui, cx),
         BuildPanel::PastedStock => stock::show(page, ui, cx),
         BuildPanel::Plan => inputs::show(page, ui, cx),
         BuildPanel::Steps => steps::show(page, ui, cx),
-        BuildPanel::BuyList => {}
+        BuildPanel::BuyList => buy_list::show(page, ui, cx),
     }
 }

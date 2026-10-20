@@ -8,13 +8,17 @@ mod tests {
     use std::io::Write;
     use std::ops::ControlFlow;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
     use egui::accesskit::Role;
     use egui::{Event, Key, Modifiers, vec2};
     use egui_kittest::kittest::{NodeT, Queryable, by};
     use egui_kittest::{Harness, SnapshotResults};
+    use eve_means_of_profit::build::prices::Prices;
     use eve_means_of_profit::{App, AppConfig};
     use profit_market::book::PriceRule;
+    use profit_market::cache::{Http, HttpResponse};
+    use profit_market::error::MarketError;
     use profit_sde::{Facility, Fetch, FetchError, Security, import};
     use profit_store::Store;
     use tempfile::TempDir;
@@ -136,6 +140,29 @@ mod tests {
         assert!(has_value(&harness, "Forge sell, cheapest"));
     }
 
+    /// Jita with no orders at all, so the Buy list never reaches the network in these tests. Every
+    /// book is read as empty, and dated the test clock.
+    struct EmptyJita;
+
+    impl Http for EmptyJita {
+        fn get(
+            &self,
+            _url: &str,
+            _if_none_match: Option<&str>,
+        ) -> Result<HttpResponse, MarketError> {
+            let dated = "Mon, 12 Jan 1970 13:46:40 GMT".to_owned();
+            Ok(HttpResponse {
+                status: 200,
+                etag: None,
+                last_modified: Some(dated.clone()),
+                expires: Some(dated),
+                pages: None,
+                retry_after: None,
+                body: "[]".to_owned(),
+            })
+        }
+    }
+
     fn start(env: &Env) -> Harness<'static, App> {
         let config = AppConfig {
             data_dir: env.data.clone(),
@@ -143,9 +170,11 @@ mod tests {
             fetch: Box::new(NoNetwork),
             clock: Box::new(|| NOW),
         };
-        Harness::builder()
+        let mut harness = Harness::builder()
             .with_size(vec2(1280.0, 800.0))
-            .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"))
+            .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
+        harness.state_mut().shared_mut().market = Arc::new(Prices::new(Box::new(EmptyJita)));
+        harness
     }
 
     fn shown(harness: &Harness<'_, App>, text: &str) -> bool {
@@ -201,31 +230,78 @@ mod tests {
             .is_some()
     }
 
+    /// The left edge of the Buy list panel, which sits right of the Steps panel. The Buy list shows
+    /// the same item names, so the Steps rows are looked up left of this edge.
+    fn steps_edge(harness: &Harness<'_, App>) -> f32 {
+        harness.get_by_label("Buy list").rect().min.x
+    }
+
+    /// The height of the Steps row labelled `row`.
+    fn steps_y(harness: &Harness<'_, App>, row: &str) -> f32 {
+        let edge = steps_edge(harness);
+        harness
+            .query_all_by_label(row)
+            .find(|node| node.rect().min.x < edge)
+            .expect("the row in Steps")
+            .rect()
+            .center()
+            .y
+    }
+
     /// The cell texts of the row labelled `row`, left to right: the item name, then each column
     /// that has text (the Build box has none). Spare 0 is an empty text.
     fn cells(harness: &Harness<'_, App>, row: &str) -> Vec<String> {
-        let y = harness.get_by_label(row).rect().center().y;
-        let mut found: Vec<(f32, String)> = harness
+        let edge = steps_edge(harness);
+        let y = steps_y(harness, row);
+        let nodes: Vec<(f32, f32, Option<String>)> = harness
             .query_all(by().predicate(|node| node.bounding_box().is_some()))
-            .filter(|node| (node.rect().center().y - y).abs() < 4.0)
-            .filter_map(|node| node.value().map(|value| (node.rect().min.x, value)))
-            .filter(|(_, value)| !value.is_empty())
+            .map(|node| (node.rect().min.x, node.rect().center().y, node.value()))
             .collect();
-        found.sort_by(|a, b| a.0.total_cmp(&b.0));
-        found.into_iter().map(|(_, value)| value).collect()
+        // The Steps table is wider than its panel and scrolls sideways, so its cells can reach past
+        // the Buy list's edge. Nodes come in drawing order, left to right within a row; the row ends
+        // where the x-position falls back, which is where the Buy list's first node starts.
+        let start = nodes
+            .iter()
+            .position(|(x, _, value)| *x < edge && value.as_deref() == Some(row))
+            .expect("the row in Steps");
+        let mut found: Vec<String> = Vec::new();
+        let mut last = f32::MIN;
+        for (x, node_y, value) in &nodes[start..] {
+            if (node_y - y).abs() >= 4.0 {
+                continue;
+            }
+            if *x < last {
+                break;
+            }
+            last = *x;
+            if let Some(value) = value
+                && !value.is_empty()
+            {
+                found.push(value.clone());
+            }
+        }
+        found
     }
 
     /// The top edge of the first node labelled `label`, to check the order of rows.
     fn top_of(harness: &Harness<'_, App>, label: &str) -> f32 {
-        harness.get_by_label(label).rect().min.y
+        let edge = steps_edge(harness);
+        harness
+            .query_all_by_label(label)
+            .find(|node| node.rect().min.x < edge)
+            .expect("the row in Steps")
+            .rect()
+            .min
+            .y
     }
 
     /// Ticks the Build box on the row labelled `row`, or the ME box of that row.
     fn tick_row(harness: &mut Harness<'_, App>, row: &str) {
-        let y = harness.get_by_label(row).rect().center().y;
+        let edge = steps_edge(harness);
+        let y = steps_y(harness, row);
         harness
             .get_all_by_role(Role::CheckBox)
-            .find(|node| (node.rect().center().y - y).abs() < 4.0)
+            .find(|node| node.rect().min.x < edge && (node.rect().center().y - y).abs() < 4.0)
             .expect("a Build box on the row")
             .click();
         harness.run();
@@ -233,10 +309,11 @@ mod tests {
 
     /// Whether the Build box on the row labelled `row` is disabled.
     fn tick_disabled(harness: &Harness<'_, App>, row: &str) -> bool {
-        let y = harness.get_by_label(row).rect().center().y;
+        let edge = steps_edge(harness);
+        let y = steps_y(harness, row);
         harness
             .get_all_by_role(Role::CheckBox)
-            .find(|node| (node.rect().center().y - y).abs() < 4.0)
+            .find(|node| node.rect().min.x < edge && (node.rect().center().y - y).abs() < 4.0)
             .expect("a Build box on the row")
             .accesskit_node()
             .is_disabled()
@@ -244,10 +321,11 @@ mod tests {
 
     /// Hovers the Build box on the row labelled `row`.
     fn hover_tick(harness: &mut Harness<'_, App>, row: &str) {
-        let y = harness.get_by_label(row).rect().center().y;
+        let edge = steps_edge(harness);
+        let y = steps_y(harness, row);
         harness
             .get_all_by_role(Role::CheckBox)
-            .find(|node| (node.rect().center().y - y).abs() < 4.0)
+            .find(|node| node.rect().min.x < edge && (node.rect().center().y - y).abs() < 4.0)
             .expect("a Build box on the row")
             .hover();
         harness.run();
@@ -255,10 +333,11 @@ mod tests {
 
     /// Sets the ME box of the row labelled `row` to `me`.
     fn set_me(harness: &mut Harness<'_, App>, row: &str, me: &str) {
-        let y = harness.get_by_label(row).rect().center().y;
+        let edge = steps_edge(harness);
+        let y = steps_y(harness, row);
         harness
             .get_all_by_role(Role::SpinButton)
-            .find(|node| (node.rect().center().y - y).abs() < 4.0)
+            .find(|node| node.rect().min.x < edge && (node.rect().center().y - y).abs() < 4.0)
             .expect("an ME box on the row")
             .click();
         harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
