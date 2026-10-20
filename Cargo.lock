@@ -3398,6 +3398,7 @@ dependencies = [
 name = "profit-market"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "httpdate",
  "profit-core",
  "serde",

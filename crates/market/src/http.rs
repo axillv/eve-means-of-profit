@@ -5,26 +5,37 @@ use std::time::Duration;
 
 use crate::cache::{Http, HttpResponse};
 use crate::error::MarketError;
+use crate::fuzzwork::{BytesHttp, BytesResponse};
 
 const TIMEOUT: Duration = Duration::from_secs(20);
+/// The whole-region file is several megabytes, so its download gets more time.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+/// The largest body read for a download.
+const MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 const COMPATIBILITY_DATE: &str = "2025-12-16";
 
 /// ESI over HTTPS. Statuses other than success come back as responses, not errors, so the cache can decide.
 pub struct UreqHttp {
     agent: ureq::Agent,
+    download_agent: ureq::Agent,
 }
 
 impl UreqHttp {
     pub fn new() -> Self {
-        let config = ureq::Agent::config_builder()
-            .user_agent(concat!("eve-means-of-profit/", env!("CARGO_PKG_VERSION")))
-            .timeout_global(Some(TIMEOUT))
-            .http_status_as_error(false)
-            .build();
         Self {
-            agent: ureq::Agent::new_with_config(config),
+            agent: agent(TIMEOUT),
+            download_agent: agent(DOWNLOAD_TIMEOUT),
         }
     }
+}
+
+fn agent(timeout: Duration) -> ureq::Agent {
+    let config = ureq::Agent::config_builder()
+        .user_agent(concat!("eve-means-of-profit/", env!("CARGO_PKG_VERSION")))
+        .timeout_global(Some(timeout))
+        .http_status_as_error(false)
+        .build();
+    ureq::Agent::new_with_config(config)
 }
 
 impl Default for UreqHttp {
@@ -46,19 +57,13 @@ impl Http for UreqHttp {
             .call()
             .map_err(|error| MarketError::Network(error.to_string()))?;
         let status = response.status().as_u16();
-        let header = |name: &str| {
-            response
-                .headers()
-                .get(name)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned)
-        };
-        let etag = header("etag");
-        let last_modified = header("last-modified");
-        let expires = header("expires");
-        let pages = pages_for(status, header("x-pages"))?;
+        let etag = header(response.headers(), "etag");
+        let last_modified = header(response.headers(), "last-modified");
+        let expires = header(response.headers(), "expires");
+        let pages = pages_for(status, header(response.headers(), "x-pages"))?;
         // An unreadable `retry-after` counts as absent, so a rate-limit answer still starts the default wait.
-        let retry_after = header("retry-after").and_then(|text| text.parse().ok());
+        let retry_after =
+            header(response.headers(), "retry-after").and_then(|text| text.parse().ok());
         let body = response
             .body_mut()
             .read_to_string()
@@ -72,6 +77,60 @@ impl Http for UreqHttp {
             retry_after,
             body,
         })
+    }
+}
+
+impl BytesHttp for UreqHttp {
+    fn get_bytes(
+        &self,
+        url: &str,
+        if_none_match: Option<&str>,
+    ) -> Result<BytesResponse, MarketError> {
+        let mut request = self
+            .download_agent
+            .get(url)
+            .header("X-Compatibility-Date", COMPATIBILITY_DATE);
+        if let Some(etag) = if_none_match {
+            request = request.header("If-None-Match", etag);
+        }
+        let mut response = request
+            .call()
+            .map_err(|error| MarketError::Network(error.to_string()))?;
+        let status = response.status().as_u16();
+        let etag = header(response.headers(), "etag");
+        let last_modified = header(response.headers(), "last-modified");
+        let retry_after =
+            header(response.headers(), "retry-after").and_then(|text| text.parse().ok());
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_DOWNLOAD_BYTES)
+            .read_to_vec()
+            .map_err(|error| download_error(&error))?;
+        Ok(BytesResponse {
+            status,
+            etag,
+            last_modified,
+            retry_after,
+            body,
+        })
+    }
+}
+
+/// A response header as text, when present and valid UTF-8.
+fn header(headers: &ureq::http::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
+
+/// A body over the download limit is [`MarketError::TooLarge`]; any other read failure is a network error.
+fn download_error(error: &ureq::Error) -> MarketError {
+    if let ureq::Error::BodyExceedsLimit(_) = error {
+        MarketError::TooLarge
+    } else {
+        MarketError::Network(error.to_string())
     }
 }
 
@@ -100,8 +159,21 @@ fn optional_number<T: FromStr>(
 
 #[cfg(test)]
 mod tests {
-    use super::{optional_number, pages_for};
+    use super::{MAX_DOWNLOAD_BYTES, header, optional_number, pages_for};
     use crate::error::MarketError;
+
+    #[test]
+    fn the_download_limit_is_64_megabytes() {
+        assert_eq!(MAX_DOWNLOAD_BYTES, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn a_header_is_read_as_text_when_present() {
+        let mut headers = ureq::http::HeaderMap::new();
+        headers.insert("etag", ureq::http::HeaderValue::from_static("\"a1\""));
+        assert_eq!(header(&headers, "etag"), Some("\"a1\"".to_owned()));
+        assert_eq!(header(&headers, "last-modified"), None);
+    }
 
     #[test]
     fn a_numeric_header_is_read() {

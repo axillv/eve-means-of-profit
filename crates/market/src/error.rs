@@ -17,6 +17,14 @@ pub enum MarketError {
     BadHeader { name: &'static str, value: String },
     /// A price times a quantity does not fit the supported range.
     Overflow,
+    /// The Fuzzwork file is not gzip, or its text is not UTF-8.
+    Gzip(String),
+    /// A row of the Fuzzwork file is unreadable; `line` counts from 1 with the header as line 1.
+    BadRow { line: usize, text: String },
+    /// A download, or the file it holds once unzipped, is larger than the limit.
+    TooLarge,
+    /// A summary price rule that does not apply to the side asked for. Reserved: no price read returns it yet.
+    SummaryRule,
 }
 
 impl fmt::Display for MarketError {
@@ -41,6 +49,12 @@ impl fmt::Display for MarketError {
                 f,
                 "the price times the quantity does not fit the supported range"
             ),
+            Self::Gzip(reason) => write!(f, "Fuzzwork sent a file that cannot be read: {reason}"),
+            Self::BadRow { line, text } => {
+                write!(f, "Fuzzwork row {line} is unreadable: {text:?}")
+            }
+            Self::TooLarge => write!(f, "Fuzzwork sent more data than the limit"),
+            Self::SummaryRule => write!(f, "the price rule does not apply to this side"),
         }
     }
 }
