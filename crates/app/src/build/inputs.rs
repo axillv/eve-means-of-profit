@@ -230,8 +230,14 @@ fn price_row(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
 fn price_text(rule: PriceRule) -> &'static str {
     match rule {
         PriceRule::WalkSell => "Jita sell, walk the book",
-        PriceRule::LowestSell => "Jita sell, lowest × quantity",
-        PriceRule::HighestBuy => "Jita buy, highest",
+        PriceRule::LowestSell => "Forge sell, cheapest",
+        PriceRule::HighestBuy => "Forge buy, highest",
+        PriceRule::SellFivePercent => "Forge sell, 5% price",
+        PriceRule::SellWeightedAverage => "Forge sell, weighted average",
+        PriceRule::SellMedian => "Forge sell, middle",
+        PriceRule::BuyFivePercent => "Forge buy, 5% price",
+        PriceRule::BuyWeightedAverage => "Forge buy, weighted average",
+        PriceRule::BuyMedian => "Forge buy, middle",
     }
 }
 

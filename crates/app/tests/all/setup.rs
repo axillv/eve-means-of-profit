@@ -581,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_store_picks_walk_the_book_and_a_new_choice_is_saved_but_not_for_old_plans() {
+    fn a_fresh_store_shows_no_listed_rule_and_a_new_choice_is_saved_but_not_for_old_plans() {
         let folders = Folders::new();
         let product = folders.sde().find_exact("Hobgoblin II").unwrap().unwrap();
         folders
@@ -607,8 +607,13 @@ mod tests {
                 NOW,
             )
             .unwrap();
+        // The new default (the sell side's 5% price) is not in the list on screen until the screen task adds it,
+        // so the fresh default is read from the store.
+        assert_eq!(
+            folders.store().settings().unwrap().default_price_rule,
+            PriceRule::SellFivePercent
+        );
         let mut harness = start(&folders);
-        assert!(selected(&harness, "Jita sell, walk the book"));
         click(&mut harness, "Jita buy, highest");
         assert!(selected(&harness, "Jita buy, highest"));
         drop(harness);

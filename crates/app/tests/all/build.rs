@@ -14,6 +14,7 @@ mod tests {
     use egui_kittest::kittest::{NodeT, Queryable, by};
     use egui_kittest::{Harness, SnapshotResults};
     use eve_means_of_profit::{App, AppConfig};
+    use profit_market::book::PriceRule;
     use profit_sde::{Facility, Fetch, FetchError, Security, import};
     use profit_store::Store;
     use tempfile::TempDir;
@@ -84,6 +85,55 @@ mod tests {
             data,
             cache,
         }
+    }
+
+    fn stored_rule(env: &Env, name: &str) -> PriceRule {
+        let mut store = Store::open(&env.data.join("user.sqlite"), NOW).expect("the store opens");
+        let id = store
+            .plans()
+            .expect("plans")
+            .into_iter()
+            .find(|plan| plan.name == name)
+            .expect("the plan is saved")
+            .id;
+        store
+            .plan(id)
+            .expect("plan")
+            .expect("plan exists")
+            .price_rule
+    }
+
+    #[test]
+    fn a_plan_saved_with_the_lowest_sell_rule_shows_its_label() {
+        let env = make_env(&standard_facilities());
+        let mut store = Store::open(&env.data.join("user.sqlite"), NOW).expect("the store opens");
+        store
+            .create_plan(
+                &profit_store::PlanRecord {
+                    id: 0,
+                    name: "Cheapest".to_owned(),
+                    product: 2456,
+                    quantity: 10,
+                    build: std::collections::BTreeSet::new(),
+                    me: std::collections::BTreeMap::new(),
+                    manufacturing: None,
+                    reactions: None,
+                    price_rule: PriceRule::LowestSell,
+                    route: None,
+                    service: None,
+                    packing: profit_core::freight::Packing::TopUp,
+                    pasted_stock: String::new(),
+                    created_at: NOW,
+                    updated_at: NOW,
+                },
+                NOW,
+            )
+            .expect("the plan is saved");
+        drop(store);
+        let mut harness = start(&env);
+        harness.run();
+        click(&mut harness, "Cheapest");
+        assert!(has_value(&harness, "Forge sell, cheapest"));
     }
 
     fn start(env: &Env) -> Harness<'static, App> {
@@ -538,7 +588,11 @@ mod tests {
             &restarted,
             "Raitaru null · Raitaru · null sec · 1 rigs"
         ));
-        assert!(has_value(&restarted, "Jita sell, walk the book"));
+        // The screen cannot show the new rule until its picker lists it, so the saved rule is read here.
+        assert_eq!(
+            stored_rule(&env, "Hobgoblin 10"),
+            PriceRule::SellFivePercent
+        );
         assert!(has_value(
             &restarted,
             "Particle Accelerator Unit\t4\nTritanium\t1,000"

@@ -15,7 +15,7 @@ mod tests {
         assert_eq!(
             settings,
             Settings {
-                default_price_rule: PriceRule::WalkSell,
+                default_price_rule: PriceRule::SellFivePercent,
                 density: Density::Normal,
                 last_sde_check: None,
             }
@@ -40,16 +40,24 @@ mod tests {
         assert_eq!(reopened.settings().expect("settings"), saved);
     }
 
+    const ALL_RULES: [PriceRule; 9] = [
+        PriceRule::WalkSell,
+        PriceRule::LowestSell,
+        PriceRule::HighestBuy,
+        PriceRule::SellFivePercent,
+        PriceRule::SellWeightedAverage,
+        PriceRule::SellMedian,
+        PriceRule::BuyFivePercent,
+        PriceRule::BuyWeightedAverage,
+        PriceRule::BuyMedian,
+    ];
+
     #[test]
     fn every_density_and_price_rule_is_saved_as_chosen() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut store = Store::open(&dir.path().join("eve.db"), 1_000).expect("open");
         for density in [Density::Sparse, Density::Normal, Density::Dense] {
-            for rule in [
-                PriceRule::WalkSell,
-                PriceRule::LowestSell,
-                PriceRule::HighestBuy,
-            ] {
+            for rule in ALL_RULES {
                 let saved = Settings {
                     default_price_rule: rule,
                     density,

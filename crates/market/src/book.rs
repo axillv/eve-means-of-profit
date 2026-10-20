@@ -11,6 +11,7 @@ use profit_core::money::Money;
 use serde::Deserialize;
 
 use crate::error::MarketError;
+use crate::fuzzwork::{Side, Stat};
 
 /// One buy or sell order from a region's order book.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,12 +68,42 @@ pub fn parse_orders(json: &str) -> Result<Vec<Order>, MarketError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PriceRule {
     /// Buy the quantity by walking up the sell orders, cheapest first.
-    #[default]
     WalkSell,
     /// The lowest sell price times the quantity, whether or not that many units are for sale.
     LowestSell,
     /// The highest buy price times the quantity.
     HighestBuy,
+    /// The sell side's 5% price times the quantity, from the summary file.
+    #[default]
+    SellFivePercent,
+    /// The sell side's volume-weighted average price times the quantity, from the summary file.
+    SellWeightedAverage,
+    /// The sell side's median price times the quantity, from the summary file.
+    SellMedian,
+    /// The buy side's 5% price times the quantity, from the summary file.
+    BuyFivePercent,
+    /// The buy side's volume-weighted average price times the quantity, from the summary file.
+    BuyWeightedAverage,
+    /// The buy side's median price times the quantity, from the summary file.
+    BuyMedian,
+}
+
+impl PriceRule {
+    /// The side and statistic of the summary file this rule reads. `None` for [`PriceRule::WalkSell`],
+    /// which needs the order list the summary file does not hold.
+    pub fn summary(self) -> Option<(Side, Stat)> {
+        match self {
+            Self::WalkSell => None,
+            Self::LowestSell => Some((Side::Sell, Stat::Best)),
+            Self::HighestBuy => Some((Side::Buy, Stat::Best)),
+            Self::SellFivePercent => Some((Side::Sell, Stat::FivePercent)),
+            Self::SellWeightedAverage => Some((Side::Sell, Stat::WeightedAverage)),
+            Self::SellMedian => Some((Side::Sell, Stat::Median)),
+            Self::BuyFivePercent => Some((Side::Buy, Stat::FivePercent)),
+            Self::BuyWeightedAverage => Some((Side::Buy, Stat::WeightedAverage)),
+            Self::BuyMedian => Some((Side::Buy, Stat::Median)),
+        }
+    }
 }
 
 /// The price of a quantity under one rule.
@@ -119,6 +150,12 @@ pub fn quote(
         PriceRule::WalkSell => walk_sell(&sells, qty),
         PriceRule::LowestSell => best_price(&sells, qty),
         PriceRule::HighestBuy => best_price(&buys, qty),
+        PriceRule::SellFivePercent
+        | PriceRule::SellWeightedAverage
+        | PriceRule::SellMedian
+        | PriceRule::BuyFivePercent
+        | PriceRule::BuyWeightedAverage
+        | PriceRule::BuyMedian => Err(MarketError::SummaryRule),
     }
 }
 

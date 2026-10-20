@@ -55,7 +55,7 @@ impl Store {
             .optional()?;
         let settings = match raw {
             None => Settings {
-                default_price_rule: PriceRule::WalkSell,
+                default_price_rule: PriceRule::SellFivePercent,
                 density: Density::Normal,
                 last_sde_check: None,
             },

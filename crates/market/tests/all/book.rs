@@ -5,6 +5,7 @@ mod tests {
     use profit_core::money::Money;
     use profit_market::book::{Order, PriceRule, Quote, parse_orders, quote};
     use profit_market::error::MarketError;
+    use profit_market::fuzzwork::{Side, Stat};
 
     const FIXTURE: &str = include_str!("../fixtures/orders-10000002-11481.json");
     const JITA: u64 = 60003760;
@@ -232,5 +233,50 @@ mod tests {
     #[test]
     fn broken_json_is_a_json_error() {
         assert!(matches!(parse_orders("[{"), Err(MarketError::Json(_))));
+    }
+
+    #[test]
+    fn the_default_rule_is_the_sell_side_five_percent_price() {
+        assert_eq!(PriceRule::default(), PriceRule::SellFivePercent);
+    }
+
+    #[test]
+    fn each_rule_reads_its_side_and_statistic_from_the_summary_file() {
+        assert_eq!(
+            PriceRule::SellFivePercent.summary(),
+            Some((Side::Sell, Stat::FivePercent))
+        );
+        assert_eq!(
+            PriceRule::LowestSell.summary(),
+            Some((Side::Sell, Stat::Best))
+        );
+        assert_eq!(
+            PriceRule::HighestBuy.summary(),
+            Some((Side::Buy, Stat::Best))
+        );
+        assert_eq!(
+            PriceRule::BuyMedian.summary(),
+            Some((Side::Buy, Stat::Median))
+        );
+        assert_eq!(PriceRule::WalkSell.summary(), None);
+    }
+
+    #[test]
+    fn a_summary_rule_asked_to_quote_from_the_order_list_is_an_error() {
+        let orders = fixture();
+        for rule in [
+            PriceRule::SellFivePercent,
+            PriceRule::SellWeightedAverage,
+            PriceRule::SellMedian,
+            PriceRule::BuyFivePercent,
+            PriceRule::BuyWeightedAverage,
+            PriceRule::BuyMedian,
+        ] {
+            assert_eq!(
+                quote(&orders, JITA, rule, 10),
+                Err(MarketError::SummaryRule),
+                "{rule:?}"
+            );
+        }
     }
 }

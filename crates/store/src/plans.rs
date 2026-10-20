@@ -74,6 +74,12 @@ pub(crate) fn price_rule_code(rule: PriceRule) -> i64 {
         PriceRule::WalkSell => 0,
         PriceRule::LowestSell => 1,
         PriceRule::HighestBuy => 2,
+        PriceRule::SellFivePercent => 3,
+        PriceRule::SellWeightedAverage => 4,
+        PriceRule::SellMedian => 5,
+        PriceRule::BuyFivePercent => 6,
+        PriceRule::BuyWeightedAverage => 7,
+        PriceRule::BuyMedian => 8,
     }
 }
 
@@ -82,6 +88,12 @@ pub(crate) fn price_rule_from_code(code: i64) -> Option<PriceRule> {
         0 => Some(PriceRule::WalkSell),
         1 => Some(PriceRule::LowestSell),
         2 => Some(PriceRule::HighestBuy),
+        3 => Some(PriceRule::SellFivePercent),
+        4 => Some(PriceRule::SellWeightedAverage),
+        5 => Some(PriceRule::SellMedian),
+        6 => Some(PriceRule::BuyFivePercent),
+        7 => Some(PriceRule::BuyWeightedAverage),
+        8 => Some(PriceRule::BuyMedian),
         _ => None,
     }
 }

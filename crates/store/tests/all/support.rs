@@ -2,11 +2,13 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
-/// Undoes migration 6 (the costs), so the file reads as a version-5 one again.
+/// Undoes migrations 7 (the summary price rules) and 6 (the costs), so the file reads as a
+/// version-5 one again.
 pub(crate) fn undo_version_six(path: &Path) {
     let conn = Connection::open(path).expect("open");
     conn.execute_batch(
         "PRAGMA foreign_keys = OFF;
+         DELETE FROM migrations WHERE version = 7;
          DROP TABLE fee_settings;
          ALTER TABLE facilities DROP COLUMN tax_ppm;
          ALTER TABLE facilities DROP COLUMN system;

@@ -11,7 +11,8 @@ use crate::error::{Result, StoreError};
 
 /// Every schema change, oldest first: (version, name, SQL). Version 1 creates the first schema,
 /// version 2 the net worth history, version 3 the structure names the user typed, version 4 the
-/// stockpiles, version 5 the reservations and version 6 the costs.
+/// stockpiles, version 5 the reservations, version 6 the costs and version 7 the summary price
+/// rules.
 pub(crate) const MIGRATIONS: &[(u32, &str, &str)] = &[
     (1, "initial", INITIAL_SCHEMA),
     (2, "net worth", NET_WORTH_SCHEMA),
@@ -19,6 +20,7 @@ pub(crate) const MIGRATIONS: &[(u32, &str, &str)] = &[
     (4, "stockpiles", STOCKPILES_SCHEMA),
     (5, "reservations", RESERVATIONS_SCHEMA),
     (6, "costs", COSTS_SCHEMA),
+    (7, "summary price rules", SUMMARY_PRICE_RULES),
 ];
 
 const INITIAL_SCHEMA: &str = "
@@ -135,6 +137,13 @@ CREATE TABLE net_worth_shown (
     id INTEGER PRIMARY KEY,
     part INTEGER NOT NULL UNIQUE CHECK (part BETWEEN 0 AND 7)
 );
+";
+
+/// Walking the book has no source left (the summary file holds no order list), so the rule
+/// code 0 moves to the sell side's 5% price, code 3. The other codes keep their meaning.
+const SUMMARY_PRICE_RULES: &str = "
+UPDATE plans SET price_rule = 3 WHERE price_rule = 0;
+UPDATE settings SET default_price_rule = 3 WHERE default_price_rule = 0;
 ";
 
 const STRUCTURE_NAMES_SCHEMA: &str = "
@@ -458,10 +467,10 @@ mod tests {
         let mut upgraded = Store::open(&path, 5_000).expect("upgrade");
 
         assert_eq!(
-            std::fs::read(dir.path().join("eve.db.before-v6")).expect("backup"),
+            std::fs::read(dir.path().join("eve.db.before-v7")).expect("backup"),
             before
         );
-        assert_eq!(version_of(&path), 6);
+        assert_eq!(version_of(&path), 7);
         assert_eq!(
             migrations_of(&path),
             vec![
@@ -470,7 +479,8 @@ mod tests {
                 (3, "structure names".to_owned(), 5_000),
                 (4, "stockpiles".to_owned(), 5_000),
                 (5, "reservations".to_owned(), 5_000),
-                (6, "costs".to_owned(), 5_000)
+                (6, "costs".to_owned(), 5_000),
+                (7, "summary price rules".to_owned(), 5_000)
             ]
         );
         assert_eq!(
@@ -491,17 +501,17 @@ mod tests {
         drop(open_with(&path, 1_000, two).expect("v2"));
         let id = raw_plan_row(&path, &plan);
         let before = std::fs::read(&path).expect("read");
-        let backup = dir.path().join("eve.db.before-v6");
+        let backup = dir.path().join("eve.db.before-v7");
 
         let mut upgraded = Store::open(&path, 1_792_404_000).expect("upgrade");
 
         assert_eq!(std::fs::read(&backup).expect("backup"), before);
-        assert_eq!(version_of(&path), 6);
+        assert_eq!(version_of(&path), 7);
         assert_eq!(
             migrations_of(&path).last(),
-            Some(&(6, "costs".to_owned(), 1_792_404_000))
+            Some(&(7, "summary price rules".to_owned(), 1_792_404_000))
         );
-        assert_eq!(migrations_of(&path).len(), 6);
+        assert_eq!(migrations_of(&path).len(), 7);
         assert_eq!(
             upgraded.plan(id).expect("plan"),
             Some(crate::PlanRecord { id, ..plan })
@@ -511,6 +521,55 @@ mod tests {
         std::fs::remove_file(&backup).expect("remove");
         drop(Store::open(&path, 1_792_404_500).expect("reopen"));
         assert!(!backup.exists());
+    }
+
+    #[test]
+    fn a_version_six_file_moves_the_walk_rule_to_the_sell_five_percent_rule() {
+        use profit_market::book::PriceRule;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eve.db");
+        drop(open_with(&path, 1_000, &MIGRATIONS[..6]).expect("v6"));
+        let plan_with = |name: &str, price_rule| crate::PlanRecord {
+            name: name.to_owned(),
+            price_rule,
+            ..hobgoblin()
+        };
+        let walk = raw_plan_row(&path, &plan_with("A", PriceRule::WalkSell));
+        let lowest = raw_plan_row(&path, &plan_with("B", PriceRule::LowestSell));
+        let highest = raw_plan_row(&path, &plan_with("C", PriceRule::HighestBuy));
+        Connection::open(&path)
+            .expect("open")
+            .execute(
+                "INSERT INTO settings (id, default_price_rule, density, last_sde_check) \
+                 VALUES (1, 0, 1, NULL)",
+                [],
+            )
+            .expect("settings");
+        let before = std::fs::read(&path).expect("read");
+
+        let mut upgraded = Store::open(&path, 5_000).expect("upgrade");
+
+        assert_eq!(
+            std::fs::read(dir.path().join("eve.db.before-v7")).expect("backup"),
+            before
+        );
+        assert_eq!(version_of(&path), 7);
+        assert_eq!(
+            migrations_of(&path).last(),
+            Some(&(7, "summary price rules".to_owned(), 5_000))
+        );
+        let rule_of = |store: &mut Store, id| store.plan(id).expect("plan").map(|p| p.price_rule);
+        assert_eq!(
+            rule_of(&mut upgraded, walk),
+            Some(PriceRule::SellFivePercent)
+        );
+        assert_eq!(rule_of(&mut upgraded, lowest), Some(PriceRule::LowestSell));
+        assert_eq!(rule_of(&mut upgraded, highest), Some(PriceRule::HighestBuy));
+        assert_eq!(
+            upgraded.settings().expect("settings").default_price_rule,
+            PriceRule::SellFivePercent
+        );
     }
 
     #[test]
@@ -524,10 +583,10 @@ mod tests {
         drop(Store::open(&path, 2_000).expect("upgrade"));
 
         assert_eq!(
-            std::fs::read(dir.path().join("eve.db.before-v6")).expect("backup"),
+            std::fs::read(dir.path().join("eve.db.before-v7")).expect("backup"),
             before
         );
-        assert_eq!(version_of(&path), 6);
+        assert_eq!(version_of(&path), 7);
         let conn = Connection::open(&path).expect("open");
         for table in [
             "stockpiles",
@@ -557,7 +616,7 @@ mod tests {
 
         drop(Store::open(&path, 1_000).expect("open"));
 
-        assert_eq!(version_of(&path), 6);
-        assert!(!dir.path().join("eve.db.before-v6").exists());
+        assert_eq!(version_of(&path), 7);
+        assert!(!dir.path().join("eve.db.before-v7").exists());
     }
 }

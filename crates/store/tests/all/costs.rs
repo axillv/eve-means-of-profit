@@ -138,10 +138,10 @@ mod tests {
         let mut store = Store::open(&path, 2_000).expect("upgrade");
 
         assert_eq!(
-            std::fs::read(dir.path().join("user.sqlite.before-v6")).expect("backup"),
+            std::fs::read(dir.path().join("user.sqlite.before-v7")).expect("backup"),
             before
         );
-        assert_eq!(version_of(&path), 6);
+        assert_eq!(version_of(&path), 7);
         assert_eq!(
             store.facility_costs(1).expect("npc"),
             costs(None, Some(2_500))

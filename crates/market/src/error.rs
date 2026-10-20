@@ -23,7 +23,7 @@ pub enum MarketError {
     BadRow { line: usize, text: String },
     /// A download, or the file it holds once unzipped, is larger than the limit.
     TooLarge,
-    /// A summary price rule that does not apply to the side asked for. Reserved: no price read returns it yet.
+    /// A summary price rule was asked to quote from the order list, which the summary file has no part in.
     SummaryRule,
 }
 
@@ -54,7 +54,10 @@ impl fmt::Display for MarketError {
                 write!(f, "Fuzzwork row {line} is unreadable: {text:?}")
             }
             Self::TooLarge => write!(f, "Fuzzwork sent more data than the limit"),
-            Self::SummaryRule => write!(f, "the price rule does not apply to this side"),
+            Self::SummaryRule => write!(
+                f,
+                "the summary price rule needs the summary file, not the order list"
+            ),
         }
     }
 }

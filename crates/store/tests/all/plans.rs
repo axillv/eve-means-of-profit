@@ -427,6 +427,47 @@ mod tests {
     }
 
     #[test]
+    fn every_price_rule_is_saved_and_read_back_as_chosen() {
+        let (_dir, path, mut store) = open_temp();
+        let rules = [
+            PriceRule::WalkSell,
+            PriceRule::LowestSell,
+            PriceRule::HighestBuy,
+            PriceRule::SellFivePercent,
+            PriceRule::SellWeightedAverage,
+            PriceRule::SellMedian,
+            PriceRule::BuyFivePercent,
+            PriceRule::BuyWeightedAverage,
+            PriceRule::BuyMedian,
+        ];
+        let ids: Vec<i64> = rules
+            .iter()
+            .enumerate()
+            .map(|(n, rule)| {
+                let plan = PlanRecord {
+                    price_rule: *rule,
+                    ..plan_named(&format!("Rule {n}"))
+                };
+                store.create_plan(&plan, 1_000).expect("plan")
+            })
+            .collect();
+        drop(store);
+
+        let mut reopened = Store::open(&path, 2_000).expect("reopen");
+
+        for (id, rule) in ids.iter().zip(rules) {
+            assert_eq!(
+                reopened
+                    .plan(*id)
+                    .expect("plan")
+                    .map(|plan| plan.price_rule),
+                Some(rule),
+                "{rule:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_stored_code_rust_cannot_read_is_bad_data() {
         let (_dir, path, mut store) = open_temp();
         let plan = store
@@ -446,6 +487,46 @@ mod tests {
                 assert!(message.contains("plans"), "{message}");
                 assert!(message.contains(&format!("row {plan},")), "{message}");
                 assert!(message.contains("price_rule"), "{message}");
+            }
+            other => panic!("expected BadData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_code_past_the_nine_rules_is_bad_data_for_plans_and_settings() {
+        let (_dir, path, mut store) = open_temp();
+        let plan = store
+            .create_plan(&plan_named("Unknown rule"), 1_000)
+            .expect("plan");
+        drop(store);
+        raw(&path)
+            .execute(
+                "UPDATE plans SET price_rule = 9 WHERE id = ?1",
+                params![plan],
+            )
+            .expect("update plan");
+        raw(&path)
+            .execute(
+                "INSERT INTO settings (id, default_price_rule, density, last_sde_check) \
+                 VALUES (1, 99, 1, NULL)",
+                [],
+            )
+            .expect("insert settings");
+        let mut store = Store::open(&path, 2_000).expect("reopen");
+
+        match store.plan(plan) {
+            Err(StoreError::BadData(message)) => {
+                assert!(message.contains("plans"), "{message}");
+                assert!(message.contains(&format!("row {plan},")), "{message}");
+                assert!(message.contains("price_rule"), "{message}");
+            }
+            other => panic!("expected BadData, got {other:?}"),
+        }
+        match store.settings() {
+            Err(StoreError::BadData(message)) => {
+                assert!(message.contains("settings"), "{message}");
+                assert!(message.contains("row 1,"), "{message}");
+                assert!(message.contains("default_price_rule"), "{message}");
             }
             other => panic!("expected BadData, got {other:?}"),
         }
