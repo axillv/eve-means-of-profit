@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod tests {
     const SOURCES: [(&str, &str); 4] = [
-        ("lib.rs", include_str!("../src/lib.rs")),
-        ("error.rs", include_str!("../src/error.rs")),
-        ("profiles.rs", include_str!("../src/profiles.rs")),
-        ("read.rs", include_str!("../src/read.rs")),
+        ("lib.rs", include_str!("../../src/lib.rs")),
+        ("error.rs", include_str!("../../src/error.rs")),
+        ("profiles.rs", include_str!("../../src/profiles.rs")),
+        ("read.rs", include_str!("../../src/read.rs")),
     ];
 
     #[test]

@@ -6,7 +6,7 @@ mod tests {
     use profit_market::book::{Order, PriceRule, Quote, parse_orders, quote};
     use profit_market::error::MarketError;
 
-    const FIXTURE: &str = include_str!("fixtures/orders-10000002-11481.json");
+    const FIXTURE: &str = include_str!("../fixtures/orders-10000002-11481.json");
     const JITA: u64 = 60003760;
     const JITA_SELL_UNITS: u64 = 1_948_417;
     const JITA_BUY_UNITS: u64 = 378_358;

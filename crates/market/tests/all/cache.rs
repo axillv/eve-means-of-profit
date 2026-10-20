@@ -10,7 +10,7 @@ mod tests {
     use profit_market::cache::{Http, HttpResponse, Market};
     use profit_market::error::MarketError;
 
-    const FIXTURE: &str = include_str!("fixtures/orders-10000002-11481.json");
+    const FIXTURE: &str = include_str!("../fixtures/orders-10000002-11481.json");
     const ETAG: &str = "\"ad32a46fbc7c5240cbbcf87775dac0d2396d06091883b20aa5f123cb\"";
     const TYPE: u32 = 11481;
     const T0: i64 = 1_000_000;

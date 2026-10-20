@@ -21,8 +21,8 @@ mod tests {
     const NOW: i64 = 1_792_364_100;
     /// After both fixtures' expiry times.
     const LATER: i64 = 1_792_370_000;
-    const SYSTEMS: &str = include_str!("fixtures/industry/industry-systems-extract.json");
-    const PRICES: &str = include_str!("fixtures/industry/markets-prices-extract.json");
+    const SYSTEMS: &str = include_str!("../fixtures/industry/industry-systems-extract.json");
+    const PRICES: &str = include_str!("../fixtures/industry/markets-prices-extract.json");
     const SYSTEMS_HEADERS: &[(&str, &str)] = &[
         ("last-modified", "Sun, 18 Oct 2026 22:53:55 GMT"),
         ("expires", "Sun, 18 Oct 2026 23:53:55 GMT"),

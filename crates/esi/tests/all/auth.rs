@@ -59,11 +59,11 @@ mod tests {
         "esi-ui.open_window.v1",
         "esi-ui.write_waypoint.v1",
     ];
-    const JWKS: &[u8] = include_bytes!("fixtures/jwks.json");
-    const RS_DER: &[u8] = include_bytes!("fixtures/rs256.der");
-    const RS_OTHER_DER: &[u8] = include_bytes!("fixtures/rs256-other.der");
-    const ES_DER: &[u8] = include_bytes!("fixtures/es256.der");
-    const ES_OTHER_DER: &[u8] = include_bytes!("fixtures/es256-other.der");
+    const JWKS: &[u8] = include_bytes!("../fixtures/jwks.json");
+    const RS_DER: &[u8] = include_bytes!("../fixtures/rs256.der");
+    const RS_OTHER_DER: &[u8] = include_bytes!("../fixtures/rs256-other.der");
+    const ES_DER: &[u8] = include_bytes!("../fixtures/es256.der");
+    const ES_OTHER_DER: &[u8] = include_bytes!("../fixtures/es256-other.der");
     const JWKS_URL: &str = "https://login.eveonline.com/oauth/jwks";
 
     type Reply = Result<HttpResponse, EsiError>;

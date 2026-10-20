@@ -12,7 +12,7 @@ use profit_jeve::{
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = include_str!("fixtures/stockpiles/sample.xml");
+    const SAMPLE: &str = include_str!("../fixtures/stockpiles/sample.xml");
     const MAIN: i64 = 2_112_000_001;
     const ALT: i64 = 2_112_000_002;
     const JITA_4_4: i64 = 60_003_760;
