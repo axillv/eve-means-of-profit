@@ -31,7 +31,7 @@ mod tests {
 
         drop(Store::open(&path, 1_000).expect("open"));
 
-        assert_eq!(version_of(&path), 5);
+        assert_eq!(version_of(&path), 6);
         assert_eq!(
             migration_rows(&path),
             vec![
@@ -39,7 +39,8 @@ mod tests {
                 (2, "net worth".to_owned(), 1_000),
                 (3, "structure names".to_owned(), 1_000),
                 (4, "stockpiles".to_owned(), 1_000),
-                (5, "reservations".to_owned(), 1_000)
+                (5, "reservations".to_owned(), 1_000),
+                (6, "costs".to_owned(), 1_000)
             ]
         );
         assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 1);
@@ -61,7 +62,8 @@ mod tests {
                 (2, "net worth".to_owned(), 1_000),
                 (3, "structure names".to_owned(), 1_000),
                 (4, "stockpiles".to_owned(), 1_000),
-                (5, "reservations".to_owned(), 1_000)
+                (5, "reservations".to_owned(), 1_000),
+                (6, "costs".to_owned(), 1_000)
             ]
         );
         assert_eq!(std::fs::read(&path).expect("read"), before);
@@ -85,7 +87,7 @@ mod tests {
             err,
             profit_store::StoreError::NewerSchema {
                 found: 99,
-                known: 5
+                known: 6
             }
         ));
         assert_eq!(std::fs::read(&path).expect("read"), before);

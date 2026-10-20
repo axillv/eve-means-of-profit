@@ -33,6 +33,11 @@ impl Standing {
         }
     }
 
+    /// The standing in hundredths, as the database keeps it.
+    pub fn hundredths(self) -> i16 {
+        self.0
+    }
+
     /// Parses a standing typed by a person: `5.23`, `-1.25`, `10`, `0.5`. Two decimals at most.
     pub fn parse(text: &str) -> Result<Standing, FeeError> {
         let (negative, unsigned) = match text.strip_prefix('-') {
@@ -359,6 +364,14 @@ mod tests {
             Standing::parse("0.5"),
             Ok(Standing::from_hundredths(50).unwrap())
         );
+    }
+
+    #[test]
+    fn standing_gives_back_the_hundredths_it_was_made_from() {
+        for hundredths in [-1_000, -523, -1, 0, 1, 523, 1_000] {
+            let made = Standing::from_hundredths(hundredths).unwrap();
+            assert_eq!(made.hundredths(), hundredths);
+        }
     }
 
     #[test]

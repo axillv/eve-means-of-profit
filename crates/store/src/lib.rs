@@ -4,6 +4,7 @@
 //! [`Store::open`] creates the file or upgrades it. Each method runs in one transaction. Names are
 //! trimmed and unique ignoring case. Money, volumes and rates are whole numbers.
 
+pub mod costs;
 pub mod error;
 pub mod facilities;
 pub mod freight;
@@ -17,12 +18,13 @@ pub mod structure_names;
 
 use rusqlite::Transaction;
 
+pub use costs::{FacilityCosts, FeeSettings};
 pub use error::{Result, StoreError};
 pub use facilities::FacilityRow;
 pub use freight::{RouteRow, ServiceRow};
 pub use migrate::Store;
 pub use net_worth::{ImportReport, NetWorthSettings, PriceHistory};
-pub use plans::{PlanRecord, PlanSummary};
+pub use plans::{PlanRecord, PlanSummary, SellMode};
 pub use reservations::PlanStock;
 pub(crate) use reservations::copy_scope;
 pub use settings::{Density, Settings};

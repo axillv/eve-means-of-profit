@@ -12,6 +12,7 @@ use rusqlite::{Connection, params};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::support::undo_version_six;
 
     const MAIN: i64 = 2_112_000_001;
     const ALT: i64 = 2_112_000_002;
@@ -33,6 +34,7 @@ mod tests {
     /// acceptance checks need it.
     fn version_four_of(path: &Path) {
         drop(Store::open(path, 1_000).expect("open"));
+        undo_version_six(path);
         undo_version_five(path);
         raw_plan_row(path, 1, "beta");
         raw_plan_row(path, 2, "Alpha");
@@ -147,14 +149,14 @@ mod tests {
         let mut store = Store::open(&path, 2_000).expect("upgrade");
 
         assert_eq!(
-            std::fs::read(dir.path().join("user.sqlite.before-v5")).expect("backup"),
+            std::fs::read(dir.path().join("user.sqlite.before-v6")).expect("backup"),
             before
         );
         let version: u32 = Connection::open(&path)
             .expect("open")
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         assert_eq!(names(&mut store), vec!["Alpha", "alpha", "beta"]);
         let conn = Connection::open(&path).expect("open");
         let position = |id: i64| -> i64 {

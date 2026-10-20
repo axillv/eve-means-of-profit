@@ -44,7 +44,30 @@ pub struct PlanSummary {
     pub updated_at: i64,
 }
 
+/// How a plan sells its product: a sell order at the Jita lowest sell, or into Jita buy orders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SellMode {
+    #[default]
+    SellOrder,
+    BuyOrders,
+}
+
 const TABLE: &str = "plans";
+
+fn sell_mode_code(mode: SellMode) -> i64 {
+    match mode {
+        SellMode::SellOrder => 0,
+        SellMode::BuyOrders => 1,
+    }
+}
+
+fn sell_mode_from_code(code: i64) -> Option<SellMode> {
+    match code {
+        0 => Some(SellMode::SellOrder),
+        1 => Some(SellMode::BuyOrders),
+        _ => None,
+    }
+}
 
 pub(crate) fn price_rule_code(rule: PriceRule) -> i64 {
     match rule {
@@ -346,6 +369,35 @@ impl Store {
         Ok(())
     }
 
+    pub fn plan_sell_mode(&mut self, id: i64) -> Result<SellMode> {
+        let tx = self.conn.transaction()?;
+        let code: i64 = tx
+            .query_row(
+                "SELECT sell_mode FROM plans WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound)?;
+        let mode =
+            sell_mode_from_code(code).ok_or_else(|| bad_code(TABLE, id, "sell_mode", code))?;
+        tx.commit()?;
+        Ok(mode)
+    }
+
+    pub fn set_plan_sell_mode(&mut self, id: i64, mode: SellMode) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE plans SET sell_mode = ?2 WHERE id = ?1",
+            params![id, sell_mode_code(mode)],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn rename_plan(&mut self, id: i64, name: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
         let name = clean_name(name)?;
@@ -383,6 +435,10 @@ impl Store {
         };
         let new_id = insert_plan(&tx, &plan, &name, now)?;
         copy_scope(&tx, id, new_id)?;
+        tx.execute(
+            "UPDATE plans SET sell_mode = (SELECT sell_mode FROM plans WHERE id = ?1) WHERE id = ?2",
+            params![id, new_id],
+        )?;
         tx.commit()?;
         Ok(new_id)
     }

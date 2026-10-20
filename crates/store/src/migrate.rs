@@ -11,13 +11,14 @@ use crate::error::{Result, StoreError};
 
 /// Every schema change, oldest first: (version, name, SQL). Version 1 creates the first schema,
 /// version 2 the net worth history, version 3 the structure names the user typed, version 4 the
-/// stockpiles and version 5 the reservations.
+/// stockpiles, version 5 the reservations and version 6 the costs.
 pub(crate) const MIGRATIONS: &[(u32, &str, &str)] = &[
     (1, "initial", INITIAL_SCHEMA),
     (2, "net worth", NET_WORTH_SCHEMA),
     (3, "structure names", STRUCTURE_NAMES_SCHEMA),
     (4, "stockpiles", STOCKPILES_SCHEMA),
     (5, "reservations", RESERVATIONS_SCHEMA),
+    (6, "costs", COSTS_SCHEMA),
 ];
 
 const INITIAL_SCHEMA: &str = "
@@ -214,6 +215,25 @@ CREATE TABLE job_assignments (
     assigned_at INTEGER NOT NULL
 );
 ALTER TABLE stockpiles ADD COLUMN short_mode INTEGER NOT NULL DEFAULT 0 CHECK (short_mode IN (0, 1));
+";
+
+/// Costs: each facility's solar system and tax, the user's fee skills and standings, and how each
+/// plan sells. An NPC station (no structure) gets the 0.25% NPC tax; a structure's tax is unknown
+/// until the user types it.
+const COSTS_SCHEMA: &str = "
+ALTER TABLE facilities ADD COLUMN system INTEGER CHECK (system IS NULL OR system > 0);
+ALTER TABLE facilities ADD COLUMN tax_ppm INTEGER
+    CHECK (tax_ppm IS NULL OR tax_ppm BETWEEN 0 AND 1000000);
+UPDATE facilities SET tax_ppm = 2500 WHERE structure IS NULL;
+CREATE TABLE fee_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    accounting INTEGER NOT NULL CHECK (accounting BETWEEN 0 AND 5),
+    broker_relations INTEGER NOT NULL CHECK (broker_relations BETWEEN 0 AND 5),
+    faction_standing INTEGER NOT NULL CHECK (faction_standing BETWEEN -1000 AND 1000),
+    corporation_standing INTEGER NOT NULL CHECK (corporation_standing BETWEEN -1000 AND 1000),
+    broker_override_ppm INTEGER CHECK (broker_override_ppm IS NULL OR broker_override_ppm BETWEEN 0 AND 1000000)
+);
+ALTER TABLE plans ADD COLUMN sell_mode INTEGER NOT NULL DEFAULT 0 CHECK (sell_mode IN (0, 1));
 ";
 
 /// An open database. Every method on it runs in one transaction.
@@ -438,10 +458,10 @@ mod tests {
         let mut upgraded = Store::open(&path, 5_000).expect("upgrade");
 
         assert_eq!(
-            std::fs::read(dir.path().join("eve.db.before-v5")).expect("backup"),
+            std::fs::read(dir.path().join("eve.db.before-v6")).expect("backup"),
             before
         );
-        assert_eq!(version_of(&path), 5);
+        assert_eq!(version_of(&path), 6);
         assert_eq!(
             migrations_of(&path),
             vec![
@@ -449,7 +469,8 @@ mod tests {
                 (2, "net worth".to_owned(), 5_000),
                 (3, "structure names".to_owned(), 5_000),
                 (4, "stockpiles".to_owned(), 5_000),
-                (5, "reservations".to_owned(), 5_000)
+                (5, "reservations".to_owned(), 5_000),
+                (6, "costs".to_owned(), 5_000)
             ]
         );
         assert_eq!(
@@ -470,17 +491,17 @@ mod tests {
         drop(open_with(&path, 1_000, two).expect("v2"));
         let id = raw_plan_row(&path, &plan);
         let before = std::fs::read(&path).expect("read");
-        let backup = dir.path().join("eve.db.before-v5");
+        let backup = dir.path().join("eve.db.before-v6");
 
         let mut upgraded = Store::open(&path, 1_792_404_000).expect("upgrade");
 
         assert_eq!(std::fs::read(&backup).expect("backup"), before);
-        assert_eq!(version_of(&path), 5);
+        assert_eq!(version_of(&path), 6);
         assert_eq!(
             migrations_of(&path).last(),
-            Some(&(5, "reservations".to_owned(), 1_792_404_000))
+            Some(&(6, "costs".to_owned(), 1_792_404_000))
         );
-        assert_eq!(migrations_of(&path).len(), 5);
+        assert_eq!(migrations_of(&path).len(), 6);
         assert_eq!(
             upgraded.plan(id).expect("plan"),
             Some(crate::PlanRecord { id, ..plan })
@@ -503,10 +524,10 @@ mod tests {
         drop(Store::open(&path, 2_000).expect("upgrade"));
 
         assert_eq!(
-            std::fs::read(dir.path().join("eve.db.before-v5")).expect("backup"),
+            std::fs::read(dir.path().join("eve.db.before-v6")).expect("backup"),
             before
         );
-        assert_eq!(version_of(&path), 5);
+        assert_eq!(version_of(&path), 6);
         let conn = Connection::open(&path).expect("open");
         for table in [
             "stockpiles",
@@ -536,7 +557,7 @@ mod tests {
 
         drop(Store::open(&path, 1_000).expect("open"));
 
-        assert_eq!(version_of(&path), 5);
-        assert!(!dir.path().join("eve.db.before-v5").exists());
+        assert_eq!(version_of(&path), 6);
+        assert!(!dir.path().join("eve.db.before-v6").exists());
     }
 }

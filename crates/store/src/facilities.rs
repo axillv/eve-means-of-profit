@@ -1,6 +1,7 @@
 //! Named facilities: where a job is built, with its structure, security and rigs.
 
 use profit_core::industry::TypeId;
+use profit_core::job_cost::NPC_STATION_TAX;
 use profit_sde::{Facility, Security};
 use rusqlite::{Transaction, params};
 
@@ -66,12 +67,18 @@ impl Store {
         let name = clean_name(name)?;
         let taken = id_names(&tx, "SELECT id, name FROM facilities", [])?;
         ensure_free(&taken, &name, None)?;
+        // An NPC station has the NPC tax; a structure's tax is unknown until the user types it.
+        let tax = facility
+            .structure
+            .is_none()
+            .then(|| i64::from(NPC_STATION_TAX.ppm()));
         tx.execute(
-            "INSERT INTO facilities (name, structure, security) VALUES (?1, ?2, ?3)",
+            "INSERT INTO facilities (name, structure, security, tax_ppm) VALUES (?1, ?2, ?3, ?4)",
             params![
                 name,
                 facility.structure.map(i64::from),
-                security_code(facility.security)
+                security_code(facility.security),
+                tax
             ],
         )?;
         let id = tx.last_insert_rowid();
