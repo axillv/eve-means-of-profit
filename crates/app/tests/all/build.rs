@@ -1,0 +1,598 @@
+//! Acceptance tests for the Build page: the plans, the plan inputs, the pasted stock and the steps.
+//! The game data is the build 3607705 fixture, imported in the test. The user data is a temp store
+//! with the facilities the plans use. The clock is fixed at 1,000,000.
+#[cfg(test)]
+mod tests {
+
+    use std::fs;
+    use std::io::Write;
+    use std::ops::ControlFlow;
+    use std::path::{Path, PathBuf};
+
+    use egui::accesskit::Role;
+    use egui::{Event, Key, Modifiers, vec2};
+    use egui_kittest::kittest::{NodeT, Queryable, by};
+    use egui_kittest::{Harness, SnapshotResults};
+    use eve_means_of_profit::{App, AppConfig};
+    use profit_sde::{Facility, Fetch, FetchError, Security, import};
+    use profit_store::Store;
+    use tempfile::TempDir;
+
+    const NOW: i64 = 1_000_000;
+    const FIXTURE: &str = "../sde/tests/fixtures/sde-3607705";
+
+    fn fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE)
+    }
+
+    /// The game data is installed by the test, so the app never asks the network for anything.
+    struct NoNetwork;
+
+    impl Fetch for NoNetwork {
+        fn get_text(&self, _url: &str) -> Result<String, FetchError> {
+            Err(FetchError::Http { status: 503 })
+        }
+
+        fn download(
+            &self,
+            _url: &str,
+            _dest: &mut dyn Write,
+            _progress: &mut dyn FnMut(u64, Option<u64>) -> ControlFlow<()>,
+        ) -> Result<u64, FetchError> {
+            Err(FetchError::Http { status: 503 })
+        }
+    }
+
+    /// A data folder with the game data installed and the given facilities saved.
+    struct Env {
+        _dir: TempDir,
+        data: PathBuf,
+        cache: PathBuf,
+    }
+
+    fn facility(structure: u32, rigs: &[u32]) -> Facility {
+        Facility {
+            structure: Some(structure),
+            security: Security::Null,
+            rigs: rigs.to_vec(),
+        }
+    }
+
+    /// `Raitaru null` and `Athanor null`, as the plans expect them.
+    fn standard_facilities() -> Vec<(&'static str, Facility)> {
+        vec![
+            ("Raitaru null", facility(35825, &[37157])),
+            ("Athanor null", facility(35835, &[46487])),
+        ]
+    }
+
+    fn make_env(facilities: &[(&str, Facility)]) -> Env {
+        let dir = TempDir::new().expect("a temp folder");
+        let data = dir.path().join("data");
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&data).expect("the data folder");
+        import(&fixture(), &data.join("sde.sqlite")).expect("the fixture imports");
+        let mut store = Store::open(&data.join("user.sqlite"), NOW).expect("the store opens");
+        let mut settings = store.settings().expect("settings");
+        settings.last_sde_check = Some(NOW);
+        store.save_settings(&settings).expect("settings saved");
+        for (name, facility) in facilities {
+            store.add_facility(name, facility).expect("facility saved");
+        }
+        Env {
+            _dir: dir,
+            data,
+            cache,
+        }
+    }
+
+    fn start(env: &Env) -> Harness<'static, App> {
+        let config = AppConfig {
+            data_dir: env.data.clone(),
+            cache_dir: env.cache.clone(),
+            fetch: Box::new(NoNetwork),
+            clock: Box::new(|| NOW),
+        };
+        Harness::builder()
+            .with_size(vec2(1280.0, 800.0))
+            .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"))
+    }
+
+    fn shown(harness: &Harness<'_, App>, text: &str) -> bool {
+        harness.query_all_by_label(text).next().is_some()
+    }
+
+    /// Clicks the button labelled `label`; when several are, the last one drawn (a dialog's button).
+    fn click(harness: &mut Harness<'_, App>, label: &str) {
+        let count = harness.get_all_by_label(label).count();
+        assert!(count > 0, "no node labelled {label:?}");
+        let last = count - 1;
+        harness
+            .get_all_by_label(label)
+            .nth(last)
+            .expect("the button")
+            .click();
+        harness.run();
+    }
+
+    /// Opens the dropdown that shows `current` and picks `option` from it.
+    fn pick(harness: &mut Harness<'_, App>, current: &str, option: &str) {
+        harness
+            .get_by(|node| node.value().is_some_and(|value| value == current))
+            .click();
+        harness.run();
+        click(harness, option);
+    }
+
+    /// Clicks the single-line box that holds `value`, selects its text and types `text` over it.
+    fn type_into(harness: &mut Harness<'_, App>, value: &str, text: &str) {
+        harness
+            .get_by(|node| node.role() == Role::TextInput && node.value().as_deref() == Some(value))
+            .click();
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness.event(Event::Text(text.to_owned()));
+        harness.run();
+    }
+
+    /// Pastes `text` into the pasted stock box.
+    fn paste(harness: &mut Harness<'_, App>, text: &str) {
+        harness
+            .get_by(|node| node.role() == Role::MultilineTextInput)
+            .click();
+        harness.event(Event::Paste(text.to_owned()));
+        harness.run();
+    }
+
+    /// Whether some node shows `text` as its value: a box's text or a dropdown's chosen item.
+    fn has_value(harness: &Harness<'_, App>, text: &str) -> bool {
+        harness
+            .query_all(by().predicate(|node| node.value().is_some_and(|value| value == text)))
+            .next()
+            .is_some()
+    }
+
+    /// The cell texts of the row labelled `row`, left to right: the item name, then each column
+    /// that has text (the Build box has none). Spare 0 is an empty text.
+    fn cells(harness: &Harness<'_, App>, row: &str) -> Vec<String> {
+        let y = harness.get_by_label(row).rect().center().y;
+        let mut found: Vec<(f32, String)> = harness
+            .query_all(by().predicate(|node| node.bounding_box().is_some()))
+            .filter(|node| (node.rect().center().y - y).abs() < 4.0)
+            .filter_map(|node| node.value().map(|value| (node.rect().min.x, value)))
+            .filter(|(_, value)| !value.is_empty())
+            .collect();
+        found.sort_by(|a, b| a.0.total_cmp(&b.0));
+        found.into_iter().map(|(_, value)| value).collect()
+    }
+
+    /// The top edge of the first node labelled `label`, to check the order of rows.
+    fn top_of(harness: &Harness<'_, App>, label: &str) -> f32 {
+        harness.get_by_label(label).rect().min.y
+    }
+
+    /// Ticks the Build box on the row labelled `row`, or the ME box of that row.
+    fn tick_row(harness: &mut Harness<'_, App>, row: &str) {
+        let y = harness.get_by_label(row).rect().center().y;
+        harness
+            .get_all_by_role(Role::CheckBox)
+            .find(|node| (node.rect().center().y - y).abs() < 4.0)
+            .expect("a Build box on the row")
+            .click();
+        harness.run();
+    }
+
+    /// Whether the Build box on the row labelled `row` is disabled.
+    fn tick_disabled(harness: &Harness<'_, App>, row: &str) -> bool {
+        let y = harness.get_by_label(row).rect().center().y;
+        harness
+            .get_all_by_role(Role::CheckBox)
+            .find(|node| (node.rect().center().y - y).abs() < 4.0)
+            .expect("a Build box on the row")
+            .accesskit_node()
+            .is_disabled()
+    }
+
+    /// Hovers the Build box on the row labelled `row`.
+    fn hover_tick(harness: &mut Harness<'_, App>, row: &str) {
+        let y = harness.get_by_label(row).rect().center().y;
+        harness
+            .get_all_by_role(Role::CheckBox)
+            .find(|node| (node.rect().center().y - y).abs() < 4.0)
+            .expect("a Build box on the row")
+            .hover();
+        harness.run();
+    }
+
+    /// Sets the ME box of the row labelled `row` to `me`.
+    fn set_me(harness: &mut Harness<'_, App>, row: &str, me: &str) {
+        let y = harness.get_by_label(row).rect().center().y;
+        harness
+            .get_all_by_role(Role::SpinButton)
+            .find(|node| (node.rect().center().y - y).abs() < 4.0)
+            .expect("an ME box on the row")
+            .click();
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness.event(Event::Text(me.to_owned()));
+        harness.key_press(Key::Enter);
+        harness.run();
+    }
+
+    /// Makes a plan (named `New plan`) for Hobgoblin II, quantity 10, built at the NPC station.
+    fn hobgoblin_ii_plan(harness: &mut Harness<'_, App>) {
+        click(harness, "New");
+        type_into(harness, "", "hobgoblin");
+        click(harness, "Hobgoblin II");
+        type_into(harness, "1", "10");
+    }
+
+    /// Hobgoblin II built at Raitaru null, with Hobgoblin I and Particle Accelerator Unit built at
+    /// ME 10, and the paste from the spec.
+    fn p3_plan(harness: &mut Harness<'_, App>) {
+        p3_plan_with(harness, "Particle Accelerator Unit\t4\nTritanium\t1,000");
+    }
+
+    /// The P3 plan with `pasted` in the stock box.
+    fn p3_plan_with(harness: &mut Harness<'_, App>, pasted: &str) {
+        hobgoblin_ii_plan(harness);
+        pick(
+            harness,
+            "NPC station · high sec",
+            "Raitaru null · Raitaru · null sec · 1 rigs",
+        );
+        tick_row(harness, "Hobgoblin I");
+        tick_row(harness, "Particle Accelerator Unit");
+        set_me(harness, "Hobgoblin I", "10");
+        set_me(harness, "Particle Accelerator Unit", "10");
+        paste(harness, pasted);
+    }
+
+    #[test]
+    fn plans_are_made_copied_renamed_and_deleted() {
+        let env = make_env(&[]);
+        let mut harness = start(&env);
+        harness.run();
+        click(&mut harness, "New");
+        click(&mut harness, "New");
+        assert!(shown(&harness, "New plan"));
+        assert!(shown(&harness, "New plan 2"));
+
+        click(&mut harness, "New plan");
+        click(&mut harness, "Duplicate");
+        assert!(shown(&harness, "New plan (copy)"));
+
+        click(&mut harness, "New plan 2");
+        click(&mut harness, "Delete");
+        assert!(shown(&harness, "Delete plan New plan 2?"));
+        click(&mut harness, "Cancel");
+        assert!(shown(&harness, "New plan 2"));
+
+        // The list is in the user's order, not by name: the renamed plan keeps its place between
+        // its neighbours.
+        let (first, copy) = (
+            top_of(&harness, "New plan"),
+            top_of(&harness, "New plan (copy)"),
+        );
+        assert!(first < top_of(&harness, "New plan 2") && top_of(&harness, "New plan 2") < copy);
+        click(&mut harness, "Rename");
+        type_into(&mut harness, "New plan 2", "Hobgoblin 10");
+        click(&mut harness, "Rename");
+        assert!(shown(&harness, "Hobgoblin 10"));
+        let renamed = top_of(&harness, "Hobgoblin 10");
+        assert!(first < renamed && renamed < copy);
+    }
+
+    #[test]
+    fn product_search_lists_only_types_with_a_recipe() {
+        let env = make_env(&standard_facilities());
+        let mut harness = start(&env);
+        harness.run();
+        click(&mut harness, "New");
+        type_into(&mut harness, "", "hobgoblin");
+        assert!(shown(&harness, "Hobgoblin I"));
+        assert!(shown(&harness, "Hobgoblin II"));
+        assert!(!shown(&harness, "Hobgoblin II Blueprint"));
+    }
+
+    #[test]
+    fn hobgoblin_ii_shows_its_six_parts_in_recipe_order() {
+        let env = make_env(&standard_facilities());
+        let mut harness = start(&env);
+        harness.run();
+        hobgoblin_ii_plan(&mut harness);
+        assert!(shown(&harness, "PLAN  Hobgoblin II × 10 (unsaved)"));
+        let parts = [
+            "Morphite",
+            "Particle Accelerator Unit",
+            "Guidance Systems",
+            "Hobgoblin I",
+            "Robotics",
+            "R.A.M.- Robotics",
+        ];
+        let tops: Vec<f32> = parts.iter().map(|part| top_of(&harness, part)).collect();
+        assert!(tops.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(
+            cells(&harness, "Hobgoblin II"),
+            ["Hobgoblin II", "2", "10", "0", "10", "—", "10", "1"]
+        );
+        for part in parts {
+            assert_eq!(cells(&harness, part), [part, "—", "10", "0", "—", "10"]);
+        }
+    }
+
+    #[test]
+    fn p3_steps_and_stock_numbers() {
+        let env = make_env(&standard_facilities());
+        let mut harness = start(&env);
+        harness.run();
+        p3_plan(&mut harness);
+        assert_eq!(
+            cells(&harness, "Hobgoblin II"),
+            ["Hobgoblin II", "2", "10", "0", "10", "—", "10", "1"]
+        );
+        assert_eq!(
+            cells(&harness, "Hobgoblin I"),
+            ["Hobgoblin I", "10", "10", "0", "10", "—", "10", "1"]
+        );
+        assert_eq!(
+            cells(&harness, "Particle Accelerator Unit"),
+            [
+                "Particle Accelerator Unit",
+                "10",
+                "10",
+                "4",
+                "6",
+                "—",
+                "6",
+                "1"
+            ]
+        );
+        assert_eq!(
+            cells(&harness, "Tritanium"),
+            ["Tritanium", "—", "4,307", "1,000", "—", "3,307"]
+        );
+        assert_eq!(
+            cells(&harness, "Pyerite"),
+            ["Pyerite", "—", "60", "0", "—", "60"]
+        );
+        assert_eq!(
+            cells(&harness, "Isogen"),
+            ["Isogen", "—", "34", "0", "—", "34"]
+        );
+        assert_eq!(
+            cells(&harness, "Nocxium"),
+            ["Nocxium", "—", "17", "0", "—", "17"]
+        );
+        assert_eq!(
+            cells(&harness, "Crystalline Carbonide"),
+            ["Crystalline Carbonide", "—", "166", "0", "—", "166"]
+        );
+        assert_eq!(
+            cells(&harness, "Fullerides"),
+            ["Fullerides", "—", "59", "0", "—", "59"]
+        );
+        assert_eq!(
+            cells(&harness, "Hypersynaptic Fibers"),
+            ["Hypersynaptic Fibers", "—", "6", "0", "—", "6"]
+        );
+        // The materials of Hobgoblin I sit between it and the next part; those of the unit sit
+        // between the unit and the part after it.
+        assert!(top_of(&harness, "Hobgoblin I") < top_of(&harness, "Tritanium"));
+        assert!(top_of(&harness, "Nocxium") < top_of(&harness, "Robotics"));
+        assert!(
+            top_of(&harness, "Particle Accelerator Unit")
+                < top_of(&harness, "Crystalline Carbonide")
+        );
+        assert!(top_of(&harness, "Hypersynaptic Fibers") < top_of(&harness, "Guidance Systems"));
+        assert!(!shown(&harness, "not read"));
+        assert!(!shown(&harness, "not used"));
+    }
+
+    #[test]
+    fn paste_problems_are_counted_and_listed() {
+        let env = make_env(&standard_facilities());
+        let mut harness = start(&env);
+        harness.run();
+        p3_plan_with(
+            &mut harness,
+            "Particle Accelerator Unit\t4\nTritanium\t1,000\nNo Such Thing\t4\nRifter\t2",
+        );
+        assert!(shown(&harness, "1 line not read: 3"));
+        assert!(shown(&harness, "1 not used"));
+        harness.get_by_label("1 not used").hover();
+        harness.run();
+        assert!(shown(&harness, "Rifter 2"));
+    }
+
+    #[test]
+    fn quantity_errors_keep_the_last_good_plan() {
+        let env = make_env(&standard_facilities());
+        let mut harness = start(&env);
+        harness.run();
+        hobgoblin_ii_plan(&mut harness);
+        let last_good = cells(&harness, "Hobgoblin II");
+        let mut shown_now = "10";
+        for bad in ["0", "abc"] {
+            type_into(&mut harness, shown_now, bad);
+            shown_now = bad;
+            assert!(shown(
+                &harness,
+                "Quantity must be a whole number of 1 or more"
+            ));
+            assert!(shown(&harness, "PLAN  Hobgoblin II × 10 (unsaved)"));
+            assert_eq!(cells(&harness, "Hobgoblin II"), last_good);
+        }
+    }
+
+    #[test]
+    fn a_facility_with_the_wrong_rig_shows_the_plan_error() {
+        let env = make_env(&[("Raitaru bad", facility(35825, &[37157]))]);
+        let mut harness = start(&env);
+        harness.run();
+        hobgoblin_ii_plan(&mut harness);
+        pick(
+            &mut harness,
+            "NPC station · high sec",
+            "Raitaru bad · Raitaru · null sec · 1 rigs",
+        );
+        click(&mut harness, "Save");
+        drop(harness);
+
+        let mut store = Store::open(&env.data.join("user.sqlite"), NOW).expect("the store opens");
+        let row = store.facilities().expect("facilities").remove(0);
+        store
+            .update_facility(row.id, &row.name, &facility(35825, &[46487]))
+            .expect("facility saved");
+        drop(store);
+
+        let mut restarted = start(&env);
+        restarted.run();
+        click(&mut restarted, "New plan");
+        assert!(shown(
+            &restarted,
+            "Could not work out the plan: rig 46487 does not fit structure 35825"
+        ));
+    }
+
+    #[test]
+    fn reactions_tick_waits_for_a_reactions_facility() {
+        let env = make_env(&standard_facilities());
+        let mut harness = start(&env);
+        harness.run();
+        p3_plan(&mut harness);
+        assert!(tick_disabled(&harness, "Crystalline Carbonide"));
+        hover_tick(&mut harness, "Crystalline Carbonide");
+        assert!(shown(&harness, "Pick a reactions facility first"));
+        pick(
+            &mut harness,
+            "None",
+            "Athanor null · Athanor · null sec · 1 rigs",
+        );
+        tick_row(&mut harness, "Crystalline Carbonide");
+        assert_eq!(
+            cells(&harness, "Crystalline Carbonide"),
+            [
+                "Crystalline Carbonide",
+                "—",
+                "166",
+                "0",
+                "166",
+                "—",
+                "1",
+                "1",
+                "9,834"
+            ]
+        );
+        assert_eq!(
+            cells(&harness, "Helium Fuel Block"),
+            ["Helium Fuel Block", "—", "5", "0", "—", "5"]
+        );
+        assert_eq!(
+            cells(&harness, "Crystallite Alloy"),
+            ["Crystallite Alloy", "—", "98", "0", "—", "98"]
+        );
+        assert_eq!(
+            cells(&harness, "Carbon Polymers"),
+            ["Carbon Polymers", "—", "98", "0", "—", "98"]
+        );
+    }
+
+    #[test]
+    fn saved_plan_comes_back_the_same_after_a_restart() {
+        let env = make_env(&standard_facilities());
+        let mut harness = start(&env);
+        harness.run();
+        p3_plan(&mut harness);
+        click(&mut harness, "Rename");
+        type_into(&mut harness, "New plan", "Hobgoblin 10");
+        click(&mut harness, "Rename");
+        click(&mut harness, "Save");
+        assert!(!shown(&harness, "PLAN  Hobgoblin II × 10 (unsaved)"));
+        click(&mut harness, "New");
+        drop(harness);
+
+        let mut restarted = start(&env);
+        restarted.run();
+        assert!(!shown(&restarted, "PLAN  Hobgoblin II × 10"));
+        click(&mut restarted, "Hobgoblin 10");
+        assert!(shown(&restarted, "PLAN  Hobgoblin II × 10"));
+        assert_eq!(
+            cells(&restarted, "Hobgoblin I"),
+            ["Hobgoblin I", "10", "10", "0", "10", "—", "10", "1"]
+        );
+        assert_eq!(
+            cells(&restarted, "Particle Accelerator Unit"),
+            [
+                "Particle Accelerator Unit",
+                "10",
+                "10",
+                "4",
+                "6",
+                "—",
+                "6",
+                "1"
+            ]
+        );
+        assert!(has_value(
+            &restarted,
+            "Raitaru null · Raitaru · null sec · 1 rigs"
+        ));
+        assert!(has_value(&restarted, "Jita sell, walk the book"));
+        assert!(has_value(
+            &restarted,
+            "Particle Accelerator Unit\t4\nTritanium\t1,000"
+        ));
+
+        type_into(&mut restarted, "10", "11");
+        assert!(shown(&restarted, "PLAN  Hobgoblin II × 11 (unsaved)"));
+        click(&mut restarted, "New plan");
+        assert!(shown(&restarted, "Save changes to Hobgoblin 10?"));
+        click(&mut restarted, "Discard");
+        click(&mut restarted, "Hobgoblin 10");
+        assert!(shown(&restarted, "PLAN  Hobgoblin II × 10"));
+        assert!(!shown(&restarted, "PLAN  Hobgoblin II × 11 (unsaved)"));
+    }
+
+    #[test]
+    fn leaving_an_edited_plan_asks_before_it_goes() {
+        let env = make_env(&standard_facilities());
+        let mut harness = start(&env);
+        harness.run();
+        hobgoblin_ii_plan(&mut harness);
+        click(&mut harness, "New");
+        assert!(shown(&harness, "Save changes to New plan?"));
+        click(&mut harness, "Cancel");
+        assert!(shown(&harness, "PLAN  Hobgoblin II × 10 (unsaved)"));
+    }
+
+    #[test]
+    fn the_snapshots_for_the_owner_are_taken() {
+        let mut results = SnapshotResults::new();
+
+        let env = make_env(&standard_facilities());
+        let mut harness = start(&env);
+        harness.run();
+        click(&mut harness, "New");
+        harness.snapshot("build-new-plan");
+        results.extend_harness(&mut harness);
+
+        let env = make_env(&standard_facilities());
+        let mut harness = start(&env);
+        harness.run();
+        p3_plan(&mut harness);
+        harness.snapshot("build-p3");
+        results.extend_harness(&mut harness);
+
+        let env = make_env(&standard_facilities());
+        let mut harness = start(&env);
+        harness.run();
+        hobgoblin_ii_plan(&mut harness);
+        paste(
+            &mut harness,
+            "Particle Accelerator Unit\t4\nNo Such Thing\t4\nRifter\t2",
+        );
+        harness.snapshot("build-paste-problems");
+        results.extend_harness(&mut harness);
+
+        results.unwrap();
+    }
+}

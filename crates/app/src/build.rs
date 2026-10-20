@@ -1,12 +1,18 @@
-//! The Build page. Its panels are stubs until M1-14 and M1-16 fill them: the dock draws each
-//! panel's header, and [`show`] draws the body, which is empty for now.
+//! The Build page: the saved plans, the plan being edited, what is pasted from stock, and the chain
+//! of steps with what is taken from stock and what is left to buy. [`show`] draws one panel's body;
+//! the dock draws each panel's header.
+
+pub mod inputs;
+pub mod plans;
+pub mod state;
+pub mod steps;
+pub mod stock;
 
 use egui::Ui;
 
 use crate::Shared;
 
-#[derive(Debug, Default)]
-pub struct BuildPage;
+pub use state::BuildPage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildPanel {
@@ -29,5 +35,13 @@ impl BuildPanel {
     }
 }
 
-/// Draws the body of one Build panel.
-pub fn show(_page: &mut BuildPage, _panel: BuildPanel, _ui: &mut Ui, _cx: &mut Shared) {}
+/// Draws the body of one Build panel. The buy list is still a stub.
+pub fn show(page: &mut BuildPage, panel: BuildPanel, ui: &mut Ui, cx: &mut Shared) {
+    match panel {
+        BuildPanel::Plans => plans::show(page, ui, cx),
+        BuildPanel::PastedStock => stock::show(page, ui, cx),
+        BuildPanel::Plan => inputs::show(page, ui, cx),
+        BuildPanel::Steps => steps::show(page, ui, cx),
+        BuildPanel::BuyList => {}
+    }
+}

@@ -172,7 +172,7 @@ impl App {
             events,
             events_tx,
             page: Page::Build,
-            build_page: BuildPage,
+            build_page: BuildPage::default(),
             setup_page: SetupPage,
             build_dock: dock::build_layout(),
             setup_dock: dock::setup_layout(),

@@ -1,3 +1,4 @@
+mod build;
 mod layout_model;
 mod setup;
 mod shell;
