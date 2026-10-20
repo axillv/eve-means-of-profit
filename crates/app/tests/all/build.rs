@@ -383,8 +383,8 @@ mod tests {
                 < top_of(&harness, "Crystalline Carbonide")
         );
         assert!(top_of(&harness, "Hypersynaptic Fibers") < top_of(&harness, "Guidance Systems"));
-        assert!(!shown(&harness, "not read"));
-        assert!(!shown(&harness, "not used"));
+        assert!(!shown(&harness, "Left out, could not be read:"));
+        assert!(!shown(&harness, "does not use"));
     }
 
     #[test]
@@ -396,10 +396,12 @@ mod tests {
             &mut harness,
             "Particle Accelerator Unit\t4\nTritanium\t1,000\nNo Such Thing\t4\nRifter\t2",
         );
-        assert!(shown(&harness, "1 line not read: 3"));
-        assert!(shown(&harness, "1 not used"));
-        harness.get_by_label("1 not used").hover();
-        harness.run();
+        assert!(shown(&harness, "Left out, could not be read:"));
+        assert!(shown(
+            &harness,
+            "Line 3: \"No Such Thing\t4\" (unknown item)"
+        ));
+        assert!(shown(&harness, "Pasted, but this plan does not use:"));
         assert!(shown(&harness, "Rifter 2"));
     }
 

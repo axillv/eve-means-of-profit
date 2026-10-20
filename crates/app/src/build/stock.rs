@@ -26,28 +26,31 @@ pub fn show(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
     unused(page, ui, cx);
 }
 
-/// `<n> line(s) not read: <line numbers>`, with each line and its reason on hover.
+/// The most lines either list shows before it says how many more there are.
+const SHOWN: usize = 6;
+
+/// Each line that could not be read, with the line and its reason: `Line 2: "No Such Thing 4" (unknown item)`.
 fn problems(page: &BuildPage, ui: &mut Ui, cx: &Shared) {
     let problems = &page.pasted.problems;
     if problems.is_empty() {
         return;
     }
-    let numbers: Vec<String> = problems
-        .iter()
-        .map(|problem| problem.line.to_string())
-        .collect();
-    let noun = if problems.len() == 1 { "line" } else { "lines" };
-    let text = format!("{} {noun} not read: {}", problems.len(), numbers.join(", "));
-    let hover: Vec<String> = problems
-        .iter()
-        .map(|problem| format!("Line {}: {} ({})", problem.line, problem.text, problem.kind))
-        .collect();
-    ui.label(RichText::new(text).color(cx.style.neg))
-        .on_hover_text(hover.join("\n"));
+    let neg = cx.style.neg;
+    ui.label(RichText::new("Left out, could not be read:").color(neg));
+    for problem in problems.iter().take(SHOWN) {
+        ui.label(
+            RichText::new(format!(
+                "Line {}: \"{}\" ({})",
+                problem.line, problem.text, problem.kind
+            ))
+            .color(neg),
+        );
+    }
+    more(ui, problems.len(), cx.style.mute);
 }
 
-/// `<n> not used`, with each unused type and its units on hover. Only once a plan can be worked
-/// out: there is nothing to compare the stock with otherwise.
+/// The stock the plan does not use, one item and its units per line. Only once a plan can be
+/// worked out: there is nothing to compare the stock with otherwise.
 fn unused(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) {
     let Ok(plan) = page.result.as_ref() else {
         return;
@@ -55,17 +58,18 @@ fn unused(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) {
     if plan.unused_stock.is_empty() {
         return;
     }
-    let hover: Vec<String> = plan
-        .unused_stock
-        .iter()
-        .map(|(id, units)| {
-            format!(
-                "{} {units}",
-                type_name(*id, cx.sde.as_ref(), &mut cx.notices)
-            )
-        })
-        .collect();
     let mute = cx.style.mute;
-    ui.label(RichText::new(format!("{} not used", plan.unused_stock.len())).color(mute))
-        .on_hover_text(hover.join("\n"));
+    ui.label(RichText::new("Pasted, but this plan does not use:").color(mute));
+    for (id, units) in plan.unused_stock.iter().take(SHOWN) {
+        let name = type_name(*id, cx.sde.as_ref(), &mut cx.notices);
+        ui.label(RichText::new(format!("{name} {units}")).color(mute));
+    }
+    more(ui, plan.unused_stock.len(), mute);
+}
+
+/// `and <n> more`, when a list was cut at [`SHOWN`].
+fn more(ui: &mut Ui, total: usize, color: egui::Color32) {
+    if let Some(rest) = total.checked_sub(SHOWN).filter(|rest| *rest > 0) {
+        ui.label(RichText::new(format!("and {rest} more")).color(color));
+    }
 }
