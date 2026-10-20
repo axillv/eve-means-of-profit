@@ -11,6 +11,7 @@ pub mod freight;
 pub mod migrate;
 pub mod net_worth;
 pub mod plans;
+pub mod price_history;
 pub mod reservations;
 pub mod settings;
 pub mod stockpiles;

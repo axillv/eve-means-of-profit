@@ -2,6 +2,7 @@ mod costs;
 mod migrate;
 mod net_worth;
 mod plans;
+mod price_history;
 mod reservations;
 mod setup;
 mod stockpiles;

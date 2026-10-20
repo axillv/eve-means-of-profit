@@ -11,8 +11,8 @@ use crate::error::{Result, StoreError};
 
 /// Every schema change, oldest first: (version, name, SQL). Version 1 creates the first schema,
 /// version 2 the net worth history, version 3 the structure names the user typed, version 4 the
-/// stockpiles, version 5 the reservations, version 6 the costs and version 7 the summary price
-/// rules.
+/// stockpiles, version 5 the reservations, version 6 the costs, version 7 the summary price
+/// rules and version 8 the price history with each market's retention and the size limit.
 pub(crate) const MIGRATIONS: &[(u32, &str, &str)] = &[
     (1, "initial", INITIAL_SCHEMA),
     (2, "net worth", NET_WORTH_SCHEMA),
@@ -21,6 +21,7 @@ pub(crate) const MIGRATIONS: &[(u32, &str, &str)] = &[
     (5, "reservations", RESERVATIONS_SCHEMA),
     (6, "costs", COSTS_SCHEMA),
     (7, "summary price rules", SUMMARY_PRICE_RULES),
+    (8, "price history", PRICE_HISTORY_SCHEMA),
 ];
 
 const INITIAL_SCHEMA: &str = "
@@ -245,6 +246,43 @@ CREATE TABLE fee_settings (
 ALTER TABLE plans ADD COLUMN sell_mode INTEGER NOT NULL DEFAULT 0 CHECK (sell_mode IN (0, 1));
 ";
 
+/// The price history: one reading a day for each market the user chose, the market's retention,
+/// and the size limit. The Forge is seeded with the default retention and is on. Kinds: 0 region,
+/// 1 system, 2 station, 3 structure. Sides: 0 sell, 1 buy. Money is in ten-thousandths.
+const PRICE_HISTORY_SCHEMA: &str = "
+CREATE TABLE history_markets (
+    id INTEGER PRIMARY KEY,
+    kind INTEGER NOT NULL,
+    place INTEGER NOT NULL,
+    daily_days INTEGER NOT NULL,
+    total_days INTEGER,
+    enabled INTEGER NOT NULL,
+    UNIQUE (kind, place)
+);
+INSERT INTO history_markets (kind, place, daily_days, total_days, enabled)
+    VALUES (0, 10000002, 90, NULL, 1);
+CREATE TABLE price_history (
+    market INTEGER NOT NULL REFERENCES history_markets (id),
+    type_id INTEGER NOT NULL,
+    side INTEGER NOT NULL,
+    day INTEGER NOT NULL,
+    min INTEGER NOT NULL,
+    max INTEGER NOT NULL,
+    weighted_average INTEGER NOT NULL,
+    median INTEGER NOT NULL,
+    five_percent INTEGER NOT NULL,
+    volume INTEGER NOT NULL,
+    orders INTEGER NOT NULL,
+    PRIMARY KEY (market, type_id, side, day)
+) WITHOUT ROWID;
+CREATE TABLE history_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    limit_bytes INTEGER,
+    auto_refresh INTEGER NOT NULL
+);
+INSERT INTO history_settings (id, limit_bytes, auto_refresh) VALUES (1, NULL, 1);
+";
+
 /// An open database. Every method on it runs in one transaction.
 #[derive(Debug)]
 pub struct Store {
@@ -467,10 +505,10 @@ mod tests {
         let mut upgraded = Store::open(&path, 5_000).expect("upgrade");
 
         assert_eq!(
-            std::fs::read(dir.path().join("eve.db.before-v7")).expect("backup"),
+            std::fs::read(dir.path().join("eve.db.before-v8")).expect("backup"),
             before
         );
-        assert_eq!(version_of(&path), 7);
+        assert_eq!(version_of(&path), 8);
         assert_eq!(
             migrations_of(&path),
             vec![
@@ -480,7 +518,8 @@ mod tests {
                 (4, "stockpiles".to_owned(), 5_000),
                 (5, "reservations".to_owned(), 5_000),
                 (6, "costs".to_owned(), 5_000),
-                (7, "summary price rules".to_owned(), 5_000)
+                (7, "summary price rules".to_owned(), 5_000),
+                (8, "price history".to_owned(), 5_000)
             ]
         );
         assert_eq!(
@@ -501,17 +540,17 @@ mod tests {
         drop(open_with(&path, 1_000, two).expect("v2"));
         let id = raw_plan_row(&path, &plan);
         let before = std::fs::read(&path).expect("read");
-        let backup = dir.path().join("eve.db.before-v7");
+        let backup = dir.path().join("eve.db.before-v8");
 
         let mut upgraded = Store::open(&path, 1_792_404_000).expect("upgrade");
 
         assert_eq!(std::fs::read(&backup).expect("backup"), before);
-        assert_eq!(version_of(&path), 7);
+        assert_eq!(version_of(&path), 8);
         assert_eq!(
             migrations_of(&path).last(),
-            Some(&(7, "summary price rules".to_owned(), 1_792_404_000))
+            Some(&(8, "price history".to_owned(), 1_792_404_000))
         );
-        assert_eq!(migrations_of(&path).len(), 7);
+        assert_eq!(migrations_of(&path).len(), 8);
         assert_eq!(
             upgraded.plan(id).expect("plan"),
             Some(crate::PlanRecord { id, ..plan })
@@ -551,13 +590,13 @@ mod tests {
         let mut upgraded = Store::open(&path, 5_000).expect("upgrade");
 
         assert_eq!(
-            std::fs::read(dir.path().join("eve.db.before-v7")).expect("backup"),
+            std::fs::read(dir.path().join("eve.db.before-v8")).expect("backup"),
             before
         );
-        assert_eq!(version_of(&path), 7);
+        assert_eq!(version_of(&path), 8);
         assert_eq!(
             migrations_of(&path).last(),
-            Some(&(7, "summary price rules".to_owned(), 5_000))
+            Some(&(8, "price history".to_owned(), 5_000))
         );
         let rule_of = |store: &mut Store, id| store.plan(id).expect("plan").map(|p| p.price_rule);
         assert_eq!(
@@ -583,10 +622,10 @@ mod tests {
         drop(Store::open(&path, 2_000).expect("upgrade"));
 
         assert_eq!(
-            std::fs::read(dir.path().join("eve.db.before-v7")).expect("backup"),
+            std::fs::read(dir.path().join("eve.db.before-v8")).expect("backup"),
             before
         );
-        assert_eq!(version_of(&path), 7);
+        assert_eq!(version_of(&path), 8);
         let conn = Connection::open(&path).expect("open");
         for table in [
             "stockpiles",
@@ -616,7 +655,7 @@ mod tests {
 
         drop(Store::open(&path, 1_000).expect("open"));
 
-        assert_eq!(version_of(&path), 7);
-        assert!(!dir.path().join("eve.db.before-v7").exists());
+        assert_eq!(version_of(&path), 8);
+        assert!(!dir.path().join("eve.db.before-v8").exists());
     }
 }

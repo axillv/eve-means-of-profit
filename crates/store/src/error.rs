@@ -38,6 +38,10 @@ pub enum StoreError {
     InvalidPlanStock(String),
     /// Facility costs or fee settings the store will not keep, with the reason the user can read.
     InvalidCosts(String),
+    /// A market's price history retention the store will not keep, with the reason the user can read.
+    InvalidRetention(String),
+    /// The market is already in the price history.
+    Duplicate,
     /// The names along an include loop, the first one repeated at the end.
     StockpileLoop(Vec<String>),
     /// A stored value that Rust cannot turn back into its type.
@@ -65,9 +69,11 @@ impl fmt::Display for StoreError {
             Self::NotAStructure(id) => write!(f, "{id} is not a structure"),
             Self::InvalidStockpile(reason)
             | Self::InvalidPlanStock(reason)
-            | Self::InvalidCosts(reason) => {
+            | Self::InvalidCosts(reason)
+            | Self::InvalidRetention(reason) => {
                 write!(f, "{reason}")
             }
+            Self::Duplicate => write!(f, "that market is already in the price history"),
             Self::StockpileLoop(names) => {
                 write!(f, "includes itself: {}", names.join(" → "))
             }
@@ -93,6 +99,8 @@ impl std::error::Error for StoreError {
             | Self::InvalidStockpile(_)
             | Self::InvalidPlanStock(_)
             | Self::InvalidCosts(_)
+            | Self::InvalidRetention(_)
+            | Self::Duplicate
             | Self::StockpileLoop(_)
             | Self::BadData(_) => None,
         }

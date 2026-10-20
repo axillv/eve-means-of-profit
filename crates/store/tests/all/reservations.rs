@@ -149,14 +149,14 @@ mod tests {
         let mut store = Store::open(&path, 2_000).expect("upgrade");
 
         assert_eq!(
-            std::fs::read(dir.path().join("user.sqlite.before-v7")).expect("backup"),
+            std::fs::read(dir.path().join("user.sqlite.before-v8")).expect("backup"),
             before
         );
         let version: u32 = Connection::open(&path)
             .expect("open")
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         assert_eq!(names(&mut store), vec!["Alpha", "alpha", "beta"]);
         let conn = Connection::open(&path).expect("open");
         let position = |id: i64| -> i64 {
