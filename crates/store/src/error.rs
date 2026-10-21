@@ -12,15 +12,6 @@ pub enum StoreError {
         source: std::io::Error,
     },
     Sqlite(rusqlite::Error),
-    /// The file was written by a later version of the app; it is left untouched.
-    NewerSchema {
-        found: u32,
-        known: u32,
-    },
-    Migration {
-        version: u32,
-        message: String,
-    },
     EmptyName,
     NameTaken(String),
     RouteExists,
@@ -53,13 +44,6 @@ impl fmt::Display for StoreError {
         match self {
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
             Self::Sqlite(err) => write!(f, "database error: {err}"),
-            Self::NewerSchema { found, known } => write!(
-                f,
-                "the file is from a newer version (schema {found}, this version knows {known})"
-            ),
-            Self::Migration { version, message } => {
-                write!(f, "upgrade to version {version} failed: {message}")
-            }
             Self::EmptyName => write!(f, "the name is empty"),
             Self::NameTaken(name) => write!(f, "the name \"{name}\" is already used"),
             Self::RouteExists => write!(f, "that route already exists"),
@@ -87,9 +71,7 @@ impl std::error::Error for StoreError {
         match self {
             Self::Io { source, .. } => Some(source),
             Self::Sqlite(err) => Some(err),
-            Self::NewerSchema { .. }
-            | Self::Migration { .. }
-            | Self::EmptyName
+            Self::EmptyName
             | Self::NameTaken(_)
             | Self::RouteExists
             | Self::InUse { .. }
@@ -128,12 +110,8 @@ mod tests {
         }
         .to_string();
         assert_eq!(in_use, "still used by: Avatar 1, Hobgoblin 10");
-        let newer = StoreError::NewerSchema {
-            found: 99,
-            known: 1,
-        }
-        .to_string();
-        assert!(newer.contains("99") && newer.contains('1'), "{newer}");
+        let bad = StoreError::BadData("setting density has the value \"7\"".to_owned()).to_string();
+        assert!(bad.contains("density"), "{bad}");
     }
 
     #[test]

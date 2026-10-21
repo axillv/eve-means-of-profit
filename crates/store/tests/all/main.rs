@@ -7,5 +7,3 @@ mod reservations;
 mod setup;
 mod stockpiles;
 mod structure_names;
-#[cfg(test)]
-mod support;

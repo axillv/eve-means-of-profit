@@ -1,99 +1,224 @@
-use std::path::Path;
-
-use profit_store::Store;
-use rusqlite::Connection;
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use profit_store::{Store, StoreError};
+    use rusqlite::Connection;
+    use rusqlite::types::FromSql;
+    use std::path::{Path, PathBuf};
 
-    fn version_of(path: &Path) -> u32 {
-        let conn = Connection::open(path).expect("open");
-        conn.pragma_query_value(None, "user_version", |row| row.get(0))
-            .expect("version")
+    fn raw(path: &Path) -> Connection {
+        Connection::open(path).expect("open")
     }
 
-    fn migration_rows(path: &Path) -> Vec<(u32, String, i64)> {
-        let conn = Connection::open(path).expect("open");
-        let mut stmt = conn
-            .prepare("SELECT version, name, applied_at FROM migrations ORDER BY version")
-            .expect("prepare");
-        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .expect("query")
-            .collect::<rusqlite::Result<_>>()
-            .expect("rows")
+    fn scalar<T: FromSql>(path: &Path, sql: &str) -> T {
+        raw(path)
+            .query_row(sql, [], |row| row.get(0))
+            .expect("scalar")
+    }
+
+    fn table_exists(path: &Path, name: &str) -> bool {
+        let found: i64 = scalar(
+            path,
+            &format!("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '{name}'"),
+        );
+        found == 1
+    }
+
+    fn aside_of(path: &Path) -> PathBuf {
+        let mut aside = path.as_os_str().to_owned();
+        aside.push(".old-test");
+        PathBuf::from(aside)
+    }
+
+    /// The layout text a new file holds, read from a file made in a folder of its own.
+    fn layout_of_a_new_file() -> String {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("reference.sqlite");
+        drop(Store::open(&path, 1_000).expect("open").store);
+        scalar(&path, "SELECT layout FROM meta WHERE id = 1")
+    }
+
+    /// A file as an earlier test build wrote it: a migrations table, version 8 and one plan.
+    fn earlier_test_build_file(path: &Path) {
+        raw(path)
+            .execute_batch(
+                "CREATE TABLE migrations (
+                    version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL
+                );
+                INSERT INTO migrations (version, name, applied_at) VALUES (1, 'initial', 1000);
+                CREATE TABLE plans (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+                INSERT INTO plans (id, name) VALUES (1, 'Hobgoblin 10');
+                PRAGMA user_version = 8;",
+            )
+            .expect("earlier file");
     }
 
     #[test]
-    fn new_file_is_at_the_newest_version_with_no_backup() {
+    fn a_new_file_gets_the_layout_and_nothing_is_set_aside() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("eve.db");
 
-        drop(Store::open(&path, 1_000).expect("open"));
+        let opened = Store::open(&path, 1_000).expect("open");
 
-        assert_eq!(version_of(&path), 8);
+        assert_eq!(opened.started_fresh, None);
+        drop(opened);
+        assert_eq!(scalar::<i64>(&path, "SELECT count(*) FROM meta"), 1);
         assert_eq!(
-            migration_rows(&path),
-            vec![
-                (1, "initial".to_owned(), 1_000),
-                (2, "net worth".to_owned(), 1_000),
-                (3, "structure names".to_owned(), 1_000),
-                (4, "stockpiles".to_owned(), 1_000),
-                (5, "reservations".to_owned(), 1_000),
-                (6, "costs".to_owned(), 1_000),
-                (7, "summary price rules".to_owned(), 1_000),
-                (8, "price history".to_owned(), 1_000)
-            ]
+            scalar::<String>(&path, "SELECT layout FROM meta"),
+            layout_of_a_new_file()
         );
+        assert_eq!(scalar::<i64>(&path, "SELECT created_at FROM meta"), 1_000);
+        assert_eq!(scalar::<u32>(&path, "PRAGMA user_version"), 0);
+        assert!(!table_exists(&path, "migrations"));
+        assert!(!aside_of(&path).exists());
         assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 1);
     }
 
     #[test]
-    fn reopening_applies_nothing_and_writes_no_backup() {
+    fn a_reopened_file_is_opened_as_it_is_and_keeps_what_was_saved() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("eve.db");
-        drop(Store::open(&path, 1_000).expect("first open"));
-        let before = std::fs::read(&path).expect("read");
+        let mut store = Store::open(&path, 1_000).expect("open").store;
+        store
+            .set_setting("columns.build_buy_list", "volume,share")
+            .expect("set");
+        drop(store);
 
-        drop(Store::open(&path, 2_000).expect("second open"));
+        let reopened = Store::open(&path, 2_000).expect("reopen");
 
+        assert_eq!(reopened.started_fresh, None);
         assert_eq!(
-            migration_rows(&path),
-            vec![
-                (1, "initial".to_owned(), 1_000),
-                (2, "net worth".to_owned(), 1_000),
-                (3, "structure names".to_owned(), 1_000),
-                (4, "stockpiles".to_owned(), 1_000),
-                (5, "reservations".to_owned(), 1_000),
-                (6, "costs".to_owned(), 1_000),
-                (7, "summary price rules".to_owned(), 1_000),
-                (8, "price history".to_owned(), 1_000)
-            ]
+            reopened
+                .store
+                .setting("columns.build_buy_list")
+                .expect("setting"),
+            Some("volume,share".to_owned())
         );
-        assert_eq!(std::fs::read(&path).expect("read"), before);
-        assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 1);
+        assert_eq!(scalar::<i64>(&path, "SELECT created_at FROM meta"), 1_000);
+        assert!(!aside_of(&path).exists());
     }
 
     #[test]
-    fn newer_schema_is_refused_and_the_file_is_untouched() {
+    fn an_empty_file_is_treated_as_a_new_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eve.db");
+        std::fs::write(&path, b"").expect("write");
+
+        let opened = Store::open(&path, 1_000).expect("open");
+
+        assert_eq!(opened.started_fresh, None);
+        drop(opened);
+        assert_eq!(scalar::<i64>(&path, "SELECT count(*) FROM meta"), 1);
+        assert!(!aside_of(&path).exists());
+    }
+
+    #[test]
+    fn an_earlier_test_build_file_is_set_aside_unchanged_and_a_new_one_starts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eve.db");
+        earlier_test_build_file(&path);
+        let before = std::fs::read(&path).expect("read");
+
+        let opened = Store::open(&path, 2_000).expect("open");
+
+        assert_eq!(opened.started_fresh, Some(aside_of(&path)));
+        drop(opened);
+        assert_eq!(std::fs::read(aside_of(&path)).expect("old file"), before);
+        assert_eq!(scalar::<i64>(&path, "SELECT count(*) FROM plans"), 0);
+        assert_eq!(
+            scalar::<String>(&path, "SELECT layout FROM meta"),
+            layout_of_a_new_file()
+        );
+        assert!(!table_exists(&path, "migrations"));
+    }
+
+    #[test]
+    fn a_second_earlier_file_replaces_the_one_set_aside_before() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eve.db");
+        earlier_test_build_file(&path);
+        drop(Store::open(&path, 2_000).expect("first"));
+        std::fs::remove_file(&path).expect("remove");
+        earlier_test_build_file(&path);
+        raw(&path)
+            .execute("INSERT INTO plans (id, name) VALUES (2, 'Avatar 1')", [])
+            .expect("second plan");
+        let second = std::fs::read(&path).expect("read");
+
+        let opened = Store::open(&path, 3_000).expect("second");
+
+        assert_eq!(opened.started_fresh, Some(aside_of(&path)));
+        drop(opened);
+        assert_eq!(std::fs::read(aside_of(&path)).expect("old file"), second);
+    }
+
+    #[test]
+    fn a_layout_that_differs_by_one_character_is_set_aside() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("eve.db");
         drop(Store::open(&path, 1_000).expect("open"));
-        Connection::open(&path)
-            .expect("open raw")
-            .pragma_update(None, "user_version", 99)
-            .expect("set version");
+        raw(&path)
+            .execute("UPDATE meta SET layout = layout || ' '", [])
+            .expect("change layout");
         let before = std::fs::read(&path).expect("read");
 
-        let err = Store::open(&path, 2_000).expect_err("must refuse");
+        let opened = Store::open(&path, 2_000).expect("open");
 
-        assert!(matches!(
-            err,
-            profit_store::StoreError::NewerSchema {
-                found: 99,
-                known: 8
-            }
-        ));
-        assert_eq!(std::fs::read(&path).expect("read"), before);
+        assert_eq!(opened.started_fresh, Some(aside_of(&path)));
+        drop(opened);
+        assert_eq!(std::fs::read(aside_of(&path)).expect("old file"), before);
+    }
+
+    #[test]
+    fn a_meta_table_of_another_shape_is_set_aside() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eve.db");
+        raw(&path)
+            .execute_batch("CREATE TABLE meta (note TEXT); INSERT INTO meta VALUES ('x');")
+            .expect("old file");
+
+        let opened = Store::open(&path, 2_000).expect("open");
+
+        assert_eq!(opened.started_fresh, Some(aside_of(&path)));
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_database_is_refused_and_left_as_it_is() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eve.db");
+        std::fs::write(&path, b"hello").expect("write");
+
+        let err = Store::open(&path, 1_000).expect_err("must refuse");
+
+        assert!(matches!(err, StoreError::Sqlite(_)), "{err}");
+        assert_eq!(std::fs::read(&path).expect("read"), b"hello");
+        assert!(!aside_of(&path).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_cannot_be_written_gives_an_io_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let folder = dir.path().join("locked");
+        std::fs::create_dir(&folder).expect("folder");
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).expect("lock");
+
+        let err = Store::open(&folder.join("eve.db"), 1_000).expect_err("must refuse");
+
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).expect("unlock");
+        assert!(matches!(err, StoreError::Io { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_path_below_a_plain_file_gives_an_io_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("plain");
+        std::fs::write(&file, b"hello").expect("file");
+
+        let err = Store::open(&file.join("eve.db"), 1_000).expect_err("must refuse");
+
+        assert!(matches!(err, StoreError::Io { .. }), "{err}");
+        assert_eq!(std::fs::read(&file).expect("read"), b"hello");
     }
 }

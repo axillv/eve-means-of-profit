@@ -1,7 +1,7 @@
 //! The user's own data: plans, facilities, freight routes, settings, net worth history and
 //! stockpiles, in one SQLite file.
 //!
-//! [`Store::open`] creates the file or upgrades it. Each method runs in one transaction. Names are
+//! [`Store::open`] creates the file, or sets an earlier test-build file aside and creates a new one. Each method runs in one transaction. Names are
 //! trimmed and unique ignoring case. Money, volumes and rates are whole numbers.
 
 pub mod costs;
@@ -23,7 +23,7 @@ pub use costs::{FacilityCosts, FeeSettings};
 pub use error::{Result, StoreError};
 pub use facilities::FacilityRow;
 pub use freight::{RouteRow, ServiceRow};
-pub use migrate::Store;
+pub use migrate::{OpenedStore, Store};
 pub use net_worth::{ImportReport, NetWorthSettings, PriceHistory};
 pub use plans::{PlanRecord, PlanSummary, SellMode};
 pub use reservations::PlanStock;

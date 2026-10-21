@@ -140,7 +140,15 @@ impl App {
         fs::create_dir_all(&config.data_dir)?;
         fs::create_dir_all(&config.cache_dir)?;
         let now = (config.clock)();
-        let mut store = Store::open(&config.data_dir.join(USER_DB), now)?;
+        let opened = Store::open(&config.data_dir.join(USER_DB), now)?;
+        let mut notices = Vec::new();
+        if let Some(old) = &opened.started_fresh {
+            notices.push(Notice::info(format!(
+                "Your saved data came from an earlier test build and was set aside as {}. Starting fresh.",
+                old.display()
+            )));
+        }
+        let mut store = opened.store;
         let settings = store.settings()?;
         let sde_path = config.data_dir.join(SDE_DB);
         let sde = open_sde(&sde_path)?;
@@ -163,7 +171,7 @@ impl App {
                 ))),
                 style,
                 density: settings.density,
-                notices: Vec::new(),
+                notices,
                 clock: config.clock,
             },
             data_dir: config.data_dir,

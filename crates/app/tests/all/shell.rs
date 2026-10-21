@@ -213,7 +213,7 @@ mod tests {
         /// Stores the time of the last check, so the daily check is due or not.
         fn set_last_check(&self, last: i64) {
             fs::create_dir_all(&self.data).unwrap();
-            let mut store = Store::open(&self.user_db(), NOW).unwrap();
+            let mut store = Store::open(&self.user_db(), NOW).unwrap().store;
             let mut settings = store.settings().unwrap();
             settings.last_sde_check = Some(last);
             store.save_settings(&settings).unwrap();
@@ -315,7 +315,7 @@ mod tests {
         });
 
         assert!(folders.sde_db().is_file());
-        let mut store = Store::open(&folders.user_db(), NOW).unwrap();
+        let mut store = Store::open(&folders.user_db(), NOW).unwrap().store;
         assert_eq!(store.settings().unwrap().last_sde_check, Some(NOW));
     }
 
@@ -415,6 +415,43 @@ mod tests {
         assert_eq!(harness.query_all_by_label(text).count(), 2);
         assert!(shown(&harness, "ERROR"));
         assert!(shown(&harness, "Try again"));
+    }
+
+    #[test]
+    fn a_user_file_in_another_layout_is_set_aside_with_a_notice() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        import(&fixture(), &folders.user_db()).unwrap();
+        let text = format!(
+            "Your saved data came from an earlier test build and was set aside as {}.old-test. Starting fresh.",
+            folders.user_db().display()
+        );
+        let mut harness = start(Fake::new(Latest::Status(503)), &folders);
+        settle(&mut harness);
+        assert!(shown(&harness, "NOTICE"));
+        assert!(
+            harness
+                .query_all_by_label_contains("Your saved data came from an earlier test build")
+                .next()
+                .is_some()
+        );
+        let notices = &harness.state_mut().shared_mut().notices;
+        assert_eq!(notices[0].text, text);
+        assert!(folders.data.join("user.sqlite.old-test").is_file());
+    }
+
+    #[test]
+    fn a_new_or_current_user_file_gives_no_start_notice() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(990_000);
+        for _ in 0..2 {
+            let mut harness = start(Fake::new(Latest::Status(503)), &folders);
+            settle(&mut harness);
+            assert!(build_page_shown(&harness));
+            assert!(!shown(&harness, "Starting fresh."));
+            assert!(!folders.data.join("user.sqlite.old-test").exists());
+        }
     }
 
     #[test]
@@ -523,7 +560,7 @@ mod tests {
         harness.get_by_label("Dense").click();
         settle(&mut harness);
 
-        let mut store = Store::open(&folders.user_db(), NOW).unwrap();
+        let mut store = Store::open(&folders.user_db(), NOW).unwrap().store;
         assert_eq!(store.settings().unwrap().density, Density::Dense);
     }
 

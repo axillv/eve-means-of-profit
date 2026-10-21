@@ -21,7 +21,7 @@ mod tests {
     fn open_temp() -> (tempfile::TempDir, PathBuf, Store) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("eve.db");
-        let store = Store::open(&path, 1_000).expect("open");
+        let store = Store::open(&path, 1_000).expect("open").store;
         (dir, path, store)
     }
 
@@ -113,7 +113,7 @@ mod tests {
         store.save_plan(&input, 2_000).expect("save");
         drop(store);
 
-        let mut reopened = Store::open(&path, 3_000).expect("reopen");
+        let mut reopened = Store::open(&path, 3_000).expect("reopen").store;
 
         assert_eq!(reopened.plan(id).expect("plan"), Some(input));
         let facilities = reopened.facilities().expect("facilities");
@@ -453,7 +453,7 @@ mod tests {
             .collect();
         drop(store);
 
-        let mut reopened = Store::open(&path, 2_000).expect("reopen");
+        let mut reopened = Store::open(&path, 2_000).expect("reopen").store;
 
         for (id, rule) in ids.iter().zip(rules) {
             assert_eq!(
@@ -480,7 +480,7 @@ mod tests {
                 params![plan],
             )
             .expect("update");
-        let mut store = Store::open(&path, 2_000).expect("reopen");
+        let mut store = Store::open(&path, 2_000).expect("reopen").store;
 
         match store.plan(plan) {
             Err(StoreError::BadData(message)) => {
@@ -507,12 +507,11 @@ mod tests {
             .expect("update plan");
         raw(&path)
             .execute(
-                "INSERT INTO settings (id, default_price_rule, density, last_sde_check) \
-                 VALUES (1, 99, 1, NULL)",
+                "INSERT INTO app_settings (key, value) VALUES ('default_price_rule', '99')",
                 [],
             )
-            .expect("insert settings");
-        let mut store = Store::open(&path, 2_000).expect("reopen");
+            .expect("insert setting");
+        let mut store = Store::open(&path, 2_000).expect("reopen").store;
 
         match store.plan(plan) {
             Err(StoreError::BadData(message)) => {
@@ -524,9 +523,9 @@ mod tests {
         }
         match store.settings() {
             Err(StoreError::BadData(message)) => {
-                assert!(message.contains("settings"), "{message}");
-                assert!(message.contains("row 1,"), "{message}");
                 assert!(message.contains("default_price_rule"), "{message}");
+                assert!(message.contains("99"), "{message}");
+                assert!(message.contains("not valid"), "{message}");
             }
             other => panic!("expected BadData, got {other:?}"),
         }

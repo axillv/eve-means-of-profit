@@ -359,7 +359,9 @@ mod tests {
         let cache = dir.path().join("cache");
         fs::create_dir_all(&data).expect("the data folder");
         import(&fixture(), &data.join("sde.sqlite")).expect("the fixture imports");
-        let mut store = Store::open(&data.join("user.sqlite"), NOW).expect("the store opens");
+        let mut store = Store::open(&data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
         let mut settings = store.settings().expect("settings");
         settings.last_sde_check = Some(NOW);
         store.save_settings(&settings).expect("settings saved");
@@ -766,7 +768,9 @@ mod tests {
 
     /// Sets the price rule that new plans start with, in the store the app opens.
     fn default_rule(env: &Env, rule: PriceRule) {
-        let mut store = Store::open(&env.data.join("user.sqlite"), NOW).expect("the store opens");
+        let mut store = Store::open(&env.data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
         let mut settings = store.settings().expect("settings");
         settings.default_price_rule = rule;
         store.save_settings(&settings).expect("settings saved");
@@ -1093,7 +1097,9 @@ mod tests {
         settle(&mut harness, "3,011,146.86");
         click(&mut harness, "Save");
 
-        let mut store = Store::open(&env.data.join("user.sqlite"), NOW).expect("the store opens");
+        let mut store = Store::open(&env.data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
         let plan = store.plans().expect("the plans")[0].id;
         let route = store.routes().expect("the routes")[0].id;
         let services = store.services(route).expect("the services");

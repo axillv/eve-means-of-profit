@@ -83,7 +83,7 @@ mod tests {
 
     /// A Forge history of the 92 days that the default retention keeps after day 20099.
     fn ninety_two_days(path: &Path) -> (Store, i64) {
-        let mut store = Store::open(path, 1_000).expect("open");
+        let mut store = Store::open(path, 1_000).expect("open").store;
         let forge = forge_id(&store);
         record_days(&mut store, forge, FIRST_DAY..=LAST_DAY);
         (store, forge)
@@ -96,7 +96,9 @@ mod tests {
     #[test]
     fn a_fresh_store_has_the_forge_and_the_default_settings() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = Store::open(&dir.path().join("eve.db"), 1_000).expect("open");
+        let store = Store::open(&dir.path().join("eve.db"), 1_000)
+            .expect("open")
+            .store;
 
         let markets = store.history_markets().expect("markets");
 
@@ -116,55 +118,11 @@ mod tests {
     }
 
     #[test]
-    fn a_version_seven_file_upgrades_and_keeps_a_copy_of_itself() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("eve.db");
-        drop(Store::open(&path, 1_000).expect("open"));
-        raw(&path)
-            .execute_batch(
-                "PRAGMA foreign_keys = OFF;
-             DROP TABLE price_history;
-             DROP TABLE history_settings;
-             DROP TABLE history_markets;
-             DELETE FROM migrations WHERE version = 8;
-             PRAGMA user_version = 7;",
-            )
-            .expect("downgrade");
-        let before = std::fs::read(&path).expect("read");
-
-        let store = Store::open(&path, 2_000).expect("upgrade");
-
-        assert_eq!(
-            std::fs::read(dir.path().join("eve.db.before-v8")).expect("backup"),
-            before
-        );
-        let markets = store.history_markets().expect("markets");
-        assert_eq!(markets.len(), 1);
-        assert_eq!(
-            markets.first().map(|market| market.retention),
-            Some(Retention::DEFAULT)
-        );
-        assert_eq!(
-            store.history_settings().expect("settings"),
-            HistorySettings {
-                limit_bytes: None,
-                auto_refresh: true,
-            }
-        );
-        let applied: (String, i64) = raw(&path)
-            .query_row(
-                "SELECT name, applied_at FROM migrations WHERE version = 8",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("migration row");
-        assert_eq!(applied, ("price history".to_owned(), 2_000));
-    }
-
-    #[test]
     fn a_recording_keeps_one_reading_per_side_and_day() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut store = Store::open(&dir.path().join("eve.db"), 1_000).expect("open");
+        let mut store = Store::open(&dir.path().join("eve.db"), 1_000)
+            .expect("open")
+            .store;
         let forge = forge_id(&store);
 
         let outcome = store.record(forge, 20_000, &readings()).expect("record");
@@ -198,7 +156,9 @@ mod tests {
     #[test]
     fn the_default_retention_keeps_ninety_days_then_weekly_readings() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut store = Store::open(&dir.path().join("eve.db"), 1_000).expect("open");
+        let mut store = Store::open(&dir.path().join("eve.db"), 1_000)
+            .expect("open")
+            .store;
         let forge = forge_id(&store);
         record_days(&mut store, forge, FIRST_DAY..=LAST_DAY - 1);
 
@@ -235,7 +195,9 @@ mod tests {
     #[test]
     fn each_market_keeps_its_own_retention() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut store = Store::open(&dir.path().join("eve.db"), 1_000).expect("open");
+        let mut store = Store::open(&dir.path().join("eve.db"), 1_000)
+            .expect("open")
+            .store;
         let forge = forge_id(&store);
         let rule = Retention::new(30, Some(60)).expect("valid rule");
         let jita = store
@@ -267,7 +229,9 @@ mod tests {
     #[test]
     fn a_disabled_market_records_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut store = Store::open(&dir.path().join("eve.db"), 1_000).expect("open");
+        let mut store = Store::open(&dir.path().join("eve.db"), 1_000)
+            .expect("open")
+            .store;
         let forge = forge_id(&store);
         store.set_history_enabled(forge, false).expect("disable");
 
@@ -353,7 +317,9 @@ mod tests {
     #[test]
     fn a_second_add_of_the_same_market_is_a_duplicate() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut store = Store::open(&dir.path().join("eve.db"), 1_000).expect("open");
+        let mut store = Store::open(&dir.path().join("eve.db"), 1_000)
+            .expect("open")
+            .store;
 
         assert!(matches!(
             store.add_history_market(MarketKind::Region, FORGE, Retention::DEFAULT),
@@ -364,7 +330,9 @@ mod tests {
     #[test]
     fn an_unknown_market_is_not_found() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut store = Store::open(&dir.path().join("eve.db"), 1_000).expect("open");
+        let mut store = Store::open(&dir.path().join("eve.db"), 1_000)
+            .expect("open")
+            .store;
 
         assert!(matches!(
             store.record(999, 20_000, &readings()),
@@ -405,7 +373,7 @@ mod tests {
     fn a_stored_daily_period_of_zero_is_bad_data() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("eve.db");
-        let store = Store::open(&path, 1_000).expect("open");
+        let store = Store::open(&path, 1_000).expect("open").store;
         raw(&path)
             .execute("UPDATE history_markets SET daily_days = 0", [])
             .expect("corrupt");
@@ -423,7 +391,7 @@ mod tests {
     fn the_database_size_grows_after_a_recording() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("eve.db");
-        let mut store = Store::open(&path, 1_000).expect("open");
+        let mut store = Store::open(&path, 1_000).expect("open").store;
         let before = store.database_bytes().expect("size");
         assert!(before > 0);
         let forge = forge_id(&store);
@@ -436,7 +404,9 @@ mod tests {
     #[test]
     fn every_market_kind_reads_back_as_it_was_added() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut store = Store::open(&dir.path().join("eve.db"), 1_000).expect("open");
+        let mut store = Store::open(&dir.path().join("eve.db"), 1_000)
+            .expect("open")
+            .store;
         let kinds = [
             (MarketKind::System, JITA),
             (MarketKind::Station, 60_003_760),
@@ -474,11 +444,11 @@ mod tests {
             limit_bytes: Some(10_000),
             auto_refresh: false,
         };
-        let mut store = Store::open(&path, 1_000).expect("open");
+        let mut store = Store::open(&path, 1_000).expect("open").store;
         store.save_history_settings(&saved).expect("save");
         drop(store);
 
-        let reopened = Store::open(&path, 2_000).expect("reopen");
+        let reopened = Store::open(&path, 2_000).expect("reopen").store;
 
         assert_eq!(reopened.history_settings().expect("settings"), saved);
     }
@@ -486,7 +456,9 @@ mod tests {
     #[test]
     fn the_limit_drops_from_the_market_with_the_most_rows() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut store = Store::open(&dir.path().join("eve.db"), 1_000).expect("open");
+        let mut store = Store::open(&dir.path().join("eve.db"), 1_000)
+            .expect("open")
+            .store;
         let forge = forge_id(&store);
         record_days(&mut store, forge, FIRST_DAY..=LAST_DAY);
         let jita = store
@@ -508,7 +480,9 @@ mod tests {
     #[test]
     fn on_equal_rows_the_limit_drops_from_the_lower_id() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut store = Store::open(&dir.path().join("eve.db"), 1_000).expect("open");
+        let mut store = Store::open(&dir.path().join("eve.db"), 1_000)
+            .expect("open")
+            .store;
         let forge = forge_id(&store);
         record_days(&mut store, forge, FIRST_DAY..=FIRST_DAY + 9);
         let jita = store

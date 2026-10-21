@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod tests {
-    use crate::support::undo_version_six;
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
 
@@ -19,32 +18,6 @@ mod tests {
 
     fn raw(path: &Path) -> Connection {
         Connection::open(path).expect("open")
-    }
-
-    fn version_of(path: &Path) -> u32 {
-        raw(path)
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .expect("version")
-    }
-
-    /// A version-5 file with the NPC station and the Raitaru from the acceptance checks, and the
-    /// plan Hobgoblin 10.
-    fn version_five_of(path: &Path) {
-        drop(Store::open(path, 1_000).expect("open"));
-        undo_version_six(path);
-        raw(path)
-            .execute_batch(
-                "PRAGMA foreign_keys = OFF;
-                 INSERT INTO facilities (id, name, structure, security)
-                     VALUES (1, 'NPC hisec', NULL, 0), (2, 'Raitaru null', 35825, 2);
-                 INSERT INTO facility_rigs (facility_id, position, type_id) VALUES (2, 0, 37157);
-                 INSERT INTO plans (id, name, product, quantity, price_rule, packing, pasted_stock,
-                     created_at, updated_at)
-                     VALUES (1, 'Hobgoblin 10', 2456, 10, 1, 0, 'Tritanium 1,000', 1000, 1000);
-                 INSERT INTO plan_build (plan_id, type_id) VALUES (1, 2454);
-                 INSERT INTO plan_me (plan_id, type_id, me) VALUES (1, 2456, 2);",
-            )
-            .expect("raw rows");
     }
 
     fn npc_station() -> Facility {
@@ -67,7 +40,7 @@ mod tests {
     fn store_with_two_facilities() -> (tempfile::TempDir, PathBuf, Store) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("user.sqlite");
-        let mut store = Store::open(&path, 1_000).expect("open");
+        let mut store = Store::open(&path, 1_000).expect("open").store;
         assert_eq!(
             store
                 .add_facility("NPC hisec", &npc_station())
@@ -126,38 +99,6 @@ mod tests {
             system,
             tax: tax.map(Rate::from_ppm),
         }
-    }
-
-    #[test]
-    fn a_version_five_file_is_kept_aside_and_upgraded() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("user.sqlite");
-        version_five_of(&path);
-        let before = std::fs::read(&path).expect("read");
-
-        let mut store = Store::open(&path, 2_000).expect("upgrade");
-
-        assert_eq!(
-            std::fs::read(dir.path().join("user.sqlite.before-v8")).expect("backup"),
-            before
-        );
-        assert_eq!(version_of(&path), 8);
-        assert_eq!(
-            store.facility_costs(1).expect("npc"),
-            costs(None, Some(2_500))
-        );
-        assert_eq!(store.facility_costs(2).expect("raitaru"), costs(None, None));
-        assert_eq!(store.fee_settings().expect("fees"), FeeSettings::default());
-        assert_eq!(store.plan_sell_mode(1).expect("mode"), SellMode::SellOrder);
-        let raitaru_row = store
-            .facilities()
-            .expect("facilities")
-            .into_iter()
-            .find(|row| row.id == 2)
-            .expect("facility 2");
-        assert_eq!(raitaru_row.facility.structure, Some(RAITARU));
-        assert_eq!(raitaru_row.facility.rigs, vec![RIG]);
-        assert_eq!(store.plan(1).expect("plan"), Some(hobgoblin(1)));
     }
 
     #[test]
@@ -262,7 +203,7 @@ mod tests {
     fn fee_settings_survive_a_reopen_and_refused_ones_keep_the_last_saved() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("user.sqlite");
-        let mut store = Store::open(&path, 1_000).expect("open");
+        let mut store = Store::open(&path, 1_000).expect("open").store;
         let saved = FeeSettings {
             accounting: 4,
             broker_relations: 5,
@@ -272,7 +213,7 @@ mod tests {
         };
         store.save_fee_settings(&saved).expect("save");
         drop(store);
-        let mut store = Store::open(&path, 2_000).expect("reopen");
+        let mut store = Store::open(&path, 2_000).expect("reopen").store;
         assert_eq!(store.fee_settings().expect("read"), saved);
 
         let with_override = FeeSettings {
@@ -396,7 +337,7 @@ mod tests {
                  UPDATE facilities SET tax_ppm = -1 WHERE id = 1;",
             )
             .expect("write unchecked");
-        let mut store = Store::open(&path, 2_000).expect("reopen");
+        let mut store = Store::open(&path, 2_000).expect("reopen").store;
 
         let mode = bad_data(store.plan_sell_mode(1).expect_err("sell mode"));
         assert!(

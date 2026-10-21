@@ -27,7 +27,7 @@ mod tests {
     fn open_temp() -> (tempfile::TempDir, PathBuf, Store) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("eve.db");
-        let store = Store::open(&path, 1_000).expect("open");
+        let store = Store::open(&path, 1_000).expect("open").store;
         (dir, path, store)
     }
 
@@ -115,7 +115,7 @@ mod tests {
         store.add_record(&third).expect("add");
         drop(store);
 
-        let mut reopened = Store::open(&path, 2_000).expect("reopen");
+        let mut reopened = Store::open(&path, 2_000).expect("reopen").store;
 
         assert_eq!(
             reopened.records(0, 10_000).expect("records"),
@@ -298,7 +298,7 @@ mod tests {
         };
         store.save_net_worth_settings(&saved).expect("save");
         drop(store);
-        let mut reopened = Store::open(&path, 2_000).expect("reopen");
+        let mut reopened = Store::open(&path, 2_000).expect("reopen").store;
 
         assert_eq!(reopened.net_worth_settings().expect("settings"), saved);
     }

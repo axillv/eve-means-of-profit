@@ -80,7 +80,9 @@ mod tests {
         }
 
         fn store(&self) -> Store {
-            Store::open(&self.data.join("user.sqlite"), NOW).unwrap()
+            Store::open(&self.data.join("user.sqlite"), NOW)
+                .unwrap()
+                .store
         }
 
         fn sde(&self) -> Sde {

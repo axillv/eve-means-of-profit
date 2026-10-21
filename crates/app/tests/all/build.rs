@@ -79,7 +79,9 @@ mod tests {
         let cache = dir.path().join("cache");
         fs::create_dir_all(&data).expect("the data folder");
         import(&fixture(), &data.join("sde.sqlite")).expect("the fixture imports");
-        let mut store = Store::open(&data.join("user.sqlite"), NOW).expect("the store opens");
+        let mut store = Store::open(&data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
         let mut settings = store.settings().expect("settings");
         settings.last_sde_check = Some(NOW);
         store.save_settings(&settings).expect("settings saved");
@@ -94,7 +96,9 @@ mod tests {
     }
 
     fn stored_rule(env: &Env, name: &str) -> PriceRule {
-        let mut store = Store::open(&env.data.join("user.sqlite"), NOW).expect("the store opens");
+        let mut store = Store::open(&env.data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
         let id = store
             .plans()
             .expect("plans")
@@ -112,7 +116,9 @@ mod tests {
     #[test]
     fn a_plan_saved_with_the_lowest_sell_rule_shows_its_label() {
         let env = make_env(&standard_facilities());
-        let mut store = Store::open(&env.data.join("user.sqlite"), NOW).expect("the store opens");
+        let mut store = Store::open(&env.data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
         store
             .create_plan(
                 &profit_store::PlanRecord {
@@ -575,7 +581,9 @@ mod tests {
         click(&mut harness, "Save");
         drop(harness);
 
-        let mut store = Store::open(&env.data.join("user.sqlite"), NOW).expect("the store opens");
+        let mut store = Store::open(&env.data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
         let row = store.facilities().expect("facilities").remove(0);
         store
             .update_facility(row.id, &row.name, &facility(35825, &[46487]))

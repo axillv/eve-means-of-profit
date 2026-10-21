@@ -14,7 +14,7 @@ mod tests {
     fn open_temp() -> (tempfile::TempDir, PathBuf, Store) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("eve.db");
-        let store = Store::open(&path, 1_000).expect("open");
+        let store = Store::open(&path, 1_000).expect("open").store;
         (dir, path, store)
     }
 
@@ -36,13 +36,13 @@ mod tests {
     }
 
     #[test]
-    fn a_new_file_is_at_version_seven_with_no_names() {
+    fn a_new_file_has_no_names_and_no_version_number() {
         let (_dir, path, _store) = open_temp();
         let conn = Connection::open(&path).expect("open");
         let version: u32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 8);
+        assert_eq!(version, 0);
         assert_eq!(row_count(&path), 0);
     }
 
@@ -139,7 +139,7 @@ mod tests {
             .expect("set");
         drop(store);
 
-        let mut reopened = Store::open(&path, 5_000).expect("reopen");
+        let mut reopened = Store::open(&path, 5_000).expect("reopen").store;
         let expected = BTreeMap::from([
             (RAITARU, "Home Raitaru".to_owned()),
             (RAITARU_2, "Second".to_owned()),

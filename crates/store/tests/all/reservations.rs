@@ -12,7 +12,6 @@ use rusqlite::{Connection, params};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::support::undo_version_six;
 
     const MAIN: i64 = 2_112_000_001;
     const ALT: i64 = 2_112_000_002;
@@ -20,26 +19,16 @@ mod tests {
     const STRUCTURE: i64 = 1_035_466_617_946;
 
     /// beta, Alpha and alpha, so their ids are 1, 2 and 3, plus the Kit stockpile. The three
-    /// names differ only in case, so they are written into the file as a migrated file would
-    /// carry them; the store would refuse one of them.
+    /// names differ only in case, so they are written into the file straight from SQL; the store
+    /// would refuse one of them. The list order is Alpha, alpha, beta.
     fn store_with_plans() -> (tempfile::TempDir, PathBuf, Store) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("user.sqlite");
-        version_four_of(&path);
-        let store = Store::open(&path, 2_000).expect("upgrade");
-        (dir, path, store)
-    }
-
-    /// Makes the file a version-4 one that carries beta 1, Alpha 2, alpha 3 and Kit, the way the
-    /// acceptance checks need it.
-    fn version_four_of(path: &Path) {
-        drop(Store::open(path, 1_000).expect("open"));
-        undo_version_six(path);
-        undo_version_five(path);
-        raw_plan_row(path, 1, "beta");
-        raw_plan_row(path, 2, "Alpha");
-        raw_plan_row(path, 3, "alpha");
-        Connection::open(path)
+        drop(Store::open(&path, 1_000).expect("open").store);
+        raw_plan_row(&path, 1, "beta", 2);
+        raw_plan_row(&path, 2, "Alpha", 0);
+        raw_plan_row(&path, 3, "alpha", 1);
+        Connection::open(&path)
             .expect("open")
             .execute(
                 "INSERT INTO stockpiles (id, name, group_name, multiplier, position) \
@@ -47,15 +36,18 @@ mod tests {
                 params![],
             )
             .expect("insert stockpile");
+        let store = Store::open(&path, 2_000).expect("reopen").store;
+        (dir, path, store)
     }
 
-    fn raw_plan_row(path: &Path, id: i64, name: &str) {
+    fn raw_plan_row(path: &Path, id: i64, name: &str, position: i64) {
         Connection::open(path)
             .expect("open")
             .execute(
                 "INSERT INTO plans (id, name, product, quantity, price_rule, packing, \
-                 pasted_stock, created_at, updated_at) VALUES (?1, ?2, 2456, 1, 0, 0, '', 1_000, 1_000)",
-                params![id, name],
+                 pasted_stock, created_at, updated_at, position) \
+                 VALUES (?1, ?2, 2456, 1, 0, 0, '', 1_000, 1_000, ?3)",
+                params![id, name, position],
             )
             .expect("insert plan");
     }
@@ -108,24 +100,6 @@ mod tests {
             .expect("count")
     }
 
-    /// Undoes what version 5 added, so the file reads as a version-4 file again.
-    fn undo_version_five(path: &Path) {
-        let conn = Connection::open(path).expect("open");
-        conn.execute_batch(
-            "PRAGMA foreign_keys = OFF;
-             DROP TABLE job_assignments;
-             DROP TABLE plan_stock_characters;
-             DROP TABLE plan_stock_places;
-             ALTER TABLE plans DROP COLUMN position;
-             ALTER TABLE plans DROP COLUMN reserve;
-             ALTER TABLE plans DROP COLUMN stock_source;
-             ALTER TABLE stockpiles DROP COLUMN short_mode;
-             DELETE FROM migrations WHERE version = 5;
-             PRAGMA user_version = 4;",
-        )
-        .expect("downgrade");
-    }
-
     /// Drops the checks on the stored codes, so raw SQL can store one Rust cannot map back.
     fn loosen_code_checks(path: &Path) {
         let conn = Connection::open(path).expect("open");
@@ -137,40 +111,6 @@ mod tests {
              ALTER TABLE stockpiles ADD COLUMN short_mode INTEGER;",
         )
         .expect("loosen checks");
-    }
-
-    #[test]
-    fn a_version_four_file_is_kept_aside_and_upgraded() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("user.sqlite");
-        version_four_of(&path);
-        let before = std::fs::read(&path).expect("read");
-
-        let mut store = Store::open(&path, 2_000).expect("upgrade");
-
-        assert_eq!(
-            std::fs::read(dir.path().join("user.sqlite.before-v8")).expect("backup"),
-            before
-        );
-        let version: u32 = Connection::open(&path)
-            .expect("open")
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .expect("version");
-        assert_eq!(version, 8);
-        assert_eq!(names(&mut store), vec!["Alpha", "alpha", "beta"]);
-        let conn = Connection::open(&path).expect("open");
-        let position = |id: i64| -> i64 {
-            conn.query_row("SELECT position FROM plans WHERE id = ?1", [id], |row| {
-                row.get(0)
-            })
-            .expect("position")
-        };
-        assert_eq!((position(2), position(3), position(1)), (0, 1, 2));
-        for id in 1..=3 {
-            assert_eq!(store.plan_stock(id).expect("stock"), PlanStock::Pasted);
-        }
-        assert!(store.reserving_plans().expect("reserving").is_empty());
-        assert_eq!(store.short_mode(1).expect("mode"), ShortMode::AfterPlans);
     }
 
     #[test]
@@ -423,7 +363,7 @@ mod tests {
         )
         .expect("set short_mode");
 
-        let mut store = Store::open(&path, 2_000).expect("reopen");
+        let mut store = Store::open(&path, 2_000).expect("reopen").store;
 
         match store.plan_stock(1) {
             Err(StoreError::BadData(message)) => {

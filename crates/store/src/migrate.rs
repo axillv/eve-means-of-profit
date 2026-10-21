@@ -1,35 +1,31 @@
-//! Opens the database file and brings its schema up to date. Each upgrade is its own transaction.
-//!
-//! The data is the user's own and cannot be fetched again, so before an upgrade the file is
-//! copied aside as `<file>.before-v<version>`.
+//! Opens the database file and creates its layout. Until the first release there are no numbered
+//! steps: a file whose stored layout differs from [`LAYOUT`] is set aside, not upgraded.
 
+use std::fs::OpenOptions;
+use std::io;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{Result, StoreError};
 
-/// Every schema change, oldest first: (version, name, SQL). Version 1 creates the first schema,
-/// version 2 the net worth history, version 3 the structure names the user typed, version 4 the
-/// stockpiles, version 5 the reservations, version 6 the costs, version 7 the summary price
-/// rules and version 8 the price history with each market's retention and the size limit.
-pub(crate) const MIGRATIONS: &[(u32, &str, &str)] = &[
-    (1, "initial", INITIAL_SCHEMA),
-    (2, "net worth", NET_WORTH_SCHEMA),
-    (3, "structure names", STRUCTURE_NAMES_SCHEMA),
-    (4, "stockpiles", STOCKPILES_SCHEMA),
-    (5, "reservations", RESERVATIONS_SCHEMA),
-    (6, "costs", COSTS_SCHEMA),
-    (7, "summary price rules", SUMMARY_PRICE_RULES),
-    (8, "price history", PRICE_HISTORY_SCHEMA),
-];
-
-const INITIAL_SCHEMA: &str = "
+/// The whole layout of the user database. Before the first release it is edited freely. Every file
+/// stores the text it was made with, and [`Store::open`] sets aside any file whose text differs
+/// from this one, so an edit here means each earlier file starts fresh once. Numbered steps return
+/// at the first release, when this text becomes the first of them.
+const LAYOUT: &str = "
+CREATE TABLE meta (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    layout TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
 CREATE TABLE facilities (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL CHECK (length(name) > 0),
     structure INTEGER CHECK (structure >= 0),
-    security INTEGER NOT NULL
+    security INTEGER NOT NULL,
+    system INTEGER CHECK (system IS NULL OR system > 0),
+    tax_ppm INTEGER CHECK (tax_ppm IS NULL OR tax_ppm BETWEEN 0 AND 1000000)
 );
 CREATE TABLE facility_rigs (
     facility_id INTEGER NOT NULL REFERENCES facilities (id) ON DELETE CASCADE,
@@ -69,7 +65,11 @@ CREATE TABLE plans (
     packing INTEGER NOT NULL,
     pasted_stock TEXT NOT NULL,
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    reserve INTEGER NOT NULL DEFAULT 0 CHECK (reserve IN (0, 1)),
+    stock_source INTEGER NOT NULL DEFAULT 0 CHECK (stock_source IN (0, 1)),
+    sell_mode INTEGER NOT NULL DEFAULT 0 CHECK (sell_mode IN (0, 1))
 );
 CREATE TABLE plan_build (
     plan_id INTEGER NOT NULL REFERENCES plans (id) ON DELETE CASCADE,
@@ -82,15 +82,25 @@ CREATE TABLE plan_me (
     me INTEGER NOT NULL CHECK (me BETWEEN 0 AND 10),
     PRIMARY KEY (plan_id, type_id)
 );
-CREATE TABLE settings (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    default_price_rule INTEGER NOT NULL,
-    density INTEGER NOT NULL,
-    last_sde_check INTEGER
+CREATE TABLE plan_stock_characters (
+    plan_id INTEGER NOT NULL REFERENCES plans (id) ON DELETE CASCADE,
+    character_id INTEGER NOT NULL CHECK (character_id > 0),
+    PRIMARY KEY (plan_id, character_id)
+) WITHOUT ROWID;
+CREATE TABLE plan_stock_places (
+    plan_id INTEGER NOT NULL REFERENCES plans (id) ON DELETE CASCADE,
+    location_id INTEGER NOT NULL,
+    PRIMARY KEY (plan_id, location_id)
+) WITHOUT ROWID;
+CREATE TABLE job_assignments (
+    job_id INTEGER PRIMARY KEY,
+    plan_id INTEGER NOT NULL REFERENCES plans (id) ON DELETE CASCADE,
+    assigned_at INTEGER NOT NULL
 );
-";
-
-const NET_WORTH_SCHEMA: &str = "
+CREATE TABLE app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE item_sets (
     id INTEGER PRIMARY KEY
 );
@@ -138,30 +148,18 @@ CREATE TABLE net_worth_shown (
     id INTEGER PRIMARY KEY,
     part INTEGER NOT NULL UNIQUE CHECK (part BETWEEN 0 AND 7)
 );
-";
-
-/// Walking the book has no source left (the summary file holds no order list), so the rule
-/// code 0 moves to the sell side's 5% price, code 3. The other codes keep their meaning.
-const SUMMARY_PRICE_RULES: &str = "
-UPDATE plans SET price_rule = 3 WHERE price_rule = 0;
-UPDATE settings SET default_price_rule = 3 WHERE default_price_rule = 0;
-";
-
-const STRUCTURE_NAMES_SCHEMA: &str = "
 CREATE TABLE structure_names (
     structure_id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
     set_at INTEGER NOT NULL
 );
-";
-
-const STOCKPILES_SCHEMA: &str = "
 CREATE TABLE stockpiles (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL CHECK (length(name) > 0),
     group_name TEXT,
     multiplier INTEGER NOT NULL CHECK (multiplier >= 1),
-    position INTEGER NOT NULL CHECK (position >= 0)
+    position INTEGER NOT NULL CHECK (position >= 0),
+    short_mode INTEGER NOT NULL DEFAULT 0 CHECK (short_mode IN (0, 1))
 );
 CREATE TABLE stockpile_targets (
     stockpile INTEGER NOT NULL REFERENCES stockpiles (id) ON DELETE CASCADE,
@@ -195,46 +193,6 @@ CREATE TABLE stockpile_filter_characters (
     character INTEGER NOT NULL CHECK (character >= 0),
     PRIMARY KEY (filter, character)
 ) WITHOUT ROWID;
-";
-
-/// Reservations: the order of the Plans list, each plan's stock source and scope, and the running
-/// jobs assigned to plans. Also each stockpile's Short mode. The Plans list order is one position
-/// per plan, counted from 0 in the order the plans were listed before this version.
-const RESERVATIONS_SCHEMA: &str = "
-ALTER TABLE plans ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
-UPDATE plans SET position = (
-    SELECT COUNT(*) FROM plans other
-    WHERE lower(other.name) < lower(plans.name)
-        OR (lower(other.name) = lower(plans.name) AND other.id < plans.id)
-);
-ALTER TABLE plans ADD COLUMN reserve INTEGER NOT NULL DEFAULT 0 CHECK (reserve IN (0, 1));
-ALTER TABLE plans ADD COLUMN stock_source INTEGER NOT NULL DEFAULT 0 CHECK (stock_source IN (0, 1));
-CREATE TABLE plan_stock_characters (
-    plan_id INTEGER NOT NULL REFERENCES plans (id) ON DELETE CASCADE,
-    character_id INTEGER NOT NULL CHECK (character_id > 0),
-    PRIMARY KEY (plan_id, character_id)
-) WITHOUT ROWID;
-CREATE TABLE plan_stock_places (
-    plan_id INTEGER NOT NULL REFERENCES plans (id) ON DELETE CASCADE,
-    location_id INTEGER NOT NULL,
-    PRIMARY KEY (plan_id, location_id)
-) WITHOUT ROWID;
-CREATE TABLE job_assignments (
-    job_id INTEGER PRIMARY KEY,
-    plan_id INTEGER NOT NULL REFERENCES plans (id) ON DELETE CASCADE,
-    assigned_at INTEGER NOT NULL
-);
-ALTER TABLE stockpiles ADD COLUMN short_mode INTEGER NOT NULL DEFAULT 0 CHECK (short_mode IN (0, 1));
-";
-
-/// Costs: each facility's solar system and tax, the user's fee skills and standings, and how each
-/// plan sells. An NPC station (no structure) gets the 0.25% NPC tax; a structure's tax is unknown
-/// until the user types it.
-const COSTS_SCHEMA: &str = "
-ALTER TABLE facilities ADD COLUMN system INTEGER CHECK (system IS NULL OR system > 0);
-ALTER TABLE facilities ADD COLUMN tax_ppm INTEGER
-    CHECK (tax_ppm IS NULL OR tax_ppm BETWEEN 0 AND 1000000);
-UPDATE facilities SET tax_ppm = 2500 WHERE structure IS NULL;
 CREATE TABLE fee_settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     accounting INTEGER NOT NULL CHECK (accounting BETWEEN 0 AND 5),
@@ -243,13 +201,6 @@ CREATE TABLE fee_settings (
     corporation_standing INTEGER NOT NULL CHECK (corporation_standing BETWEEN -1000 AND 1000),
     broker_override_ppm INTEGER CHECK (broker_override_ppm IS NULL OR broker_override_ppm BETWEEN 0 AND 1000000)
 );
-ALTER TABLE plans ADD COLUMN sell_mode INTEGER NOT NULL DEFAULT 0 CHECK (sell_mode IN (0, 1));
-";
-
-/// The price history: one reading a day for each market the user chose, the market's retention,
-/// and the size limit. The Forge is seeded with the default retention and is on. Kinds: 0 region,
-/// 1 system, 2 station, 3 structure. Sides: 0 sell, 1 buy. Money is in ten-thousandths.
-const PRICE_HISTORY_SCHEMA: &str = "
 CREATE TABLE history_markets (
     id INTEGER PRIMARY KEY,
     kind INTEGER NOT NULL,
@@ -289,373 +240,127 @@ pub struct Store {
     pub(crate) conn: Connection,
 }
 
+/// The store, and what happened to the file that was there before.
+#[derive(Debug)]
+pub struct OpenedStore {
+    pub store: Store,
+    /// Where an earlier file was set aside when the app started fresh; `None` when the file was
+    /// opened or created as it is.
+    pub started_fresh: Option<PathBuf>,
+}
+
 impl Store {
-    /// Opens the file at `path`, creating it when missing, and upgrades its schema to the
-    /// newest version this app knows. `now` is the Unix time the upgrades are recorded with.
-    pub fn open(path: &Path, now: i64) -> Result<Store> {
-        open_with(path, now, MIGRATIONS)
+    /// Opens the file at `path`, creating it when it is missing or empty. A file made with another
+    /// layout (an earlier test build) is renamed to `<path>.old-test`, replacing an older one there,
+    /// and a new file is created. `now` is the Unix time a new file is recorded with.
+    pub fn open(path: &Path, now: i64) -> Result<OpenedStore> {
+        if !exists_with_content(path)? {
+            return Ok(OpenedStore {
+                store: create_layout(path, now)?,
+                started_fresh: None,
+            });
+        }
+        let store = Store {
+            conn: open_connection(path)?,
+        };
+        if is_current(&store.conn)? {
+            return Ok(OpenedStore {
+                store,
+                started_fresh: None,
+            });
+        }
+        drop(store);
+        let aside = aside_path(path);
+        std::fs::rename(path, &aside).map_err(|source| io_error(path, source))?;
+        match create_layout(path, now) {
+            Ok(store) => Ok(OpenedStore {
+                store,
+                started_fresh: Some(aside),
+            }),
+            Err(err) => {
+                std::fs::rename(&aside, path).map_err(|source| io_error(path, source))?;
+                Err(err)
+            }
+        }
     }
 }
 
-pub(crate) fn open_with(path: &Path, now: i64, migrations: &[(u32, &str, &str)]) -> Result<Store> {
+/// False for a missing file and for an empty one; any other file has content.
+fn exists_with_content(path: &Path) -> Result<bool> {
+    match std::fs::metadata(path) {
+        Ok(meta) => Ok(meta.len() > 0),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(io_error(path, source)),
+    }
+}
+
+fn open_connection(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "foreign_keys", true)?;
-    let known = migrations.iter().map(|m| m.0).max().unwrap_or(0);
-    let found: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if found > known {
-        return Err(StoreError::NewerSchema { found, known });
-    }
-    let pending: Vec<_> = migrations.iter().filter(|m| m.0 > found).collect();
-    if pending.is_empty() {
-        return Ok(Store { conn });
-    }
-    let mut store = Store { conn };
-    if found >= 1 {
-        backup(path, known)?;
-    }
-    for (version, name, sql) in pending {
-        apply(&mut store.conn, *version, name, sql, now)?;
-    }
-    Ok(store)
+    Ok(conn)
 }
 
-/// Copies the file byte for byte to `<file>.before-v<target>`.
-fn backup(path: &Path, target: u32) -> Result<()> {
-    let mut copy = path.as_os_str().to_owned();
-    copy.push(format!(".before-v{target}"));
-    std::fs::copy(path, PathBuf::from(&copy)).map_err(|source| StoreError::Io {
+/// True when the file was made with this exact layout text: no version number, and a `meta` row
+/// that holds [`LAYOUT`]. A file that is not a database fails the first query and is not touched.
+fn is_current(conn: &Connection) -> Result<bool> {
+    let version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version != 0 {
+        return Ok(false);
+    }
+    let meta_tables: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
+        [],
+        |row| row.get(0),
+    )?;
+    if meta_tables == 0 {
+        return Ok(false);
+    }
+    let columns: i64 = conn.query_row(
+        "SELECT count(*) FROM pragma_table_info('meta') WHERE name IN ('id', 'layout')",
+        [],
+        |row| row.get(0),
+    )?;
+    if columns != 2 {
+        return Ok(false);
+    }
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT CAST(layout AS TEXT) FROM meta WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(stored.as_deref() == Some(LAYOUT))
+}
+
+/// Creates the file (or fills an empty one) with [`LAYOUT`] and records the layout and `now`.
+fn create_layout(path: &Path, now: i64) -> Result<Store> {
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|source| io_error(path, source))?;
+    let mut conn = open_connection(path)?;
+    let tx = conn.transaction()?;
+    tx.execute_batch(LAYOUT)?;
+    tx.execute(
+        "INSERT INTO meta (id, layout, created_at) VALUES (1, ?1, ?2)",
+        params![LAYOUT, now],
+    )?;
+    tx.commit()?;
+    Ok(Store { conn })
+}
+
+fn aside_path(path: &Path) -> PathBuf {
+    let mut aside = path.as_os_str().to_owned();
+    aside.push(".old-test");
+    PathBuf::from(aside)
+}
+
+fn io_error(path: &Path, source: io::Error) -> StoreError {
+    StoreError::Io {
         path: path.to_path_buf(),
         source,
-    })?;
-    Ok(())
-}
-
-/// Runs one migration and records it. A failure rolls back that migration only.
-fn apply(conn: &mut Connection, version: u32, name: &str, sql: &str, now: i64) -> Result<()> {
-    let tx = conn.transaction()?;
-    tx.execute_batch(
-        "CREATE TABLE IF NOT EXISTS migrations (
-            version INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            applied_at INTEGER NOT NULL
-        );",
-    )?;
-    tx.execute_batch(sql).map_err(|err| StoreError::Migration {
-        version,
-        message: err.to_string(),
-    })?;
-    tx.execute(
-        "INSERT INTO migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![version, name, now],
-    )?;
-    tx.pragma_update(None, "user_version", version)?;
-    tx.commit()?;
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const EXTRA: &str = "CREATE TABLE extra (x INTEGER);";
-    const BROKEN: &str = "CREATE TABLE broken (;";
-
-    fn version_of(path: &Path) -> u32 {
-        let conn = Connection::open(path).expect("open");
-        conn.pragma_query_value(None, "user_version", |row| row.get(0))
-            .expect("version")
-    }
-
-    fn migration_rows(path: &Path) -> i64 {
-        let conn = Connection::open(path).expect("open");
-        conn.query_row("SELECT count(*) FROM migrations", [], |row| row.get(0))
-            .expect("rows")
-    }
-
-    /// The (version, name, applied_at) rows of the migrations table, oldest first.
-    fn migrations_of(path: &Path) -> Vec<(u32, String, i64)> {
-        let conn = Connection::open(path).expect("open");
-        conn.prepare("SELECT version, name, applied_at FROM migrations ORDER BY version")
-            .expect("prepare")
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .expect("query")
-            .collect::<rusqlite::Result<_>>()
-            .expect("rows")
-    }
-
-    /// Writes a plan straight into an old file, with the columns the first schema holds. The
-    /// store's code cannot write there: insert names columns later versions added.
-    fn raw_plan_row(path: &Path, plan: &crate::PlanRecord) -> i64 {
-        let conn = Connection::open(path).expect("open");
-        conn.execute(
-            "INSERT INTO plans (name, product, quantity, price_rule, packing, pasted_stock, \
-             created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![
-                plan.name,
-                plan.product,
-                i64::try_from(plan.quantity).expect("quantity"),
-                crate::plans::price_rule_code(plan.price_rule),
-                crate::plans::packing_code(plan.packing),
-                plan.pasted_stock,
-                plan.created_at,
-                plan.updated_at
-            ],
-        )
-        .expect("insert plan");
-        let id = conn.last_insert_rowid();
-        for type_id in &plan.build {
-            conn.execute(
-                "INSERT INTO plan_build (plan_id, type_id) VALUES (?1, ?2)",
-                rusqlite::params![id, i64::from(*type_id)],
-            )
-            .expect("insert build");
-        }
-        for (type_id, me) in &plan.me {
-            conn.execute(
-                "INSERT INTO plan_me (plan_id, type_id, me) VALUES (?1, ?2, ?3)",
-                rusqlite::params![id, i64::from(*type_id), i64::from(*me)],
-            )
-            .expect("insert me");
-        }
-        id
-    }
-
-    #[test]
-    fn upgrade_keeps_a_copy_of_the_old_file() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("eve.db");
-        drop(open_with(&path, 1_000, &[(1, "initial", INITIAL_SCHEMA)]).expect("v1"));
-        let before = std::fs::read(&path).expect("read");
-
-        let two: &[(u32, &str, &str)] = &[(1, "initial", INITIAL_SCHEMA), (2, "extra", EXTRA)];
-        drop(open_with(&path, 2_000, two).expect("upgrade"));
-
-        let copy = dir.path().join("eve.db.before-v2");
-        assert_eq!(std::fs::read(&copy).expect("backup"), before);
-        assert_eq!(version_of(&path), 2);
-        assert_eq!(migration_rows(&path), 2);
-    }
-
-    #[test]
-    fn failed_upgrade_keeps_the_old_version_and_its_backup() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("eve.db");
-        drop(open_with(&path, 1_000, &[(1, "initial", INITIAL_SCHEMA)]).expect("v1"));
-        let plan = crate::PlanRecord {
-            id: 0,
-            name: "Hobgoblin 10".to_owned(),
-            product: 2456,
-            quantity: 10,
-            build: std::collections::BTreeSet::from([2454]),
-            me: std::collections::BTreeMap::from([(2456, 2)]),
-            manufacturing: None,
-            reactions: None,
-            price_rule: profit_market::book::PriceRule::LowestSell,
-            route: None,
-            service: None,
-            packing: profit_core::freight::Packing::FillOnly,
-            pasted_stock: "Tritanium\t1,000".to_owned(),
-            created_at: 1_000,
-            updated_at: 1_000,
-        };
-        let id = raw_plan_row(&path, &plan);
-
-        let broken: &[(u32, &str, &str)] = &[(1, "initial", INITIAL_SCHEMA), (2, "broken", BROKEN)];
-        let err = open_with(&path, 2_000, broken).expect_err("must fail");
-        let mut reopened = open_with(&path, 3_000, &[(1, "initial", INITIAL_SCHEMA)]).expect("v1");
-        assert_eq!(
-            reopened.plan(id).expect("plan"),
-            Some(crate::PlanRecord { id, ..plan })
-        );
-        assert!(matches!(err, StoreError::Migration { version: 2, .. }));
-        assert_eq!(version_of(&path), 1);
-        assert_eq!(migration_rows(&path), 1);
-        assert!(dir.path().join("eve.db.before-v2").exists());
-    }
-
-    fn hobgoblin() -> crate::PlanRecord {
-        crate::PlanRecord {
-            id: 0,
-            name: "Hobgoblin 10".to_owned(),
-            product: 2456,
-            quantity: 10,
-            build: std::collections::BTreeSet::from([2454]),
-            me: std::collections::BTreeMap::from([(2456, 2)]),
-            manufacturing: None,
-            reactions: None,
-            price_rule: profit_market::book::PriceRule::LowestSell,
-            route: None,
-            service: None,
-            packing: profit_core::freight::Packing::FillOnly,
-            pasted_stock: "Tritanium\t1,000".to_owned(),
-            created_at: 1_000,
-            updated_at: 1_000,
-        }
-    }
-
-    #[test]
-    fn a_version_one_file_is_kept_aside_and_upgraded() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("eve.db");
-        let plan = hobgoblin();
-        drop(open_with(&path, 1_000, &[(1, "initial", INITIAL_SCHEMA)]).expect("v1"));
-        let id = raw_plan_row(&path, &plan);
-        let before = std::fs::read(&path).expect("read");
-
-        let mut upgraded = Store::open(&path, 5_000).expect("upgrade");
-
-        assert_eq!(
-            std::fs::read(dir.path().join("eve.db.before-v8")).expect("backup"),
-            before
-        );
-        assert_eq!(version_of(&path), 8);
-        assert_eq!(
-            migrations_of(&path),
-            vec![
-                (1, "initial".to_owned(), 1_000),
-                (2, "net worth".to_owned(), 5_000),
-                (3, "structure names".to_owned(), 5_000),
-                (4, "stockpiles".to_owned(), 5_000),
-                (5, "reservations".to_owned(), 5_000),
-                (6, "costs".to_owned(), 5_000),
-                (7, "summary price rules".to_owned(), 5_000),
-                (8, "price history".to_owned(), 5_000)
-            ]
-        );
-        assert_eq!(
-            upgraded.plan(id).expect("plan"),
-            Some(crate::PlanRecord { id, ..plan })
-        );
-    }
-
-    #[test]
-    fn a_version_two_file_is_kept_aside_and_upgraded_to_three() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("eve.db");
-        let plan = hobgoblin();
-        let two: &[(u32, &str, &str)] = &[
-            (1, "initial", INITIAL_SCHEMA),
-            (2, "net worth", NET_WORTH_SCHEMA),
-        ];
-        drop(open_with(&path, 1_000, two).expect("v2"));
-        let id = raw_plan_row(&path, &plan);
-        let before = std::fs::read(&path).expect("read");
-        let backup = dir.path().join("eve.db.before-v8");
-
-        let mut upgraded = Store::open(&path, 1_792_404_000).expect("upgrade");
-
-        assert_eq!(std::fs::read(&backup).expect("backup"), before);
-        assert_eq!(version_of(&path), 8);
-        assert_eq!(
-            migrations_of(&path).last(),
-            Some(&(8, "price history".to_owned(), 1_792_404_000))
-        );
-        assert_eq!(migrations_of(&path).len(), 8);
-        assert_eq!(
-            upgraded.plan(id).expect("plan"),
-            Some(crate::PlanRecord { id, ..plan })
-        );
-        drop(upgraded);
-
-        std::fs::remove_file(&backup).expect("remove");
-        drop(Store::open(&path, 1_792_404_500).expect("reopen"));
-        assert!(!backup.exists());
-    }
-
-    #[test]
-    fn a_version_six_file_moves_the_walk_rule_to_the_sell_five_percent_rule() {
-        use profit_market::book::PriceRule;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("eve.db");
-        drop(open_with(&path, 1_000, &MIGRATIONS[..6]).expect("v6"));
-        let plan_with = |name: &str, price_rule| crate::PlanRecord {
-            name: name.to_owned(),
-            price_rule,
-            ..hobgoblin()
-        };
-        let walk = raw_plan_row(&path, &plan_with("A", PriceRule::WalkSell));
-        let lowest = raw_plan_row(&path, &plan_with("B", PriceRule::LowestSell));
-        let highest = raw_plan_row(&path, &plan_with("C", PriceRule::HighestBuy));
-        Connection::open(&path)
-            .expect("open")
-            .execute(
-                "INSERT INTO settings (id, default_price_rule, density, last_sde_check) \
-                 VALUES (1, 0, 1, NULL)",
-                [],
-            )
-            .expect("settings");
-        let before = std::fs::read(&path).expect("read");
-
-        let mut upgraded = Store::open(&path, 5_000).expect("upgrade");
-
-        assert_eq!(
-            std::fs::read(dir.path().join("eve.db.before-v8")).expect("backup"),
-            before
-        );
-        assert_eq!(version_of(&path), 8);
-        assert_eq!(
-            migrations_of(&path).last(),
-            Some(&(8, "price history".to_owned(), 5_000))
-        );
-        let rule_of = |store: &mut Store, id| store.plan(id).expect("plan").map(|p| p.price_rule);
-        assert_eq!(
-            rule_of(&mut upgraded, walk),
-            Some(PriceRule::SellFivePercent)
-        );
-        assert_eq!(rule_of(&mut upgraded, lowest), Some(PriceRule::LowestSell));
-        assert_eq!(rule_of(&mut upgraded, highest), Some(PriceRule::HighestBuy));
-        assert_eq!(
-            upgraded.settings().expect("settings").default_price_rule,
-            PriceRule::SellFivePercent
-        );
-    }
-
-    #[test]
-    fn a_version_three_file_gets_the_stockpile_tables_and_a_backup() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("eve.db");
-        let three = &MIGRATIONS[..3];
-        drop(open_with(&path, 1_000, three).expect("v3"));
-        let before = std::fs::read(&path).expect("read");
-
-        drop(Store::open(&path, 2_000).expect("upgrade"));
-
-        assert_eq!(
-            std::fs::read(dir.path().join("eve.db.before-v8")).expect("backup"),
-            before
-        );
-        assert_eq!(version_of(&path), 8);
-        let conn = Connection::open(&path).expect("open");
-        for table in [
-            "stockpiles",
-            "stockpile_targets",
-            "stockpile_includes",
-            "stockpile_filters",
-            "stockpile_filter_characters",
-            "plan_stock_characters",
-            "plan_stock_places",
-            "job_assignments",
-        ] {
-            let found: i64 = conn
-                .query_row(
-                    "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
-                    params![table],
-                    |row| row.get(0),
-                )
-                .expect("table");
-            assert_eq!(found, 1, "{table}");
-        }
-    }
-
-    #[test]
-    fn a_new_file_starts_at_the_newest_version_without_a_backup() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("eve.db");
-
-        drop(Store::open(&path, 1_000).expect("open"));
-
-        assert_eq!(version_of(&path), 8);
-        assert!(!dir.path().join("eve.db.before-v8").exists());
     }
 }

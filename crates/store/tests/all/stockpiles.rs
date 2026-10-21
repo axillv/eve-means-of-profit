@@ -16,7 +16,7 @@ mod tests {
     fn open_temp() -> (tempfile::TempDir, PathBuf, Store) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("eve.db");
-        let store = Store::open(&path, 1_000).expect("open");
+        let store = Store::open(&path, 1_000).expect("open").store;
         (dir, path, store)
     }
 
