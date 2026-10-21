@@ -36,9 +36,10 @@ impl Worker {
         }
     }
 
-    /// Queues a job. A worker whose thread has stopped (a job panicked) takes no more jobs.
-    pub fn run(&self, job: Job) {
-        drop(self.jobs.send(job));
+    /// Queues a job. Returns `false` when the worker's thread has stopped (a job panicked), in which
+    /// case the job will not run.
+    pub fn run(&self, job: Job) -> bool {
+        self.jobs.send(job).is_ok()
     }
 
     /// The network for a job to lock on the worker thread.

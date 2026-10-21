@@ -16,9 +16,11 @@ mod tests {
     use egui_kittest::{Harness, SnapshotResults};
     use eve_means_of_profit::build::prices::Prices;
     use eve_means_of_profit::{App, AppConfig};
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
     use profit_market::book::PriceRule;
-    use profit_market::cache::{Http, HttpResponse};
     use profit_market::error::MarketError;
+    use profit_market::fuzzwork::{BytesHttp, BytesResponse};
     use profit_sde::{Facility, Fetch, FetchError, Security, import};
     use profit_store::Store;
     use tempfile::TempDir;
@@ -140,25 +142,30 @@ mod tests {
         assert!(has_value(&harness, "Forge sell, cheapest"));
     }
 
-    /// Jita with no orders at all, so the Buy list never reaches the network in these tests. Every
-    /// book is read as empty, and dated the test clock.
-    struct EmptyJita;
+    /// A market file with no rows at all, so the Buy list never reaches the network in these tests.
+    /// It is dated the test clock.
+    struct EmptyForge;
 
-    impl Http for EmptyJita {
-        fn get(
+    impl BytesHttp for EmptyForge {
+        fn get_bytes(
             &self,
             _url: &str,
             _if_none_match: Option<&str>,
-        ) -> Result<HttpResponse, MarketError> {
-            let dated = "Mon, 12 Jan 1970 13:46:40 GMT".to_owned();
-            Ok(HttpResponse {
+        ) -> Result<BytesResponse, MarketError> {
+            let header = "what,weightedaverage,maxval,minval,stddev,median,volume,numorders,fivepercent,orderSet\n";
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder
+                .write_all(header.as_bytes())
+                .map_err(|error| MarketError::Network(error.to_string()))?;
+            let body = encoder
+                .finish()
+                .map_err(|error| MarketError::Network(error.to_string()))?;
+            Ok(BytesResponse {
                 status: 200,
-                etag: None,
-                last_modified: Some(dated.clone()),
-                expires: Some(dated),
-                pages: None,
+                etag: Some("\"0\"".to_owned()),
+                last_modified: Some("Mon, 12 Jan 1970 13:46:40 GMT".to_owned()),
                 retry_after: None,
-                body: "[]".to_owned(),
+                body,
             })
         }
     }
@@ -173,7 +180,7 @@ mod tests {
         let mut harness = Harness::builder()
             .with_size(vec2(1280.0, 800.0))
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
-        harness.state_mut().shared_mut().market = Arc::new(Prices::new(Box::new(EmptyJita)));
+        harness.state_mut().shared_mut().market = Arc::new(Prices::new(Box::new(EmptyForge)));
         harness
     }
 

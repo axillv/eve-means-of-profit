@@ -1435,6 +1435,7 @@ dependencies = [
  "egui",
  "egui_dock",
  "egui_kittest",
+ "flate2",
  "profit-core",
  "profit-market",
  "profit-sde",

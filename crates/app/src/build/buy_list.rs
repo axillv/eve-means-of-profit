@@ -1,25 +1,37 @@
-//! The Buy list panel: what to buy at Jita for the plan on screen, what each line costs and how old
-//! its price is, the freight each service charges, and the delivered total. The list copies to
-//! EVE's multibuy window.
+//! The Buy list panel: what to buy for the plan on screen, what each line costs and how old its
+//! price is, the freight each service charges, and the delivered total. The list copies to EVE's
+//! multibuy window.
 
-use egui::{Button, Checkbox, ComboBox, Id, RichText, Ui};
-use profit_core::buylist::{BuyInput, BuyList, BuyRow, LinePrice, buy_list};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use egui::{Button, Checkbox, ComboBox, Context, Id, RichText, TextEdit, Ui};
+use profit_core::buylist::{BuyInput, BuyList, BuyRow, Delivered, LinePrice, buy_list};
 use profit_core::format::group_thousands;
-use profit_core::freight::{self, CargoLine, FreightError, FreightQuote, Packing};
+use profit_core::freight::{
+    self, CargoLine, Contract, FreightError, FreightQuote, Packing, RateCard,
+};
 use profit_core::industry::TypeId;
 use profit_core::money::Money;
 use profit_core::plan::Plan;
+use profit_core::volume::Volume;
 use profit_market::book::PriceRule;
+use profit_market::fuzzwork::{Refresh, Side, Stat};
 use profit_sde::Sde;
+use profit_sde::map::StarMap;
 use profit_store::PlanRecord;
-use std::collections::BTreeMap;
 
-use super::prices::{STALE_SECS, age_text, failure_text};
+use super::prices::{self, Held, Manual, OutOfRange, Outcome, STALE_SECS, age_text, failure_text};
 use super::state::{BuildPage, push_error, report, type_name};
 use crate::Shared;
 use crate::status::Notice;
 use crate::table::Table;
-use crate::table::model::{Cell, Column, ColumnKind, Row};
+use crate::table::model::{Cell, Column, ColumnKind, Row, SortKey};
+
+/// The column ids, in the order the columns are drawn.
+const IDS: [&str; 10] = [
+    "item", "need", "own", "buy", "m3", "price", "live", "diff", "age", "value",
+];
 
 /// What the panel asks the plan to change, applied after the panel is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,12 +50,43 @@ struct Offer {
 /// What the table shows beyond the row's own numbers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct View {
-    /// Whether a book is held for the line. Lines to buy without one show `…`.
+    type_id: TypeId,
+    /// Whether the market file has been downloaded. Before that a missing price reads `…`.
     fetched: bool,
-    /// The hover on a missing price: which side of the book had no orders.
+    /// The live price per unit, when the file has one for the item on the rule's side.
+    live: Option<Money>,
+    /// The age of the live price in seconds.
+    live_age: Option<i64>,
+    /// The price the player typed, which the line uses in place of the live one.
+    manual: Option<Manual>,
+    /// Whether the line is priced from the live price: it has units to buy and no typed price.
+    live_used: bool,
+    /// The hover on a `—` price: which side of the market has no orders, or why no price exists.
     missing_hover: Option<&'static str>,
-    /// Age of the price in seconds, `None` when there is no price.
-    age: Option<i64>,
+}
+
+/// A price cell being typed over: the text, the price it started with, and whether the text was
+/// rejected. Kept in the frame memory while the cell has focus or holds a rejected text.
+#[derive(Debug, Clone, Default)]
+struct PriceEdit {
+    text: String,
+    original: String,
+    bad: bool,
+}
+
+/// Whether the timer refreshes the prices. On by default; the tick lasts for the session.
+fn auto_key() -> Id {
+    Id::new("build buy list auto refresh")
+}
+
+/// The columns the player hid on the Buy list, kept in the frame memory.
+fn hidden_key() -> Id {
+    Id::new("build buy list hidden columns")
+}
+
+/// Whether the column with `id` is hidden.
+fn is_hidden(hidden: &[String], id: &str) -> bool {
+    hidden.iter().any(|hidden| hidden == id)
 }
 
 pub fn show(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
@@ -62,25 +105,21 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Option<Edit> {
         return None;
     }
     let plan = page.result.as_ref().ok()?;
-    for error in cx.market.take_failures() {
-        push_error(&mut cx.notices, failure_text(&error));
-    }
     let now = (cx.clock)();
-    let wanted: Vec<TypeId> = plan
-        .buy
-        .iter()
-        .filter(|line| line.to_buy > 0)
-        .map(|line| line.type_id)
-        .collect();
-    request_prices(ui, cx, &wanted, now);
+    for outcome in cx.market.take_outcomes() {
+        show_outcome(cx, outcome, now);
+    }
+    let held = cx.market.held();
+    let mut auto = ui.data(|data| data.get_temp(auto_key())).unwrap_or(true);
+    ask_when_due(cx, &held, auto, now);
 
-    let (inputs, views) = buy_inputs(plan, record, cx, now);
+    let (inputs, views) = buy_inputs(plan, record, cx, &held, now);
     let Ok(buy) = buy_list(inputs) else {
         report(cx, "Could not add up the buy list.");
         return None;
     };
     let cargo = buy.cargo();
-    let offers = offers(record, cx, &cargo);
+    let offers = offers(ui, record, cx, &cargo);
     let chosen = chosen(record.service, &offers);
     let empty = FreightQuote {
         contracts: Vec::new(),
@@ -98,42 +137,94 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Option<Edit> {
         return None;
     };
 
+    // The hidden columns last for the session; saving them is a question for all tables.
+    let mut hidden: Vec<String> = ui
+        .data(|data| data.get_temp(hidden_key()))
+        .unwrap_or_default();
     let mut edit = None;
     ui.horizontal_wrapped(|ui| {
         edit = freight_row(ui, record, &offers, chosen, cx);
     });
     ui.horizontal_wrapped(|ui| {
         if ui
-            .add_enabled(!wanted.is_empty(), Button::new("Refresh prices"))
-            .on_hover_text("Asks Jita prices again for the lines to buy. The cache keeps any price that has not expired.")
+            .add_enabled(
+                !cx.market.running() && !cx.market.stopped(),
+                Button::new("Refresh now"),
+            )
+            .on_hover_text("Asks Fuzzwork for the prices again. Its file changes about every 30 minutes, so a request within 15 minutes of the last one is not made.")
             .clicked()
         {
-            cx.market.request(&cx.worker, wanted.clone(), now);
+            cx.market.refresh(&cx.worker, now, true);
+        }
+        if ui
+            .add(Checkbox::new(&mut auto, "Refresh automatically"))
+            .changed()
+        {
+            ui.data_mut(|data| data.insert_temp(auto_key(), auto));
         }
         copy_button(ui, &buy, cx);
+        if column_menu(ui, &mut hidden) {
+            ui.data_mut(|data| data.insert_temp(hidden_key(), hidden.clone()));
+        }
     });
-    table(ui, cx, &buy, &views);
-    footer_line(ui, &buy, &delivered, &offers, record, cx, now);
+    ui.label(format!("Price rule: {}", rule_text(record.price_rule)));
+    table(ui, cx, record.id, now, &buy, &views, &hidden);
+    let totals = Totals {
+        buy: &buy,
+        delivered: &delivered,
+        offers: &offers,
+        record,
+        held: &held,
+        views: &views,
+    };
+    footer_line(ui, cx, &totals, auto, now);
     edit
 }
 
-/// Asks for the books of the lines to buy that have none yet. It asks once for each change of the
-/// lines; `Refresh prices` asks for them all again.
-fn request_prices(ui: &mut Ui, cx: &mut Shared, wanted: &[TypeId], now: i64) {
-    let key = Id::new("build buy list prices");
-    let previous: Option<Vec<TypeId>> = ui.data(|data| data.get_temp(key));
-    if previous.as_deref() == Some(wanted) {
-        return;
+/// Asks the worker for the file when it is due: the first download, once, even with the timer off;
+/// after that the timer asks when the market says the next refresh is due.
+fn ask_when_due(cx: &Shared, held: &Held, auto: bool, now: i64) {
+    let due = (held.published_at.is_none() && cx.market.ask_first())
+        || (auto && held.next_refresh_at.is_some_and(|at| now >= at));
+    if due {
+        cx.market.refresh(&cx.worker, now, false);
     }
-    let missing: Vec<TypeId> = wanted
-        .iter()
-        .copied()
-        .filter(|type_id| !cx.market.held(*type_id))
-        .collect();
-    if !missing.is_empty() {
-        cx.market.request(&cx.worker, missing, now);
+}
+
+/// Shows what a refresh answered: a failure always, and a too-soon answer through [`too_soon_notice`].
+fn show_outcome(cx: &mut Shared, outcome: Outcome, now: i64) {
+    match outcome.result {
+        Err(error) => push_error(&mut cx.notices, failure_text(&error)),
+        Ok(refresh) => {
+            let published = cx.market.published_at();
+            if let Some(text) = too_soon_notice(outcome.explicit, &refresh, published, now) {
+                cx.notices.push(Notice::info(text));
+            }
+        }
     }
-    ui.data_mut(|data| data.insert_temp(key, wanted.to_vec()));
+}
+
+/// The notice for a refresh the market answered as too soon. It is shown only when the player asked
+/// for the refresh: a timer refresh that is too soon stays quiet. `published` is when the file held
+/// was made.
+fn too_soon_notice(
+    explicit: bool,
+    refresh: &Refresh,
+    published: Option<i64>,
+    now: i64,
+) -> Option<String> {
+    let Refresh::TooSoon { next_at } = refresh else {
+        return None;
+    };
+    if !explicit {
+        return None;
+    }
+    let age = published.map_or(0, |at| now.saturating_sub(at));
+    Some(format!(
+        "Prices are {} old; next refresh in {}",
+        age_text(age),
+        age_text(next_at.saturating_sub(now)),
+    ))
 }
 
 /// The buy inputs of the plan's buy lines, in their order, and what the table shows for each.
@@ -141,8 +232,10 @@ fn buy_inputs(
     plan: &Plan,
     record: &PlanRecord,
     cx: &mut Shared,
+    held: &Held,
     now: i64,
 ) -> (Vec<BuyInput>, BTreeMap<u64, View>) {
+    let (side, _) = prices::rule_source(record.price_rule);
     let mut inputs = Vec::with_capacity(plan.buy.len());
     let mut views = BTreeMap::new();
     for line in &plan.buy {
@@ -152,28 +245,39 @@ fn buy_inputs(
             .as_ref()
             .and_then(|sde| sde.item(line.type_id).ok().flatten())
             .and_then(|item| item.haul_volume());
-        let (price, fetched) = if line.to_buy == 0 {
-            (LinePrice::Missing, true)
+        let live = prices::live(held, line.type_id, record.price_rule);
+        let manual = cx.market.manual(record.id, line.type_id);
+        let (price, overflow) = if line.to_buy == 0 {
+            (LinePrice::Missing, false)
         } else {
-            match cx
-                .market
-                .line_price(line.type_id, record.price_rule, line.to_buy)
-            {
-                None => (LinePrice::Missing, false),
-                Some(Ok(price)) => (price, true),
-                Some(Err(error)) => {
-                    push_error(&mut cx.notices, failure_text(&error));
-                    (LinePrice::Missing, true)
-                }
+            match prices::line_price(live.as_ref(), manual, line.to_buy) {
+                Ok(price) => (price, false),
+                Err(OutOfRange) => (LinePrice::Missing, true),
             }
         };
-        let age = priced_at(&price).map(|at| now.saturating_sub(at));
+        let missing_hover = if overflow {
+            Some("price out of range")
+        } else if line.to_buy > 0
+            && matches!(price, LinePrice::Missing)
+            && held.published_at.is_some()
+        {
+            Some(match side {
+                Side::Sell => "no Forge sell orders",
+                Side::Buy => "no Forge buy orders",
+            })
+        } else {
+            None
+        };
         views.insert(
             u64::from(line.type_id),
             View {
-                fetched,
-                missing_hover: missing_hover(&price, record.price_rule, line.to_buy),
-                age,
+                type_id: line.type_id,
+                fetched: held.published_at.is_some(),
+                live: live.map(|live| live.per_unit),
+                live_age: live.map(|live| now.saturating_sub(live.published_at)),
+                manual,
+                live_used: manual.is_none() && line.to_buy > 0 && live.is_some(),
+                missing_hover,
             },
         );
         inputs.push(BuyInput {
@@ -189,29 +293,83 @@ fn buy_inputs(
     (inputs, views)
 }
 
-fn priced_at(price: &LinePrice) -> Option<i64> {
-    match price {
-        LinePrice::Priced { priced_at, .. } | LinePrice::Thin { priced_at, .. } => Some(*priced_at),
-        LinePrice::Missing => None,
-    }
+/// How long the freight services of a route are kept before the store is read again.
+const SERVICES_KEPT_SECS: f64 = 1.0;
+/// How long the star map is kept before the game data is read again. The map changes rarely.
+const MAP_KEPT_SECS: f64 = 60.0;
+
+/// A freight service on the plan's route: its rate card, and the jumps it charges for, or the
+/// reason it has none.
+#[derive(Clone)]
+struct Leg {
+    id: i64,
+    name: String,
+    card: RateCard,
+    jumps: Result<Option<u32>, String>,
 }
 
-/// The hover on a `—` price: the side of the book the rule reads has no orders.
-fn missing_hover(price: &LinePrice, rule: PriceRule, to_buy: u64) -> Option<&'static str> {
-    if to_buy == 0 || !matches!(price, LinePrice::Missing) {
-        return None;
-    }
-    Some(match rule {
-        PriceRule::HighestBuy => "no Jita buy orders",
-        PriceRule::WalkSell | PriceRule::LowestSell => "no Jita sell orders",
-    })
+/// The services of a route as they were read, and when.
+#[derive(Clone)]
+struct Legs {
+    route: i64,
+    read_at: f64,
+    legs: Vec<Leg>,
 }
 
-/// One freight service per service on the plan's route, in the order they were saved.
-fn offers(record: &PlanRecord, cx: &mut Shared, cargo: &[CargoLine]) -> Vec<Offer> {
-    let Some(route_id) = record.route else {
+/// The star map as it was read, and when.
+#[derive(Clone)]
+struct Map {
+    read_at: f64,
+    star: Option<Arc<StarMap>>,
+}
+
+/// One freight offer per service on the plan's route, in the order they were saved.
+fn offers(ui: &Ui, record: &PlanRecord, cx: &mut Shared, cargo: &[CargoLine]) -> Vec<Offer> {
+    let Some(route) = record.route else {
         return Vec::new();
     };
+    freight_legs(ui.ctx(), route, cx)
+        .into_iter()
+        .map(|leg| {
+            let outcome = match leg.jumps {
+                Ok(Some(jumps)) => freight::quote(&leg.card, jumps, cargo, record.packing)
+                    .map_err(|error| freight_reason(&error, cx)),
+                Ok(None) => Err("no route".to_owned()),
+                Err(error) => Err(error),
+            };
+            Offer {
+                id: leg.id,
+                name: leg.name,
+                outcome,
+            }
+        })
+        .collect()
+}
+
+/// The services of a route, read from the store at most once a second. The frames in between reuse
+/// the last read, so the panel does not read the store every frame.
+fn freight_legs(ctx: &Context, route: i64, cx: &mut Shared) -> Vec<Leg> {
+    let now = ctx.input(|input| input.time);
+    let kept = ctx.data(|data| data.get_temp::<Legs>(legs_key()));
+    if let Some(kept) = kept
+        && kept.route == route
+        && now - kept.read_at < SERVICES_KEPT_SECS
+    {
+        return kept.legs;
+    }
+    let star = star_map(ctx, now, cx);
+    let legs = read_legs(route, star.as_deref(), cx);
+    let kept = Legs {
+        route,
+        read_at: now,
+        legs: legs.clone(),
+    };
+    ctx.data_mut(|data| data.insert_temp(legs_key(), kept));
+    legs
+}
+
+/// The services of a route with the jumps each charges for, read from the store.
+fn read_legs(route_id: i64, star: Option<&StarMap>, cx: &mut Shared) -> Vec<Leg> {
     let routes = match cx.store.routes() {
         Ok(routes) => routes,
         Err(error) => {
@@ -221,14 +379,6 @@ fn offers(record: &PlanRecord, cx: &mut Shared, cargo: &[CargoLine]) -> Vec<Offe
     };
     let Some(route) = routes.into_iter().find(|route| route.id == route_id) else {
         return Vec::new();
-    };
-    let star = match cx.sde.as_ref().map(Sde::star_map) {
-        Some(Ok(star)) => Some(star),
-        Some(Err(error)) => {
-            report(cx, format!("Could not read the map: {error}"));
-            None
-        }
-        None => None,
     };
     let services = match cx.store.services(route_id) {
         Ok(services) => services,
@@ -240,26 +390,53 @@ fn offers(record: &PlanRecord, cx: &mut Shared, cargo: &[CargoLine]) -> Vec<Offe
     services
         .into_iter()
         .map(|service| {
-            let jumps = match (service.jumps_override, &star) {
+            let jumps = match (service.jumps_override, star) {
                 (Some(jumps), _) => Ok(Some(jumps)),
                 (None, Some(star)) => star
                     .jumps(route.from_system, route.to_system, service.route_kind)
                     .map_err(|error| error.to_string()),
                 (None, None) => Ok(None),
             };
-            let outcome = match jumps {
-                Ok(Some(jumps)) => freight::quote(&service.card, jumps, cargo, record.packing)
-                    .map_err(|error| freight_reason(&error, cx)),
-                Ok(None) => Err("no route".to_owned()),
-                Err(error) => Err(error),
-            };
-            Offer {
+            Leg {
                 id: service.id,
                 name: service.name,
-                outcome,
+                card: service.card,
+                jumps,
             }
         })
         .collect()
+}
+
+/// The star map of the game data, read at most once a minute.
+fn star_map(ctx: &Context, now: f64, cx: &mut Shared) -> Option<Arc<StarMap>> {
+    let kept = ctx.data(|data| data.get_temp::<Map>(map_key()));
+    if let Some(kept) = kept
+        && now - kept.read_at < MAP_KEPT_SECS
+    {
+        return kept.star;
+    }
+    let star = match cx.sde.as_ref().map(Sde::star_map) {
+        Some(Ok(star)) => Some(Arc::new(star)),
+        Some(Err(error)) => {
+            report(cx, format!("Could not read the map: {error}"));
+            None
+        }
+        None => None,
+    };
+    let kept = Map {
+        read_at: now,
+        star: star.clone(),
+    };
+    ctx.data_mut(|data| data.insert_temp(map_key(), kept));
+    star
+}
+
+fn legs_key() -> Id {
+    Id::new("build buy list freight legs")
+}
+
+fn map_key() -> Id {
+    Id::new("build buy list star map")
 }
 
 /// Why a service cannot carry the cargo, in words the panel shows.
@@ -343,18 +520,7 @@ fn freight_row(
             };
             ui.label(text).on_hover_ui(|ui| {
                 for (index, contract) in quote.contracts.iter().enumerate() {
-                    let minimum = if contract.pays_minimum {
-                        " · pays the minimum"
-                    } else {
-                        ""
-                    };
-                    ui.label(format!(
-                        "{}: {} m³ · {} collateral · {}{minimum}",
-                        index + 1,
-                        contract.volume.format_m3(),
-                        contract.value.format_isk(),
-                        contract.charge.format_isk(),
-                    ));
+                    ui.label(contract_line(index + 1, contract));
                 }
             });
         }
@@ -366,6 +532,22 @@ fn freight_row(
         }
     }
     edit
+}
+
+/// One contract in the hover of the contracts: its number, volume, collateral and charge, and
+/// whether the charge is the service's minimum.
+fn contract_line(number: usize, contract: &Contract) -> String {
+    let minimum = if contract.pays_minimum {
+        " · pays the minimum"
+    } else {
+        ""
+    };
+    format!(
+        "{number}: {} m³ · {} collateral · {}{minimum}",
+        contract.volume.format_m3(),
+        contract.value.format_isk(),
+        contract.charge.format_isk(),
+    )
 }
 
 /// Shows a choice as a dropdown. Returns the option picked this frame, if any.
@@ -412,25 +594,59 @@ fn copy_button(ui: &mut Ui, buy: &BuyList, cx: &mut Shared) {
     }
 }
 
-/// The table row of one buy row: its numbers in the order of the columns.
-fn table_row(row: &BuyRow, views: &BTreeMap<u64, View>) -> Row {
-    let view = views.get(&u64::from(row.type_id));
-    let fetched = view.is_some_and(|view| view.fetched);
+/// The price rule as the Plan panel names it, read as the side and statistic it uses: a plan on the
+/// walk-the-book rule reads the 5% price, so it is named that way.
+fn rule_text(rule: PriceRule) -> String {
+    let (side, stat) = prices::rule_source(rule);
+    let side_text = match side {
+        Side::Sell => "sell",
+        Side::Buy => "buy",
+    };
+    let stat_text = match (stat, side) {
+        (Stat::Best, Side::Buy) => "highest",
+        (Stat::Best, Side::Sell) => "cheapest",
+        (Stat::FivePercent, _) => "5% price",
+        (Stat::WeightedAverage, _) => "weighted average",
+        (Stat::Median, _) => "middle",
+    };
+    format!("Forge {side_text}, {stat_text}")
+}
+
+/// The menu that shows or hides each column. Returns whether the choice changed.
+fn column_menu(ui: &mut Ui, hidden: &mut Vec<String>) -> bool {
+    let mut changed = false;
+    ui.menu_button("Columns", |ui| {
+        for column in all_columns() {
+            let mut shown = !is_hidden(hidden, column.id);
+            if ui.checkbox(&mut shown, column.label.as_str()).changed() {
+                changed = true;
+                if shown {
+                    hidden.retain(|id| id != column.id);
+                } else {
+                    hidden.push(column.id.to_owned());
+                }
+            }
+        }
+    });
+    changed
+}
+
+/// The table cells of one buy row, in the order of [`IDS`].
+fn table_cells(row: &BuyRow, view: &View) -> Vec<Cell> {
+    let fetched = view.fetched;
     let price = match &row.price {
         LinePrice::Priced { per_unit, .. } => Cell::money(*per_unit),
-        LinePrice::Thin {
-            available,
-            total_for_available,
-            ..
-        } => total_for_available
-            .checked_div_qty(*available)
-            .map_or_else(Cell::missing, Cell::money),
+        // A thin line is priced at the live price: only its units on the market are short.
+        LinePrice::Thin { .. } => view.live.map_or_else(Cell::missing, Cell::money),
         LinePrice::Missing if fetched => Cell::missing(),
         LinePrice::Missing => Cell::text("…"),
     };
-    let age = view
-        .and_then(|view| view.age)
-        .map_or_else(Cell::missing, |age| Cell::text(age_text(age)));
+    let age = if view.manual.is_some() {
+        Cell::text("manual")
+    } else {
+        view.live_age
+            .map_or_else(Cell::missing, |age| Cell::text(age_text(age)))
+    };
     let value = match (&row.value, &row.price) {
         (Some(value), _) => Cell::money(*value),
         (None, LinePrice::Thin { available, .. }) => {
@@ -439,21 +655,46 @@ fn table_row(row: &BuyRow, views: &BTreeMap<u64, View>) -> Row {
         (None, _) if fetched => Cell::missing(),
         (None, _) => Cell::text("…"),
     };
-    Row {
-        key: u64::from(row.type_id),
-        depth: 0,
-        cells: vec![
-            Cell::text(row.name.as_str()),
-            count(row.needed),
-            count(row.from_stock),
-            count(row.to_buy),
-            row.volume.map_or_else(Cell::missing, |volume| {
-                Cell::int(i128::from(volume.ten_thousandths()), volume.format_m3())
-            }),
-            price,
-            age,
-            value,
-        ],
+    vec![
+        Cell::text(row.name.as_str()),
+        count(row.needed),
+        count(row.from_stock),
+        count(row.to_buy),
+        row.volume.map_or_else(Cell::missing, volume_cell),
+        price,
+        view.live.map_or_else(Cell::missing, Cell::money),
+        Cell::text(diff_text(view.manual, view.live)),
+        age,
+        value,
+    ]
+}
+
+/// The typed price against the live one, in whole percent with a sign, rounded down. Empty
+/// without both, or when the live price is zero.
+fn diff_text(manual: Option<Manual>, live: Option<Money>) -> String {
+    let (Some(manual), Some(live)) = (manual, live) else {
+        return String::new();
+    };
+    if live.ten_thousandths() <= 0 {
+        return String::new();
+    }
+    let change =
+        (i128::from(manual.per_unit.ten_thousandths()) - i128::from(live.ten_thousandths())) * 100;
+    let percent = change.div_euclid(i128::from(live.ten_thousandths()));
+    let sign = if percent < 0 { '-' } else { '+' };
+    let size = match i64::try_from(percent.abs()) {
+        Ok(size) => group_thousands(size),
+        Err(_) => percent.abs().to_string(),
+    };
+    format!("{sign}{size}%")
+}
+
+/// A volume in m³, drawn with two decimals and copied as its plain amount.
+fn volume_cell(volume: Volume) -> Cell {
+    Cell {
+        text: volume.format_m3(),
+        plain: volume.to_plain(),
+        key: SortKey::Int(i128::from(volume.ten_thousandths())),
     }
 }
 
@@ -465,15 +706,17 @@ fn count(amount: u64) -> Cell {
     )
 }
 
-fn columns() -> Vec<Column> {
+fn all_columns() -> Vec<Column> {
     vec![
         column("item", "Item", ColumnKind::Text, 220.0),
         column("need", "Need", ColumnKind::Number, 80.0),
         column("own", "Own", ColumnKind::Number, 80.0),
         column("buy", "Buy", ColumnKind::Number, 80.0),
         column("m3", "m³", ColumnKind::Number, 90.0),
-        column("price", "Price", ColumnKind::Money, 130.0),
-        column("age", "Age", ColumnKind::Text, 60.0),
+        column("price", "Price", ColumnKind::Money, 120.0),
+        column("live", "Live", ColumnKind::Money, 110.0),
+        column("diff", "Diff", ColumnKind::Text, 90.0),
+        column("age", "Age", ColumnKind::Text, 70.0),
         column("value", "Value", ColumnKind::Money, 150.0),
     ]
 }
@@ -487,6 +730,16 @@ fn column(id: &'static str, label: &str, kind: ColumnKind, width: f32) -> Column
     }
 }
 
+/// The items of a list whose column is shown, in column order.
+fn shown<T>(items: Vec<T>, hidden: &[String]) -> Vec<T> {
+    items
+        .into_iter()
+        .zip(IDS)
+        .filter(|(_, id)| !is_hidden(hidden, id))
+        .map(|(item, _)| item)
+        .collect()
+}
+
 /// The table's footer row, aligned with the columns: the volume and the value.
 fn footer_cells(buy: &BuyList) -> Vec<Cell> {
     vec![
@@ -494,10 +747,9 @@ fn footer_cells(buy: &BuyList) -> Vec<Cell> {
         Cell::text(""),
         Cell::text(""),
         Cell::text(""),
-        Cell::int(
-            i128::from(buy.volume.ten_thousandths()),
-            buy.volume.format_m3(),
-        ),
+        volume_cell(buy.volume),
+        Cell::text(""),
+        Cell::text(""),
         Cell::text(""),
         Cell::text(""),
         Cell::money(buy.value),
@@ -505,24 +757,47 @@ fn footer_cells(buy: &BuyList) -> Vec<Cell> {
 }
 
 /// The table of the buy rows, with the volume and value in a footer row.
-fn table(ui: &mut Ui, cx: &Shared, buy: &BuyList, views: &BTreeMap<u64, View>) {
-    let columns = columns();
-    let rows: Vec<Row> = buy.rows.iter().map(|row| table_row(row, views)).collect();
-    let footer = footer_cells(buy);
+fn table(
+    ui: &mut Ui,
+    cx: &Shared,
+    plan: i64,
+    now: i64,
+    buy: &BuyList,
+    views: &BTreeMap<u64, View>,
+    hidden: &[String],
+) {
+    let columns = shown(all_columns(), hidden);
+    let rows: Vec<Row> = buy
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let view = views.get(&u64::from(row.type_id))?;
+            Some(Row {
+                key: u64::from(row.type_id),
+                depth: 0,
+                cells: shown(table_cells(row, view), hidden),
+            })
+        })
+        .collect();
+    let footer = shown(footer_cells(buy), hidden);
     let mut draw = |ui: &mut Ui, key: u64, column: &'static str| -> bool {
         let Some(view) = views.get(&key) else {
             return false;
         };
         match column {
-            "price" => match view.missing_hover {
-                Some(hover) if view.fetched => {
-                    ui.label("—").on_hover_text(hover);
+            "price" => {
+                price_edit(ui, cx, plan, now, view);
+                true
+            }
+            "age" => match (view.manual, view.live_age) {
+                (Some(manual), _) => {
+                    let typed = age_text(now.saturating_sub(manual.set_at));
+                    ui.label("manual").on_hover_text(format!(
+                        "Typed {typed} ago. It does not change with the market."
+                    ));
                     true
                 }
-                _ => false,
-            },
-            "age" => match view.age {
-                Some(age) if age > STALE_SECS => {
+                (None, Some(age)) if age > STALE_SECS => {
                     ui.colored_label(cx.style.stale, age_text(age));
                     true
                 }
@@ -536,17 +811,108 @@ fn table(ui: &mut Ui, cx: &Shared, buy: &BuyList, views: &BTreeMap<u64, View>) {
         .show_with(ui, &cx.style, cx.density, &rows, Some(&footer), &mut draw);
 }
 
-/// The footer line, then the age of the oldest price among the lines to buy. The freight amount
-/// lists every service on hover, and an incomplete total says why on hover.
-fn footer_line(
-    ui: &mut Ui,
-    buy: &BuyList,
-    delivered: &profit_core::buylist::Delivered,
-    offers: &[Offer],
-    record: &PlanRecord,
-    cx: &Shared,
-    now: i64,
-) {
+/// The Price cell: the price the line uses, typed over. The text is committed when the field loses
+/// focus. Text that is not a price stays with `Not a price` under it, and the price held does not
+/// change. An empty field returns the line to the live price.
+fn price_edit(ui: &mut Ui, cx: &Shared, plan: i64, now: i64, view: &View) {
+    let key = Id::new(("build buy list price", plan, view.type_id));
+    let shown = view.manual.map(|manual| manual.per_unit).or(view.live);
+    // A line with no price shows `—`, or `…` until the first download is in; typing over it sets a price.
+    let original = match shown {
+        Some(price) => price.format_isk(),
+        None if view.fetched => "—".to_owned(),
+        None => "…".to_owned(),
+    };
+    let mut edit: PriceEdit = ui
+        .data(|data| data.get_temp(key))
+        .unwrap_or_else(|| PriceEdit {
+            text: original.clone(),
+            original: original.clone(),
+            bad: false,
+        });
+    let hint = if view.fetched { "—" } else { "…" };
+    let color = if view.manual.is_some() {
+        cx.style.accent
+    } else {
+        cx.style.text
+    };
+    ui.vertical(|ui| {
+        let response = ui
+            .add(
+                TextEdit::singleline(&mut edit.text)
+                    .hint_text(hint)
+                    .text_color(color)
+                    .desired_width(110.0),
+            )
+            .on_hover_text(if let Some(hover) = view.missing_hover {
+                hover
+            } else if view.manual.is_some() {
+                "A typed price: the market does not change it. Clear the cell to use the market price."
+            } else {
+                "The market price. Type a price to freeze it for this plan."
+            });
+        if response.changed() {
+            edit.bad = false;
+        }
+        if response.lost_focus() && edit.text != edit.original {
+            match typed_price(&edit.text) {
+                Ok(Some(per_unit)) => cx.market.set_manual(
+                    plan,
+                    view.type_id,
+                    Some(Manual {
+                        per_unit,
+                        set_at: now,
+                    }),
+                ),
+                Ok(None) => cx.market.set_manual(plan, view.type_id, None),
+                Err(()) => edit.bad = true,
+            }
+        }
+        if response.has_focus() || edit.bad {
+            ui.data_mut(|data| data.insert_temp(key, edit.clone()));
+        } else {
+            ui.data_mut(|data| data.remove::<PriceEdit>(key));
+        }
+        if edit.bad {
+            ui.label(RichText::new("Not a price").color(cx.style.neg));
+        }
+    });
+}
+
+/// The price typed in a cell: `Ok(None)` for an empty cell, which clears the typed price. A
+/// negative or unreadable text is an error.
+fn typed_price(text: &str) -> Result<Option<Money>, ()> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    match Money::parse_isk(text) {
+        Ok(price) if price.ten_thousandths() >= 0 => Ok(Some(price)),
+        _ => Err(()),
+    }
+}
+
+/// What the footer adds up.
+struct Totals<'a> {
+    buy: &'a BuyList,
+    delivered: &'a Delivered,
+    offers: &'a [Offer],
+    record: &'a PlanRecord,
+    held: &'a Held,
+    views: &'a BTreeMap<u64, View>,
+}
+
+/// The footer line, then the age of the oldest live price among the lines to buy, and the timer.
+/// The freight amount lists every service on hover, and an incomplete total says why on hover.
+fn footer_line(ui: &mut Ui, cx: &Shared, totals: &Totals, auto: bool, now: i64) {
+    let &Totals {
+        buy,
+        delivered,
+        offers,
+        record,
+        held,
+        views,
+    } = totals;
     ui.horizontal_wrapped(|ui| {
         ui.label(format!(
             "m³ {} · value {} · freight ",
@@ -577,11 +943,11 @@ fn footer_line(
             let mut reasons: Vec<String> = buy
                 .incomplete
                 .iter()
-                .map(|type_id| {
+                .filter_map(|type_id| {
                     buy.rows
                         .iter()
                         .find(|row| row.type_id == *type_id)
-                        .map_or_else(String::new, |row| row.name.clone())
+                        .map(|row| row.name.clone())
                 })
                 .collect();
             if record.route.is_some() && offers.iter().all(|offer| offer.outcome.is_err()) {
@@ -591,15 +957,34 @@ fn footer_line(
                 .on_hover_text(reasons.join("\n"));
         }
     });
-    if let Some(at) = buy.oldest_priced_at {
-        let age = now.saturating_sub(at);
-        let text = format!("Oldest: {}", age_text(age));
-        if age > STALE_SECS {
-            ui.colored_label(cx.style.stale, text);
-        } else {
-            ui.label(text);
+    ui.horizontal_wrapped(|ui| {
+        let oldest = views
+            .values()
+            .filter(|view| view.live_used)
+            .filter_map(|view| view.live_age)
+            .max();
+        if let Some(age) = oldest {
+            let text = format!("Oldest: {}", age_text(age));
+            if age > STALE_SECS {
+                ui.colored_label(cx.style.stale, text);
+            } else {
+                ui.label(text);
+            }
+            ui.label(" · ");
         }
-    }
+        if cx.market.running() {
+            ui.label("Refreshing…");
+        } else if cx.market.stopped() {
+            ui.label("Prices cannot refresh until the app restarts.");
+        } else if !auto {
+            ui.label("Automatic refresh is off");
+        } else if let Some(at) = held.next_refresh_at {
+            ui.label(format!(
+                "Next refresh in {}",
+                age_text(at.saturating_sub(now))
+            ));
+        }
+    });
 }
 
 /// Changes the plan on screen and works it out again.
@@ -616,5 +1001,103 @@ fn apply(page: &mut BuildPage, cx: &mut Shared, edit: Edit) {
             }
         }
         page.edited(cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use profit_core::money::Money;
+    use profit_market::fuzzwork::Refresh;
+
+    use profit_core::freight::Contract;
+    use profit_core::volume::Volume;
+
+    use super::{Manual, contract_line, diff_text, too_soon_notice};
+
+    fn isk(text: &str) -> Money {
+        Money::parse_isk(text).expect("a price")
+    }
+
+    fn typed(text: &str) -> Manual {
+        Manual {
+            per_unit: isk(text),
+            set_at: 0,
+        }
+    }
+
+    #[test]
+    fn the_diff_is_a_whole_percent_with_a_sign() {
+        let live = Some(isk("100.00"));
+        assert_eq!(diff_text(Some(typed("200.00")), live), "+100%");
+        assert_eq!(diff_text(Some(typed("50.00")), live), "-50%");
+        assert_eq!(diff_text(Some(typed("199.99")), live), "+99%");
+        assert_eq!(diff_text(Some(typed("100.00")), live), "+0%");
+    }
+
+    #[test]
+    fn the_diff_needs_a_typed_price_and_a_live_one() {
+        assert_eq!(diff_text(None, Some(isk("100.00"))), "");
+        assert_eq!(diff_text(Some(typed("200.00")), None), "");
+        assert_eq!(diff_text(Some(typed("200.00")), Some(Money::ZERO)), "");
+    }
+
+    #[test]
+    fn a_timer_refresh_that_is_too_soon_stays_quiet() {
+        let refresh = Refresh::TooSoon { next_at: 2_000_600 };
+        assert_eq!(
+            too_soon_notice(false, &refresh, Some(1_999_460), 2_000_000),
+            None
+        );
+    }
+
+    #[test]
+    fn a_refresh_the_player_asked_for_says_how_old_the_prices_are() {
+        let refresh = Refresh::TooSoon { next_at: 2_000_600 };
+        assert_eq!(
+            too_soon_notice(true, &refresh, Some(1_999_460), 2_000_000).as_deref(),
+            Some("Prices are 9m old; next refresh in 10m")
+        );
+    }
+
+    #[test]
+    fn a_contract_at_its_minimum_says_so_in_its_hover() {
+        let contract = Contract {
+            pieces: Vec::new(),
+            volume: Volume::from_ten_thousandths(1_205_000),
+            value: isk("1114686.00"),
+            charge: isk("200000000.00"),
+            pays_minimum: true,
+        };
+        assert_eq!(
+            contract_line(1, &contract),
+            "1: 120.50 m³ · 1,114,686.00 collateral · 200,000,000.00 · pays the minimum"
+        );
+    }
+
+    #[test]
+    fn a_contract_above_its_minimum_does_not_say_so() {
+        let contract = Contract {
+            pieces: Vec::new(),
+            volume: Volume::from_ten_thousandths(1_205_000),
+            value: isk("1114686.00"),
+            charge: isk("107998.43"),
+            pays_minimum: false,
+        };
+        assert_eq!(
+            contract_line(2, &contract),
+            "2: 120.50 m³ · 1,114,686.00 collateral · 107,998.43"
+        );
+    }
+
+    #[test]
+    fn an_answer_that_is_not_too_soon_gives_no_notice() {
+        assert_eq!(
+            too_soon_notice(true, &Refresh::Downloaded, Some(1_999_460), 2_000_000),
+            None
+        );
+        assert_eq!(
+            too_soon_notice(true, &Refresh::NotModified, Some(1_999_460), 2_000_000),
+            None
+        );
     }
 }

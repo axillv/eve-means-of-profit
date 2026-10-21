@@ -42,7 +42,6 @@ use worker::{Job, Worker, lock};
 
 const USER_DB: &str = "user.sqlite";
 const SDE_DB: &str = "sde.sqlite";
-
 /// Unix seconds, from the system or a fixed value in tests.
 pub type Clock = Box<dyn Fn() -> i64 + Send>;
 
@@ -83,7 +82,7 @@ pub struct Shared {
     pub sde: Option<Sde>,
     pub store: Store,
     pub worker: Worker,
-    /// The Jita prices the Build page reads, shared with the Items and the Orders pages.
+    /// The Forge prices the Build page reads, shared with the Items and the Orders pages.
     pub market: Arc<build::prices::Prices>,
     pub style: Style,
     pub density: Density,
@@ -296,12 +295,12 @@ impl App {
 
     /// The idle text of the status line: the age of the oldest market price held, when there is one.
     fn idle_text(&self) -> String {
-        match self.shared.market.oldest_change() {
-            Some(changed) => {
+        match self.shared.market.published_at() {
+            Some(published) => {
                 let now = (self.shared.clock)();
                 format!(
                     "Market data: oldest {}",
-                    build::prices::age_text(now.saturating_sub(changed))
+                    build::prices::age_text(now.saturating_sub(published))
                 )
             }
             None => status::IDLE_TEXT.to_owned(),
