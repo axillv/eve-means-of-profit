@@ -114,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn a_plan_saved_with_the_lowest_sell_rule_shows_its_label() {
+    fn a_plan_shows_its_rule_and_a_pick_is_unsaved_until_it_is_saved() {
         let env = make_env(&standard_facilities());
         let mut store = Store::open(&env.data.join("user.sqlite"), NOW)
             .expect("the store opens")
@@ -123,14 +123,14 @@ mod tests {
             .create_plan(
                 &profit_store::PlanRecord {
                     id: 0,
-                    name: "Cheapest".to_owned(),
+                    name: "Buy rule".to_owned(),
                     product: 2456,
                     quantity: 10,
                     build: std::collections::BTreeSet::new(),
                     me: std::collections::BTreeMap::new(),
                     manufacturing: None,
                     reactions: None,
-                    price_rule: PriceRule::LowestSell,
+                    price_rule: PriceRule::HighestBuy,
                     route: None,
                     service: None,
                     packing: profit_core::freight::Packing::TopUp,
@@ -144,8 +144,76 @@ mod tests {
         drop(store);
         let mut harness = start(&env);
         harness.run();
-        click(&mut harness, "Cheapest");
-        assert!(has_value(&harness, "Forge sell, cheapest"));
+        click(&mut harness, "Buy rule");
+        assert!(has_value(&harness, "Forge buy, highest"));
+
+        pick(
+            &mut harness,
+            "Forge buy, highest",
+            "Forge sell, weighted average",
+        );
+        assert!(
+            harness
+                .query_all_by_label_contains("(unsaved)")
+                .next()
+                .is_some(),
+            "the plan is marked unsaved"
+        );
+        click(&mut harness, "Save");
+        assert_eq!(
+            stored_rule(&env, "Buy rule"),
+            PriceRule::SellWeightedAverage
+        );
+    }
+
+    #[test]
+    fn a_new_plan_takes_the_default_rule_and_an_older_plan_keeps_its_own() {
+        let env = make_env(&standard_facilities());
+        let mut store = Store::open(&env.data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
+        let mut settings = store.settings().expect("settings");
+        settings.default_price_rule = PriceRule::BuyMedian;
+        store.save_settings(&settings).expect("settings saved");
+        for (name, rule) in [
+            ("Old buy", PriceRule::HighestBuy),
+            ("Old walk", PriceRule::WalkSell),
+        ] {
+            store
+                .create_plan(
+                    &profit_store::PlanRecord {
+                        id: 0,
+                        name: name.to_owned(),
+                        product: 2456,
+                        quantity: 10,
+                        build: std::collections::BTreeSet::new(),
+                        me: std::collections::BTreeMap::new(),
+                        manufacturing: None,
+                        reactions: None,
+                        price_rule: rule,
+                        route: None,
+                        service: None,
+                        packing: profit_core::freight::Packing::TopUp,
+                        pasted_stock: String::new(),
+                        created_at: NOW,
+                        updated_at: NOW,
+                    },
+                    NOW,
+                )
+                .expect("the plan is saved");
+        }
+        drop(store);
+        let mut harness = start(&env);
+        harness.run();
+
+        click(&mut harness, "New");
+        assert!(has_value(&harness, "Forge buy, middle"));
+
+        click(&mut harness, "Old buy");
+        assert!(has_value(&harness, "Forge buy, highest"));
+
+        click(&mut harness, "Old walk");
+        assert!(has_value(&harness, "Forge sell, 5% price"));
     }
 
     /// A market file with no rows at all, so the Buy list never reaches the network in these tests.
@@ -682,7 +750,7 @@ mod tests {
             &restarted,
             "Raitaru null · Raitaru · null sec · 1 rigs"
         ));
-        // The screen cannot show the new rule until its picker lists it, so the saved rule is read here.
+        assert!(has_value(&restarted, "Forge sell, 5% price"));
         assert_eq!(
             stored_rule(&env, "Hobgoblin 10"),
             PriceRule::SellFivePercent
@@ -741,6 +809,20 @@ mod tests {
             "Particle Accelerator Unit\t4\nNo Such Thing\t4\nRifter\t2",
         );
         harness.snapshot("build-paste-problems");
+        results.extend_harness(&mut harness);
+
+        let env = make_env(&standard_facilities());
+        let mut harness = start(&env);
+        harness.run();
+        hobgoblin_ii_plan(&mut harness);
+        harness
+            .get_by(|node| {
+                node.value()
+                    .is_some_and(|value| value == "Forge sell, 5% price")
+            })
+            .click();
+        harness.run();
+        harness.snapshot("build-price-rule-open");
         results.extend_harness(&mut harness);
 
         results.unwrap();

@@ -583,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_store_shows_no_listed_rule_and_a_new_choice_is_saved_but_not_for_old_plans() {
+    fn a_fresh_store_lists_the_eight_rules_and_saves_a_pick_for_new_plans_only() {
         let folders = Folders::new();
         let product = folders.sde().find_exact("Hobgoblin II").unwrap().unwrap();
         folders
@@ -609,21 +609,52 @@ mod tests {
                 NOW,
             )
             .unwrap();
-        // The new default (the sell side's 5% price) is not in the list on screen until the screen task adds it,
-        // so the fresh default is read from the store.
         assert_eq!(
             folders.store().settings().unwrap().default_price_rule,
             PriceRule::SellFivePercent
         );
         let mut harness = start(&folders);
-        click(&mut harness, "Jita buy, highest");
-        assert!(selected(&harness, "Jita buy, highest"));
+        let labels = [
+            "Forge sell, 5% price",
+            "Forge sell, cheapest",
+            "Forge sell, weighted average",
+            "Forge sell, middle",
+            "Forge buy, highest",
+            "Forge buy, 5% price",
+            "Forge buy, weighted average",
+            "Forge buy, middle",
+        ];
+        let helps = [
+            "The price at the cheapest 5% of the sell volume in The Forge.",
+            "The lowest sell price in The Forge.",
+            "The average sell price, weighted by volume.",
+            "The middle sell price.",
+            "The highest buy order, for people who place buy orders.",
+            "The price at the highest 5% of the buy volume in The Forge.",
+            "The average buy price, weighted by volume.",
+            "The middle buy price.",
+        ];
+        for label in labels {
+            assert!(shown(&harness, label), "{label} is listed");
+        }
+        for help in helps {
+            assert!(shown(&harness, help), "the help for {help:?} is listed");
+        }
+        let tops: Vec<f32> = labels.iter().map(|label| top_of(&harness, label)).collect();
+        assert!(
+            tops.windows(2).all(|pair| pair[0] < pair[1]),
+            "the labels are listed in this order"
+        );
+        assert!(selected(&harness, labels[0]));
+
+        click(&mut harness, "Forge buy, middle");
+        assert!(selected(&harness, "Forge buy, middle"));
         drop(harness);
 
         let mut store = folders.store();
         assert_eq!(
             store.settings().unwrap().default_price_rule,
-            PriceRule::HighestBuy
+            PriceRule::BuyMedian
         );
         let old = store.plans().unwrap();
         let old_id = old.iter().find(|plan| plan.name == "Old plan").unwrap().id;
@@ -631,6 +662,17 @@ mod tests {
             store.plan(old_id).unwrap().unwrap().price_rule,
             PriceRule::WalkSell
         );
+    }
+
+    /// The top edge of the first node labelled `label`, to check the order of the radio list.
+    fn top_of(harness: &Harness<'_, App>, label: &str) -> f32 {
+        harness
+            .query_all_by_label(label)
+            .next()
+            .unwrap_or_else(|| panic!("no node labelled {label}"))
+            .rect()
+            .min
+            .y
     }
 
     fn selected(harness: &Harness<'_, App>, label: &str) -> bool {
@@ -684,7 +726,7 @@ mod tests {
         harness.run_steps(2);
         harness.snapshot("setup-freight");
 
-        click(&mut harness, "Jita buy, highest");
+        click(&mut harness, "Forge buy, highest");
         harness.run_steps(2);
         harness.snapshot("setup-price-rule");
     }

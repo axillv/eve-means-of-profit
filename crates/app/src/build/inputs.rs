@@ -11,10 +11,15 @@ use super::state::{BuildPage, push_error, report, type_name};
 use crate::Shared;
 use crate::status::Notice;
 
-const PRICE_RULES: [PriceRule; 3] = [
-    PriceRule::WalkSell,
+pub(crate) const PRICE_RULES: [PriceRule; 8] = [
+    PriceRule::SellFivePercent,
     PriceRule::LowestSell,
+    PriceRule::SellWeightedAverage,
+    PriceRule::SellMedian,
     PriceRule::HighestBuy,
+    PriceRule::BuyFivePercent,
+    PriceRule::BuyWeightedAverage,
+    PriceRule::BuyMedian,
 ];
 
 /// How many product matches the search lists.
@@ -216,25 +221,31 @@ fn price_row(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
     ui.label("Price");
     let current = page.record.as_ref().map(|record| record.price_rule);
     if let Some(current) = current {
+        // A plan saved before the rule list changed may still hold `WalkSell`; it reads as the
+        // default's label, and picking anything leaves that old value behind.
+        let shown = if current == PriceRule::WalkSell {
+            PriceRule::SellFivePercent
+        } else {
+            current
+        };
         let options: Vec<(PriceRule, String)> = PRICE_RULES
             .into_iter()
             .map(|rule| (rule, price_text(rule).to_owned()))
             .collect();
-        if let Some(rule) = choose(ui, "build_price", current, &options) {
+        if let Some(rule) = choose(ui, "build_price", shown, &options) {
             edit(page, cx, |record| record.price_rule = rule);
         }
     }
     ui.end_row();
 }
 
-fn price_text(rule: PriceRule) -> &'static str {
+pub(crate) fn price_text(rule: PriceRule) -> &'static str {
     match rule {
-        PriceRule::WalkSell => "Jita sell, walk the book",
+        PriceRule::WalkSell | PriceRule::SellFivePercent => "Forge sell, 5% price",
         PriceRule::LowestSell => "Forge sell, cheapest",
-        PriceRule::HighestBuy => "Forge buy, highest",
-        PriceRule::SellFivePercent => "Forge sell, 5% price",
         PriceRule::SellWeightedAverage => "Forge sell, weighted average",
         PriceRule::SellMedian => "Forge sell, middle",
+        PriceRule::HighestBuy => "Forge buy, highest",
         PriceRule::BuyFivePercent => "Forge buy, 5% price",
         PriceRule::BuyWeightedAverage => "Forge buy, weighted average",
         PriceRule::BuyMedian => "Forge buy, middle",
