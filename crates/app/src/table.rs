@@ -24,6 +24,19 @@ pub fn copy_request(table: Id) -> Id {
     table.with("copy as TSV")
 }
 
+/// The hidden column ids in `text`: the parts between commas, without empty parts.
+pub fn hidden_from_text(text: &str) -> Vec<String> {
+    text.split(',')
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The text to save `hidden` as: the ids joined with commas.
+pub fn hidden_to_text(hidden: &[String]) -> String {
+    hidden.join(",")
+}
+
 /// The width of the fold arrow and the indent per depth, in points.
 const ARROW_WIDTH: f32 = 14.0;
 const INDENT: f32 = 14.0;

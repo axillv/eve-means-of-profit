@@ -25,13 +25,16 @@ use super::prices::{self, Held, Manual, OutOfRange, Outcome, STALE_SECS, age_tex
 use super::state::{BuildPage, push_error, report, type_name};
 use crate::Shared;
 use crate::status::Notice;
-use crate::table::Table;
 use crate::table::model::{Cell, Column, ColumnKind, Row, SortKey};
+use crate::table::{Table, hidden_from_text};
 
 /// The column ids, in the order the columns are drawn.
 const IDS: [&str; 10] = [
-    "item", "need", "own", "buy", "m3", "price", "live", "diff", "age", "value",
+    "item", "need", "own", "buy", "volume", "price", "live", "diff", "age", "value",
 ];
+
+/// The name the buy list's hidden columns are saved under.
+const TABLE: &str = "build_buy_list";
 
 /// What the panel asks the plan to change, applied after the panel is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,9 +82,32 @@ fn auto_key() -> Id {
     Id::new("build buy list auto refresh")
 }
 
-/// The columns the player hid on the Buy list, kept in the frame memory.
+/// The columns the player hid on the Buy list, kept in the frame memory after the saved setting is
+/// read on the first frame of a session.
 fn hidden_key() -> Id {
     Id::new("build buy list hidden columns")
+}
+
+/// The hidden columns saved for the buy list.
+fn saved_hidden(cx: &mut Shared) -> Vec<String> {
+    match cx.store.setting(&format!("columns.{TABLE}")) {
+        Ok(Some(text)) => hidden_from_text(&text),
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            report(cx, format!("Could not read the settings: {error}"));
+            Vec::new()
+        }
+    }
+}
+
+/// The hidden columns of this session: the saved setting on the first frame, then the frame memory.
+fn hidden_columns(ui: &Ui, cx: &mut Shared) -> Vec<String> {
+    if let Some(hidden) = ui.data(|data| data.get_temp(hidden_key())) {
+        return hidden;
+    }
+    let hidden = saved_hidden(cx);
+    ui.data_mut(|data| data.insert_temp(hidden_key(), hidden.clone()));
+    hidden
 }
 
 /// Whether the column with `id` is hidden.
@@ -137,10 +163,8 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Option<Edit> {
         return None;
     };
 
-    // The hidden columns last for the session; saving them is a question for all tables.
-    let mut hidden: Vec<String> = ui
-        .data(|data| data.get_temp(hidden_key()))
-        .unwrap_or_default();
+    // The hidden columns are read once from the settings, then kept in the frame memory.
+    let mut hidden = hidden_columns(ui, cx);
     let mut edit = None;
     ui.horizontal_wrapped(|ui| {
         edit = freight_row(ui, record, &offers, chosen, cx);
@@ -164,7 +188,10 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Option<Edit> {
         }
         copy_button(ui, &buy, cx);
         if column_menu(ui, &mut hidden) {
+            // An id for a column the table no longer has is dropped when the list is saved.
+            hidden.retain(|id| IDS.contains(&id.as_str()));
             ui.data_mut(|data| data.insert_temp(hidden_key(), hidden.clone()));
+            cx.save_hidden_columns(TABLE, &hidden);
         }
     });
     ui.label(format!("Price rule: {}", rule_text(record.price_rule)));
@@ -712,7 +739,7 @@ fn all_columns() -> Vec<Column> {
         column("need", "Need", ColumnKind::Number, 80.0),
         column("own", "Own", ColumnKind::Number, 80.0),
         column("buy", "Buy", ColumnKind::Number, 80.0),
-        column("m3", "m³", ColumnKind::Number, 90.0),
+        column("volume", "m³", ColumnKind::Number, 90.0),
         column("price", "Price", ColumnKind::Money, 120.0),
         column("live", "Live", ColumnKind::Money, 110.0),
         column("diff", "Diff", ColumnKind::Text, 90.0),

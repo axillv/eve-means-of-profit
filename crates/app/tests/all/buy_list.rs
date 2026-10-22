@@ -1260,15 +1260,152 @@ mod tests {
         buy_list_for(&mut harness);
         settle(&mut harness, "Oldest: 4m");
         for column in ["Live", "Diff", "Age"] {
-            click(&mut harness, "Columns");
-            click(&mut harness, column);
-            harness.key_press(Key::Escape);
-            harness.run();
+            toggle_column(&mut harness, column);
         }
         assert!(!shown(&harness, "Live"));
         assert!(!shown(&harness, "Diff"));
         assert!(!shown(&harness, "Age"));
         assert!(shown(&harness, "m³ 120.50 · value 1,114,686.00 · freight "));
+    }
+
+    /// Ticks or unticks the column labelled `label` through the Columns menu.
+    fn toggle_column(harness: &mut Harness<'_, App>, label: &str) {
+        click(harness, "Columns");
+        click(harness, label);
+        harness.key_press(Key::Escape);
+        harness.run();
+    }
+
+    /// Whether the checkbox labelled `label` is ticked.
+    fn checked(harness: &Harness<'_, App>, label: &str) -> bool {
+        let node = harness
+            .query_all_by_label(label)
+            .find(|node| node.accesskit_node().toggled().is_some())
+            .unwrap_or_else(|| panic!("no checkbox labelled {label}"));
+        node.accesskit_node().toggled() == Some(egui::accesskit::Toggled::True)
+    }
+
+    /// The hidden columns saved for the buy list, as the store holds them.
+    fn saved_columns(env: &Env) -> Option<String> {
+        let store = Store::open(&env.data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
+        store
+            .setting("columns.build_buy_list")
+            .expect("the setting")
+    }
+
+    /// Saves `text` as the buy list's hidden columns, as an earlier session would have.
+    fn save_columns(env: &Env, text: &str) {
+        let mut store = Store::open(&env.data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
+        store
+            .set_setting("columns.build_buy_list", text)
+            .expect("the setting is saved");
+    }
+
+    #[test]
+    fn hidden_column_text_is_split_and_joined_on_commas() {
+        use eve_means_of_profit::table::{hidden_from_text, hidden_to_text};
+
+        assert_eq!(hidden_from_text("volume,share"), ["volume", "share"]);
+        assert_eq!(hidden_from_text(""), Vec::<String>::new());
+        assert_eq!(hidden_from_text(",volume,,"), ["volume"]);
+        assert_eq!(
+            hidden_to_text(&["volume".to_owned(), "share".to_owned()]),
+            "volume,share"
+        );
+        assert_eq!(hidden_to_text(&[]), "");
+    }
+
+    #[test]
+    fn hidden_columns_are_saved_and_restored_by_a_new_app() {
+        let world = World::new();
+        let env = make_env(&standard_services());
+        let mut harness = start(&env, &world);
+        harness.run();
+        buy_list_for(&mut harness);
+        settle(&mut harness, "Oldest: 4m");
+
+        toggle_column(&mut harness, "m³");
+        assert!(!shown(&harness, "m³"));
+        assert_eq!(saved_columns(&env).as_deref(), Some("volume"));
+
+        drop(harness);
+        let mut harness = start(&env, &world);
+        harness.run();
+        buy_list_for(&mut harness);
+        settle(&mut harness, "Oldest: 4m");
+        assert!(!shown(&harness, "m³"));
+        click(&mut harness, "Columns");
+        assert!(!checked(&harness, "m³"));
+    }
+
+    #[test]
+    fn showing_a_hidden_column_again_clears_the_saved_key() {
+        let world = World::new();
+        let env = make_env(&standard_services());
+        save_columns(&env, "volume");
+        let mut harness = start(&env, &world);
+        harness.run();
+        buy_list_for(&mut harness);
+        settle(&mut harness, "Oldest: 4m");
+        assert!(!shown(&harness, "m³"));
+
+        toggle_column(&mut harness, "m³");
+        assert!(shown(&harness, "m³"));
+        assert_eq!(saved_columns(&env), None);
+    }
+
+    #[test]
+    fn an_unknown_hidden_id_is_ignored_and_dropped_at_the_next_save() {
+        let world = World::new();
+        let env = make_env(&standard_services());
+        save_columns(&env, "nope");
+        let mut harness = start(&env, &world);
+        harness.run();
+        buy_list_for(&mut harness);
+        settle(&mut harness, "Oldest: 4m");
+        for column in ["m³", "Live", "Diff", "Age"] {
+            assert!(shown(&harness, column), "{column} is not drawn");
+        }
+
+        toggle_column(&mut harness, "m³");
+        assert!(!shown(&harness, "m³"));
+        assert_eq!(saved_columns(&env).as_deref(), Some("volume"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_save_is_reported_and_the_column_stays_hidden() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let world = World::new();
+        let env = make_env(&standard_services());
+        let mut harness = start(&env, &world);
+        harness.run();
+        buy_list_for(&mut harness);
+        settle(&mut harness, "Oldest: 4m");
+        // A data folder that cannot be written to makes the journal, and so the save, fail.
+        let writable = fs::metadata(&env.data)
+            .expect("the data folder")
+            .permissions();
+        let mut read_only = writable.clone();
+        read_only.set_mode(0o555);
+        fs::set_permissions(&env.data, read_only).expect("the data folder is read-only");
+
+        toggle_column(&mut harness, "m³");
+        fs::set_permissions(&env.data, writable).expect("the data folder is writable again");
+
+        assert!(
+            harness
+                .query_all(by().label_contains("Could not save the settings:"))
+                .next()
+                .is_some()
+        );
+        assert!(!shown(&harness, "m³"));
+        assert_eq!(saved_columns(&env), None);
     }
 
     #[test]

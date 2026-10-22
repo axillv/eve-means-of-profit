@@ -108,6 +108,28 @@ impl Shared {
             }
         }
     }
+
+    /// Saves the hidden columns of the table named `table` under `columns.<table>`. An empty list
+    /// clears the key. Returns whether the change was saved; a save that fails becomes an error
+    /// notice.
+    pub fn save_hidden_columns(&mut self, table: &str, hidden: &[String]) -> bool {
+        let key = format!("columns.{table}");
+        let text = table::hidden_to_text(hidden);
+        let saved = if text.is_empty() {
+            self.store.clear_setting(&key)
+        } else {
+            self.store.set_setting(&key, &text)
+        };
+        match saved {
+            Ok(()) => true,
+            Err(error) => {
+                self.notices.push(Notice::error(format!(
+                    "Could not save the settings: {error}"
+                )));
+                false
+            }
+        }
+    }
 }
 
 pub struct App {
