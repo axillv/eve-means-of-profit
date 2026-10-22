@@ -78,3 +78,8 @@ manual_let_else = "warn"
 redundant_else = "warn"
 items_after_statements = "warn"
 mod_module_files = "warn"
+
+# Keep debug builds small: line tables still give file names and line numbers
+# in panics and backtraces, without full variable/type info.
+[profile.dev]
+debug = "line-tables-only"
