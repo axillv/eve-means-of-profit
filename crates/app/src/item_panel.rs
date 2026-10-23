@@ -4,7 +4,7 @@
 mod owned;
 mod plans;
 
-use egui::{Id, RichText, Ui};
+use egui::{RichText, Ui};
 use mop_core::format::group_thousands;
 use mop_core::industry::TypeId;
 use mop_core::money::Money;
@@ -48,7 +48,10 @@ fn header(ui: &mut Ui, cx: &mut Shared, type_id: TypeId) {
 /// The cheapest sell and the highest buy from the held market file, and the age of the file.
 fn prices(ui: &mut Ui, cx: &mut Shared, type_id: TypeId) {
     let now = (cx.clock)();
-    let failure = market_failure(ui, cx);
+    let failure = cx
+        .market
+        .last_failure()
+        .map(|failure| failure_text(&failure));
     let held = cx.market.held();
     let Some(published) = held.published_at else {
         let text = match failure {
@@ -93,18 +96,6 @@ fn is_stale(age: i64) -> bool {
 /// The text of a price, or `—` when the side has no orders.
 fn price_text(price: Option<Money>) -> String {
     price.map_or_else(|| "—".to_owned(), Money::format_isk)
-}
-
-/// The failure of the last refresh, or `None` once a refresh has worked. The panel reads the
-/// answers the market holds, so the Build page's notice for a failed refresh may not appear.
-fn market_failure(ui: &mut Ui, cx: &Shared) -> Option<String> {
-    let key = Id::new("item panel market failure");
-    for outcome in cx.market.take_outcomes() {
-        let text = outcome.result.err().map(|failure| failure_text(&failure));
-        ui.data_mut(|data| data.insert_temp(key, text));
-    }
-    ui.data(|data| data.get_temp::<Option<String>>(key))
-        .flatten()
 }
 
 /// A number with thousands grouped, such as `1,050`.

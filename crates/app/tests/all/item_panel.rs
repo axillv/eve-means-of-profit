@@ -791,6 +791,33 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_download_still_shows_after_the_build_page_takes_its_answer() {
+        let env = env();
+        with_main(&env);
+        let (mut harness, _) = start(
+            &env,
+            FakeEve {
+                characters: vec![character(MAIN, "Main")],
+                jeve: None,
+            },
+            Answer::Down,
+        );
+        loaded(&mut harness);
+        select(&mut harness, PAU);
+        let shared = harness.state_mut().shared_mut();
+        let market = Arc::clone(&shared.market);
+        market.refresh(&shared.worker, NOW, true);
+        let expected = failure_text(&Failure::Market(MarketError::Network(
+            "the file is down".to_owned(),
+        )));
+        until(&mut harness, "the failure", |h| shown(h, &expected));
+        let taken = harness.state_mut().shared_mut().market.take_outcomes();
+        assert!(!taken.is_empty());
+        harness.run();
+        assert!(shown(&harness, &expected));
+    }
+
+    #[test]
     fn saved_plans_that_use_pau_are_listed() {
         let env = env();
         with_main(&env);

@@ -79,6 +79,9 @@ pub struct Prices {
     held: Mutex<Arc<Held>>,
     /// Answers the worker has not yet shown to the page.
     outcomes: Mutex<Vec<Outcome>>,
+    /// The failure of the last download, cleared by one that works. Read without taking it, so
+    /// the Build page still gets its answer from `take_outcomes`.
+    last_failure: Mutex<Option<Failure>>,
     /// Set while a refresh is queued or running, so a second request is not made meanwhile.
     running: AtomicBool,
     /// Set once the first download has been asked for.
@@ -96,6 +99,7 @@ impl Prices {
             market: Mutex::new(FuzzworkMarket::new(Feed::new(http), FORGE)),
             held: Mutex::new(Arc::new(Held::default())),
             outcomes: Mutex::new(Vec::new()),
+            last_failure: Mutex::new(None),
             running: AtomicBool::new(false),
             first_asked: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
@@ -135,6 +139,7 @@ impl Prices {
                 Err(Failure::Crashed)
             }
         };
+        *lock(&self.last_failure) = result.as_ref().err().cloned();
         lock(&self.outcomes).push(Outcome { explicit, result });
     }
 
@@ -172,6 +177,11 @@ impl Prices {
     /// The age of the file held, when one has been downloaded.
     pub fn published_at(&self) -> Option<i64> {
         self.held().published_at
+    }
+
+    /// The failure of the last download, or `None` once one has worked. Does not take it away.
+    pub fn last_failure(&self) -> Option<Failure> {
+        lock(&self.last_failure).clone()
     }
 
     /// The answers since the last call.
