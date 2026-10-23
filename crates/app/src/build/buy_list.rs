@@ -137,6 +137,7 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Option<Edit> {
     let mut auto = ui.data(|data| data.get_temp(auto_key())).unwrap_or(true);
     ask_when_due(cx, &held, auto, now);
 
+    load_typed(ui, cx, page.selected);
     let (inputs, views) = buy_inputs(plan, record, cx, &held, now);
     let Ok(buy) = buy_list(inputs) else {
         report(cx, "Could not add up the buy list.");
@@ -193,7 +194,8 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Option<Edit> {
         }
     });
     ui.label(format!("Price rule: {}", rule_text(record.price_rule)));
-    table(ui, cx, record.id, now, &buy, &views, &hidden);
+    let typed = table(ui, cx, record.id, now, &buy, &views, &hidden);
+    save_typed(cx, page.selected, &typed);
     let totals = Totals {
         buy: &buy,
         delivered: &delivered,
@@ -204,6 +206,54 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Option<Edit> {
     };
     footer_line(ui, cx, &totals, auto, now);
     edit
+}
+
+/// Loads the prices typed for a saved plan into the session the first time the plan is shown. Later
+/// frames keep what the session holds, so a price the store refused stays on screen.
+fn load_typed(ui: &Ui, cx: &mut Shared, saved: Option<i64>) {
+    let Some(plan) = saved else {
+        return;
+    };
+    let key = Id::new(("build buy list typed prices loaded", plan));
+    if ui.data(|data| data.get_temp::<bool>(key)).is_some() {
+        return;
+    }
+    ui.data_mut(|data| data.insert_temp(key, true));
+    match cx.store.manual_prices(plan) {
+        Ok(prices) => {
+            for price in prices {
+                cx.market.set_manual(
+                    plan,
+                    price.type_id,
+                    Some(Manual {
+                        per_unit: price.per_unit,
+                        set_at: price.set_at,
+                    }),
+                );
+            }
+        }
+        Err(error) => report(cx, format!("Could not read the prices: {error}")),
+    }
+}
+
+/// Saves the prices typed on the lines of a saved plan, and clears the ones that were emptied. A
+/// price the store refuses stays on screen for the session and is reported.
+fn save_typed(cx: &mut Shared, saved: Option<i64>, typed: &[(TypeId, Option<Manual>)]) {
+    let Some(plan) = saved else {
+        return;
+    };
+    for (type_id, price) in typed {
+        let result = match price {
+            Some(manual) => {
+                cx.store
+                    .set_manual_price(plan, *type_id, manual.per_unit, manual.set_at)
+            }
+            None => cx.store.clear_manual_price(plan, *type_id),
+        };
+        if let Err(error) = result {
+            report(cx, format!("Could not save the price: {error}"));
+        }
+    }
 }
 
 /// Asks the worker for the file when it is due: the first download, once, even with the timer off;
@@ -782,6 +832,7 @@ fn footer_cells(buy: &BuyList) -> Vec<Cell> {
 }
 
 /// The table of the buy rows, with the volume and value in a footer row.
+/// Draws the table and returns the prices typed in it, to save with the plan.
 fn table(
     ui: &mut Ui,
     cx: &Shared,
@@ -790,7 +841,8 @@ fn table(
     buy: &BuyList,
     views: &BTreeMap<u64, View>,
     hidden: &[String],
-) {
+) -> Vec<(TypeId, Option<Manual>)> {
+    let mut typed = Vec::new();
     let columns = shown(all_columns(), hidden);
     let rows: Vec<Row> = buy
         .rows
@@ -811,7 +863,7 @@ fn table(
         };
         match column {
             "price" => {
-                price_edit(ui, cx, plan, now, view);
+                price_edit(ui, cx, plan, now, view, &mut typed);
                 true
             }
             "age" => match (view.manual, view.live_age) {
@@ -834,12 +886,20 @@ fn table(
     Table::new(Id::new(super::BuildPanel::BuyList.title()), &columns)
         .fit_rows(rows.len())
         .show_with(ui, &cx.style, cx.density, &rows, Some(&footer), &mut draw);
+    typed
 }
 
 /// The Price cell: the price the line uses, typed over. The text is committed when the field loses
 /// focus. Text that is not a price stays with `Not a price` under it, and the price held does not
 /// change. An empty field returns the line to the live price.
-fn price_edit(ui: &mut Ui, cx: &Shared, plan: i64, now: i64, view: &View) {
+fn price_edit(
+    ui: &mut Ui,
+    cx: &Shared,
+    plan: i64,
+    now: i64,
+    view: &View,
+    typed: &mut Vec<(TypeId, Option<Manual>)>,
+) {
     let key = Id::new(("build buy list price", plan, view.type_id));
     let shown = view.manual.map(|manual| manual.per_unit).or(view.live);
     // A line with no price shows `—`, or `…` until the first download is in; typing over it sets a price.
@@ -881,15 +941,14 @@ fn price_edit(ui: &mut Ui, cx: &Shared, plan: i64, now: i64, view: &View) {
         }
         if response.lost_focus() && edit.text != edit.original {
             match typed_price(&edit.text) {
-                Ok(Some(per_unit)) => cx.market.set_manual(
-                    plan,
-                    view.type_id,
-                    Some(Manual {
+                Ok(price) => {
+                    let price = price.map(|per_unit| Manual {
                         per_unit,
                         set_at: now,
-                    }),
-                ),
-                Ok(None) => cx.market.set_manual(plan, view.type_id, None),
+                    });
+                    cx.market.set_manual(plan, view.type_id, price);
+                    typed.push((view.type_id, price));
+                }
                 Err(()) => edit.bad = true,
             }
         }

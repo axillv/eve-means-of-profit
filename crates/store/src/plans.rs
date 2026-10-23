@@ -457,6 +457,10 @@ impl Store {
 
     pub fn delete_plan(&mut self, id: i64) -> Result<()> {
         let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM plan_manual_prices WHERE plan = ?1",
+            params![id],
+        )?;
         let changed = tx.execute("DELETE FROM plans WHERE id = ?1", params![id])?;
         if changed == 0 {
             return Err(StoreError::NotFound);

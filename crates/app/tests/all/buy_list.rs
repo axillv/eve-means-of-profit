@@ -295,6 +295,9 @@ mod tests {
     struct World {
         forge: Arc<Mutex<Forge>>,
         now: Arc<AtomicI64>,
+        /// The data folders of the lists that `complete_list` made. The app writes to them while
+        /// the test runs, so they stay until the test ends.
+        folders: Arc<Mutex<Vec<Env>>>,
     }
 
     impl World {
@@ -303,6 +306,7 @@ mod tests {
             Self {
                 forge: Arc::new(Mutex::new(Forge::published(NOW - 240))),
                 now: Arc::new(AtomicI64::new(NOW)),
+                folders: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -569,7 +573,12 @@ mod tests {
         harness.run();
         buy_list_for(&mut harness);
         settle(&mut harness, "Oldest: 4m");
+        lock_folders(world).push(env);
         harness
+    }
+
+    fn lock_folders(world: &World) -> MutexGuard<'_, Vec<Env>> {
+        world.folders.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Pastes `text` into the pasted stock box.
@@ -1634,6 +1643,64 @@ mod tests {
         click(&mut harness, "Build");
         settle(&mut harness, "Next refresh in 15m");
         assert_eq!(world.requests(), 2);
+    }
+
+    #[test]
+    fn a_typed_price_on_a_saved_plan_is_kept_across_a_restart_until_it_is_cleared() {
+        let world = World::new();
+        let env = make_env(&standard_services());
+        let mut harness = start(&env, &world);
+        harness.run();
+        buy_list_for(&mut harness);
+        settle(&mut harness, "Oldest: 4m");
+        click(&mut harness, "Save");
+        type_price(&mut harness, "Robotics", "1,000,000,000.00");
+        drop(harness);
+
+        let mut harness = start(&env, &world);
+        harness.run();
+        click(&mut harness, "New plan");
+        settle(&mut harness, "Oldest: 4m");
+        assert_row(&harness, "Robotics", &["1,000,000,000.00", "manual"]);
+        let (left, y) = row_anchor(&harness, "Robotics");
+        let boxes = price_boxes(&mut harness, &["Robotics", "Hobgoblin I"]);
+        assert!(coloured(&mut harness, boxes[0].0));
+        assert!(!coloured(&mut harness, boxes[1].0));
+        scroll_table(&mut harness, left, y, 400.0);
+        type_price(&mut harness, "Robotics", "");
+        drop(harness);
+
+        let mut harness = start(&env, &world);
+        harness.run();
+        click(&mut harness, "New plan");
+        settle(&mut harness, "Oldest: 4m");
+        assert_row(&harness, "Robotics", &["39,990.00", "4m"]);
+        assert!(!shown(&harness, "manual"));
+    }
+
+    #[test]
+    fn a_typed_price_that_cannot_be_saved_is_reported_and_stays_on_screen() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let world = World::new();
+        let mut harness = complete_list(&world, &standard_services());
+        let data = lock_folders(&world)[0].data.clone();
+        // A data folder that cannot be written to makes the journal, and so the save, fail.
+        let writable = fs::metadata(&data).expect("the data folder").permissions();
+        let mut read_only = writable.clone();
+        read_only.set_mode(0o555);
+        fs::set_permissions(&data, read_only).expect("the data folder is read-only");
+
+        type_price(&mut harness, "Robotics", "1,000,000,000.00");
+        fs::set_permissions(&data, writable).expect("the data folder is writable again");
+
+        assert!(
+            harness
+                .query_all(by().label_contains("Could not save the price:"))
+                .next()
+                .is_some()
+        );
+        assert_row(&harness, "Robotics", &["1,000,000,000.00", "manual"]);
     }
 
     #[test]

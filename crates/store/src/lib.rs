@@ -8,6 +8,7 @@ pub mod costs;
 pub mod error;
 pub mod facilities;
 pub mod freight;
+pub mod manual_prices;
 pub mod migrate;
 pub mod net_worth;
 pub mod plans;

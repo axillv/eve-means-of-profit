@@ -37,6 +37,8 @@ pub enum StoreError {
     StockpileLoop(Vec<String>),
     /// A stored value that Rust cannot turn back into its type.
     BadData(String),
+    /// A price that is not above zero.
+    BadPrice,
 }
 
 impl fmt::Display for StoreError {
@@ -62,6 +64,7 @@ impl fmt::Display for StoreError {
                 write!(f, "includes itself: {}", names.join(" → "))
             }
             Self::BadData(what) => write!(f, "stored data cannot be read: {what}"),
+            Self::BadPrice => write!(f, "the price must be more than zero"),
         }
     }
 }
@@ -84,7 +87,8 @@ impl std::error::Error for StoreError {
             | Self::InvalidRetention(_)
             | Self::Duplicate
             | Self::StockpileLoop(_)
-            | Self::BadData(_) => None,
+            | Self::BadData(_)
+            | Self::BadPrice => None,
         }
     }
 }

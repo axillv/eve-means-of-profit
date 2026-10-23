@@ -1,4 +1,5 @@
 mod costs;
+mod manual_prices;
 mod migrate;
 mod net_worth;
 mod plans;

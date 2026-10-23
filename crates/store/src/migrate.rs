@@ -92,6 +92,13 @@ CREATE TABLE plan_stock_places (
     location_id INTEGER NOT NULL,
     PRIMARY KEY (plan_id, location_id)
 ) WITHOUT ROWID;
+CREATE TABLE plan_manual_prices (
+    plan INTEGER NOT NULL REFERENCES plans (id),
+    type_id INTEGER NOT NULL,
+    per_unit INTEGER NOT NULL,
+    set_at INTEGER NOT NULL,
+    PRIMARY KEY (plan, type_id)
+) WITHOUT ROWID;
 CREATE TABLE job_assignments (
     job_id INTEGER PRIMARY KEY,
     plan_id INTEGER NOT NULL REFERENCES plans (id) ON DELETE CASCADE,
