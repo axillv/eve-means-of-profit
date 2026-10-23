@@ -23,18 +23,50 @@ use mop_jeve::profiles_dir;
 /// How long the browser has to answer a login.
 const LOGIN_WAIT: Duration = Duration::from_secs(300);
 /// The text the login button shows when this build has no EVE client id.
-const NO_CLIENT_ID: &str = "This build has no EVE login yet.";
+pub(crate) const NO_CLIENT_ID: &str = "This build has no EVE login yet.";
+
+/// The wait for the browser's answer: blocks until the code comes or the cancel flag is set.
+type Waiter = Box<dyn FnOnce(&AtomicBool) -> Result<String, EsiError> + Send>;
+
+/// A login the browser has been sent to. The wait for the browser's answer owns no shared state,
+/// so it runs without any lock on the login.
+pub struct PendingLogin {
+    /// The address the browser opens.
+    pub url: String,
+    wait: Waiter,
+}
+
+impl PendingLogin {
+    /// A login at `url` whose answer `wait` fetches: it blocks until the answer comes, `cancel` is
+    /// set, or the time is up, and gives the code EVE sent.
+    pub fn new(
+        url: String,
+        wait: impl FnOnce(&AtomicBool) -> Result<String, EsiError> + Send + 'static,
+    ) -> Self {
+        Self {
+            url,
+            wait: Box::new(wait),
+        }
+    }
+
+    /// Waits for the browser's answer, for up to 300 seconds, or until `cancel` is set. Gives the
+    /// code to pass to [`EveAccess::finish_login`].
+    pub fn wait(self, cancel: &AtomicBool) -> Result<String, EsiError> {
+        (self.wait)(cancel)
+    }
+}
 
 /// What the app needs from EVE and from the files next to it. The worker runs the calls that touch
 /// the network or the disk; the pages never call it.
 pub trait EveAccess: Send {
     /// The characters added to the login, in the order they were added.
     fn characters(&self) -> Vec<Character>;
-    /// Starts a login and gives the address the browser opens. The text is what the player reads
-    /// when the login cannot start.
-    fn begin_login(&mut self) -> Result<String, String>;
-    /// Waits for the browser's answer to the login begun, for up to 300 seconds, or until `cancel` is set.
-    fn finish_login(&mut self, cancel: &AtomicBool) -> Result<Character, EsiError>;
+    /// Starts a login. The pending login holds the address the browser opens and the wait for the
+    /// answer. The text is what the player reads when the login cannot start.
+    fn begin_login(&mut self) -> Result<PendingLogin, String>;
+    /// Completes the login begun last with the code the wait gave: trades it for tokens and adds
+    /// the character. Quick; the wait for the browser is [`PendingLogin::wait`].
+    fn finish_login(&mut self, code: &str) -> Result<Character, EsiError>;
     /// Fetches each kind of one character's data that is due, and gives one result per kind.
     fn refresh_all(
         &mut self,
@@ -48,6 +80,8 @@ pub trait EveAccess: Send {
         ids: &[i64],
         now: i64,
     ) -> Result<NamingReport, EsiError>;
+    /// Writes one character's data to its saved file.
+    fn save_character(&mut self, data: &CharacterData) -> Result<(), EsiError>;
     /// Removes a character from the login and forgets its saved data.
     fn remove(&mut self, character_id: u64) -> Result<(), EsiError>;
     /// The warning to show once when the login keeps its tokens in a plain file.
@@ -97,29 +131,31 @@ impl EveAccess for LiveEve {
         self.auth.characters().to_vec()
     }
 
-    fn begin_login(&mut self) -> Result<String, String> {
+    fn begin_login(&mut self) -> Result<PendingLogin, String> {
         match self.auth.begin_login() {
             Ok(start) => {
                 let url = start.url.clone();
+                let state = start.pkce.state().to_owned();
                 self.pending = Some(start);
-                Ok(url)
+                Ok(PendingLogin::new(url, move |cancel| {
+                    let deadline = Instant::now() + LOGIN_WAIT;
+                    callback::wait_for_code(&state, deadline, cancel)
+                }))
             }
             Err(EsiError::NoClientId) => Err(NO_CLIENT_ID.to_owned()),
             Err(error) => Err(error.to_string()),
         }
     }
 
-    fn finish_login(&mut self, cancel: &AtomicBool) -> Result<Character, EsiError> {
+    fn finish_login(&mut self, code: &str) -> Result<Character, EsiError> {
         // Without a begun login no answer can belong to it.
         let start = self.pending.take().ok_or(EsiError::StateMismatch)?;
-        let deadline = Instant::now() + LOGIN_WAIT;
-        let code = callback::wait_for_code(start.pkce.state(), deadline, cancel)?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |elapsed| {
                 i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
             });
-        self.auth.finish_login(&start, &code, now)
+        self.auth.finish_login(&start, code, now)
     }
 
     fn refresh_all(
@@ -154,6 +190,10 @@ impl EveAccess for LiveEve {
         )
     }
 
+    fn save_character(&mut self, data: &CharacterData) -> Result<(), EsiError> {
+        saved::save_character(&self.esi_dir, data)
+    }
+
     fn remove(&mut self, character_id: u64) -> Result<(), EsiError> {
         self.auth.remove(character_id)?;
         saved::forget(&self.esi_dir, character_id)
@@ -177,11 +217,11 @@ impl EveAccess for NoEve {
         Vec::new()
     }
 
-    fn begin_login(&mut self) -> Result<String, String> {
+    fn begin_login(&mut self) -> Result<PendingLogin, String> {
         Err(NO_CLIENT_ID.to_owned())
     }
 
-    fn finish_login(&mut self, _cancel: &AtomicBool) -> Result<Character, EsiError> {
+    fn finish_login(&mut self, _code: &str) -> Result<Character, EsiError> {
         Err(EsiError::StateMismatch)
     }
 
@@ -203,6 +243,10 @@ impl EveAccess for NoEve {
             asked: 0,
             failed: Vec::new(),
         })
+    }
+
+    fn save_character(&mut self, _data: &CharacterData) -> Result<(), EsiError> {
+        Ok(())
     }
 
     fn remove(&mut self, character_id: u64) -> Result<(), EsiError> {

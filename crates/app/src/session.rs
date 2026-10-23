@@ -17,10 +17,10 @@ use mop_esi::saved;
 use mop_jeve::{JeveData, JeveError, ReadOptions, read_profile};
 use mop_sde::Sde;
 
-pub use eve::{EveAccess, LiveEve, NoEve};
+pub use eve::{EveAccess, LiveEve, NoEve, PendingLogin};
 
 /// The name jEveAssets gives the profile it has active.
-const JEVE_PROFILE: &str = "#Default.db";
+pub(crate) const JEVE_PROFILE: &str = "#Default.db";
 
 /// Where a character's assets in the stock come from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +156,22 @@ impl Session {
 
     pub fn set_jeve(&mut self, jeve: Option<JeveData>) {
         self.jeve = jeve;
+    }
+
+    /// Adds a login character, or replaces the one with the same id. Its data and the other
+    /// characters' data stay as they are.
+    pub fn put_character(&mut self, character: Character) {
+        match self.login.iter_mut().find(|held| held.id == character.id) {
+            Some(held) => *held = character,
+            None => self.login.push(character),
+        }
+    }
+
+    /// Drops one login character and its data. The other characters, the structure names and
+    /// jEve's profile stay.
+    pub fn remove_character(&mut self, character_id: u64) {
+        self.login.retain(|held| held.id != character_id);
+        self.data.remove(&character_id);
     }
 
     pub fn set_structures(&mut self, structures: StructureNames) {

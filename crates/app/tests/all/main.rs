@@ -1,5 +1,6 @@
 mod build;
 mod buy_list;
+mod characters;
 mod item_panel;
 mod layout_model;
 mod names;

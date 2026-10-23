@@ -10,7 +10,6 @@ mod tests {
     use std::io::Write;
     use std::ops::ControlFlow;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex, PoisonError};
     use std::thread;
     use std::time::Duration;
@@ -19,7 +18,7 @@ mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
     use eve_means_of_profit::build::prices::Prices;
-    use eve_means_of_profit::session::EveAccess;
+    use eve_means_of_profit::session::{EveAccess, PendingLogin};
     use eve_means_of_profit::{App, AppConfig};
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -162,11 +161,11 @@ mod tests {
             self.characters.clone()
         }
 
-        fn begin_login(&mut self) -> Result<String, String> {
+        fn begin_login(&mut self) -> Result<PendingLogin, String> {
             Err("Logins are not started in these tests.".to_owned())
         }
 
-        fn finish_login(&mut self, _cancel: &AtomicBool) -> Result<Character, EsiError> {
+        fn finish_login(&mut self, _code: &str) -> Result<Character, EsiError> {
             Err(EsiError::Cancelled)
         }
 
@@ -192,6 +191,10 @@ mod tests {
                 asked: 0,
                 failed: Vec::new(),
             })
+        }
+
+        fn save_character(&mut self, _data: &CharacterData) -> Result<(), EsiError> {
+            Ok(())
         }
 
         fn remove(&mut self, character_id: u64) -> Result<(), EsiError> {
