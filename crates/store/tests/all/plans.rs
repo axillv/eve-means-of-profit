@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use profit_core::freight::{Packing, RateCard};
-use profit_core::money::{Money, Rate};
-use profit_core::volume::Volume;
-use profit_market::book::PriceRule;
-use profit_sde::{Facility, RouteKind, Security};
-use profit_store::{PlanRecord, Store, StoreError};
+use mop_core::freight::{Packing, RateCard};
+use mop_core::money::{Money, Rate};
+use mop_core::volume::Volume;
+use mop_market::book::PriceRule;
+use mop_sde::{Facility, RouteKind, Security};
+use mop_store::{PlanRecord, Store, StoreError};
 use rusqlite::{Connection, params};
 
 #[cfg(test)]

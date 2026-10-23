@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use profit_core::industry::{Activity, IndustryError, Modifier, TypeId};
+use mop_core::industry::{Activity, IndustryError, Modifier, TypeId};
 use rusqlite::types::Type;
 use rusqlite::{OptionalExtension, params};
 

@@ -5,11 +5,11 @@
 use std::collections::BTreeMap;
 
 use egui::{Checkbox, DragValue, Id, RichText, Ui};
-use profit_core::format::group_thousands;
-use profit_core::industry::{Activity, JobSplit, Recipe, RecipeBook, TypeId};
-use profit_core::plan::{BuyLine, Plan, Step};
-use profit_sde::Sde;
-use profit_store::PlanRecord;
+use mop_core::format::group_thousands;
+use mop_core::industry::{Activity, JobSplit, Recipe, RecipeBook, TypeId};
+use mop_core::plan::{BuyLine, Plan, Step};
+use mop_sde::Sde;
+use mop_store::PlanRecord;
 
 use super::state::{BuildPage, NO_REACTIONS, me_of, type_name};
 use crate::Shared;

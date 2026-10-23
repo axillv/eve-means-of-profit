@@ -6,8 +6,8 @@
     clippy::integer_division
 )]
 
-use profit_core::industry::TypeId;
-use profit_core::money::Money;
+use mop_core::industry::TypeId;
+use mop_core::money::Money;
 use serde::Deserialize;
 
 use crate::error::MarketError;

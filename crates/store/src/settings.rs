@@ -1,7 +1,7 @@
 //! Settings the user chose: the default price rule, the market density and the last game-data check.
 //! They are named values in the user database, with an open list of other named values beside them.
 
-use profit_market::book::PriceRule;
+use mop_market::book::PriceRule;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{Result, StoreError};

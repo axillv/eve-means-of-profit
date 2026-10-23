@@ -6,13 +6,13 @@ mod tests {
     use std::fs;
     use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-    use profit_core::industry::Activity;
-    use profit_core::money::{Money, Rate};
-    use profit_esi::character_data::Refreshed;
-    use profit_esi::client::BASE_URL;
-    use profit_esi::error::EsiError;
-    use profit_esi::http::{Http, HttpRequest, HttpResponse};
-    use profit_esi::industry::{
+    use mop_core::industry::Activity;
+    use mop_core::money::{Money, Rate};
+    use mop_esi::character_data::Refreshed;
+    use mop_esi::client::BASE_URL;
+    use mop_esi::error::EsiError;
+    use mop_esi::http::{Http, HttpRequest, HttpResponse};
+    use mop_esi::industry::{
         IndustryData, IndustryKind, load_industry, refresh_industry, save_industry,
     };
     use serde_json::{Value, json};

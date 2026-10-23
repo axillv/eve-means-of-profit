@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use profit_market::book::PriceRule;
-    use profit_store::{Density, Settings, Store, StoreError};
+    use mop_market::book::PriceRule;
+    use mop_store::{Density, Settings, Store, StoreError};
     use rusqlite::Connection;
     use std::path::Path;
 

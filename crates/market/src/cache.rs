@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::time::UNIX_EPOCH;
 
-use profit_core::industry::TypeId;
+use mop_core::industry::TypeId;
 
 use crate::book::{Order, parse_orders};
 use crate::error::MarketError;

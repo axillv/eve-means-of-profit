@@ -5,12 +5,12 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 
-use profit_core::freight::Packing;
-use profit_core::industry::{Activity, Modifier, RecipeBook, TypeId};
-use profit_core::paste::{Pasted, parse_stock};
-use profit_core::plan::{self, Plan, PlanError, PlanInput};
-use profit_sde::{Facility, Sde, Security};
-use profit_store::{FacilityRow, PlanRecord};
+use mop_core::freight::Packing;
+use mop_core::industry::{Activity, Modifier, RecipeBook, TypeId};
+use mop_core::paste::{Pasted, parse_stock};
+use mop_core::plan::{self, Plan, PlanError, PlanInput};
+use mop_sde::{Facility, Sde, Security};
+use mop_store::{FacilityRow, PlanRecord};
 
 use crate::Shared;
 use crate::status::{Level, Notice};

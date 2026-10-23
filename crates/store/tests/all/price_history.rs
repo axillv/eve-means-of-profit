@@ -1,11 +1,11 @@
 use std::path::Path;
 
-use profit_core::industry::TypeId;
-use profit_core::money::Money;
-use profit_core::price_history::Retention;
-use profit_market::fuzzwork::{Side, SummaryRow};
-use profit_store::price_history::{HistorySettings, MarketKind, RecordOutcome};
-use profit_store::{Store, StoreError};
+use mop_core::industry::TypeId;
+use mop_core::money::Money;
+use mop_core::price_history::Retention;
+use mop_market::fuzzwork::{Side, SummaryRow};
+use mop_store::price_history::{HistorySettings, MarketKind, RecordOutcome};
+use mop_store::{Store, StoreError};
 use rusqlite::Connection;
 
 #[cfg(test)]

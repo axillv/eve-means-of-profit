@@ -1,7 +1,7 @@
 //! The invention activities of the blueprints: what an attempt makes, uses up and needs.
 
-use profit_core::industry::TypeId;
-use profit_core::money::Rate;
+use mop_core::industry::TypeId;
+use mop_core::money::Rate;
 use rusqlite::{Row, params};
 
 use crate::error::SdeError;

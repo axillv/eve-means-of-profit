@@ -7,9 +7,9 @@ use std::fmt;
 use std::io::Read;
 use std::path::Path;
 
-use profit_core::industry::TypeId;
-use profit_core::stock::CharacterId;
-use profit_core::stockpile::{
+use mop_core::industry::TypeId;
+use mop_core::stock::CharacterId;
+use mop_core::stockpile::{
     Characters, Filter, Include, Place, Source, Stockpile, Target, include_loop,
 };
 use roxmltree::Node;

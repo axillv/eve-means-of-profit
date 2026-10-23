@@ -7,8 +7,8 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use profit_core::industry::{Activity, TypeId};
-use profit_core::money::{Money, Rate};
+use mop_core::industry::{Activity, TypeId};
+use mop_core::money::{Money, Rate};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

@@ -1,9 +1,9 @@
 //! Freight routes between two systems, and the services (rate cards) that carry along them.
 
-use profit_core::freight::RateCard;
-use profit_core::money::{Money, Rate};
-use profit_core::volume::Volume;
-use profit_sde::RouteKind;
+use mop_core::freight::RateCard;
+use mop_core::money::{Money, Rate};
+use mop_core::volume::Volume;
+use mop_sde::RouteKind;
 use rusqlite::{OptionalExtension, Row, params};
 
 use crate::error::{Result, StoreError};

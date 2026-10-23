@@ -5,7 +5,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use profit_sde::{MapError, RouteKind, Sde, SdeError, SolarSystem, import};
+    use mop_sde::{MapError, RouteKind, Sde, SdeError, SolarSystem, import};
     use rusqlite::Connection;
     use serde_json::{Value, json};
     use tempfile::TempDir;

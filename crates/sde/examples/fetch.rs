@@ -1,6 +1,6 @@
 //! Downloads the latest build and imports it, with a progress line every 10 MB.
 //!
-//! `cargo run --release -p profit-sde --example fetch -- <work_dir> <db>`
+//! `cargo run --release -p mop-sde --example fetch -- <work_dir> <db>`
 
 use std::error::Error;
 use std::io::{self, Write};
@@ -8,7 +8,7 @@ use std::ops::ControlFlow;
 use std::path::Path;
 use std::time::Instant;
 
-use profit_sde::{HttpFetch, download_and_import, latest_build};
+use mop_sde::{HttpFetch, download_and_import, latest_build};
 
 const REPORT_EVERY: u64 = 10 * 1024 * 1024;
 

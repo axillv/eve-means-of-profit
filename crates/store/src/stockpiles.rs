@@ -3,8 +3,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use profit_core::reserve::ShortMode;
-use profit_core::stockpile::{
+use mop_core::reserve::ShortMode;
+use mop_core::stockpile::{
     Characters, Filter, Include, Place, Source, Stockpile, Target, include_loop,
 };
 use rusqlite::{OptionalExtension, Transaction, params};

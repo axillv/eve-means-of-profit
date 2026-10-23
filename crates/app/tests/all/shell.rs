@@ -16,8 +16,8 @@ mod tests {
     use egui_kittest::kittest::Queryable;
     use eve_means_of_profit::theme::{Style, contrast};
     use eve_means_of_profit::{App, AppConfig};
-    use profit_sde::{Fetch, FetchError, LATEST_URL, import};
-    use profit_store::{Density, Store};
+    use mop_sde::{Fetch, FetchError, LATEST_URL, import};
+    use mop_store::{Density, Store};
     use tempfile::TempDir;
 
     const NOW: i64 = 1_000_000;

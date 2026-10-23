@@ -1,13 +1,13 @@
 //! Reads Fuzzwork's Forge summary prices once and prints a few of them for Tritanium.
 //!
-//! Run with `cargo run -p profit-market --example forge`.
+//! Run with `cargo run -p mop-market --example forge`.
 
 use std::error::Error;
 use std::io::{self, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use profit_market::fuzzwork::{FORGE, FuzzworkMarket, Side, Stat};
-use profit_market::http::UreqHttp;
+use mop_market::fuzzwork::{FORGE, FuzzworkMarket, Side, Stat};
+use mop_market::http::UreqHttp;
 
 const TRITANIUM: u32 = 34;
 const STATS: [(Stat, &str); 4] = [

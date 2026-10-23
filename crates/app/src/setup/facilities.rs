@@ -1,9 +1,9 @@
 //! The Facilities panel: the places the player builds, each with its structure, security and rigs.
 
 use egui::{Button, ComboBox, Id, ScrollArea, Ui};
-use profit_core::industry::{Activity, TypeId};
-use profit_sde::{Facility, FacilityError, Sde, Security, Structure, StructureKind};
-use profit_store::{FacilityRow, StoreError};
+use mop_core::industry::{Activity, TypeId};
+use mop_sde::{Facility, FacilityError, Sde, Security, Structure, StructureKind};
+use mop_store::{FacilityRow, StoreError};
 
 use super::fields::text_field;
 use crate::Shared;

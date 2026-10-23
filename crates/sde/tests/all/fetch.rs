@@ -10,7 +10,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::thread;
 
-    use profit_sde::{
+    use mop_sde::{
         Fetch, FetchError, HttpFetch, ImportReport, LATEST_URL, SdeError, download_and_import,
         import, latest_build, needs_update, update_due, zip_url,
     };

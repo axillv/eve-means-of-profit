@@ -2,10 +2,10 @@
 //! priced and which route it is shipped by.
 
 use egui::{Button, ComboBox, Grid, Key, RichText, TextEdit, Ui};
-use profit_core::industry::{Activity, TypeId};
-use profit_market::book::PriceRule;
-use profit_sde::Sde;
-use profit_store::PlanRecord;
+use mop_core::industry::{Activity, TypeId};
+use mop_market::book::PriceRule;
+use mop_sde::Sde;
+use mop_store::PlanRecord;
 
 use super::state::{BuildPage, push_error, report, type_name};
 use crate::Shared;
@@ -209,11 +209,11 @@ fn facility_options(cx: &mut Shared, activity: Activity, none: &str) -> Vec<(Opt
     options
 }
 
-fn security_text(security: profit_sde::Security) -> &'static str {
+fn security_text(security: mop_sde::Security) -> &'static str {
     match security {
-        profit_sde::Security::High => "high sec",
-        profit_sde::Security::Low => "low sec",
-        profit_sde::Security::Null => "null sec",
+        mop_sde::Security::High => "high sec",
+        mop_sde::Security::Low => "low sec",
+        mop_sde::Security::Null => "null sec",
     }
 }
 

@@ -2,9 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use profit_core::freight::Packing;
-use profit_core::industry::TypeId;
-use profit_market::book::PriceRule;
+use mop_core::freight::Packing;
+use mop_core::industry::TypeId;
+use mop_market::book::PriceRule;
 use rusqlite::{OptionalExtension, Row, Transaction, params};
 
 use crate::error::{Result, StoreError};

@@ -2,9 +2,9 @@
 //! it; a form's Save stays disabled while any of its fields has one.
 
 use egui::{Response, TextEdit, Ui};
-use profit_core::decimal::ParseNumberError;
-use profit_core::money::{Money, Rate};
-use profit_core::volume::Volume;
+use mop_core::decimal::ParseNumberError;
+use mop_core::money::{Money, Rate};
+use mop_core::volume::Volume;
 
 use crate::theme::Style;
 
@@ -127,7 +127,7 @@ fn ungroup(text: &str) -> Result<String, ParseNumberError> {
 
 #[cfg(test)]
 mod tests {
-    use profit_core::decimal::ParseNumberError;
+    use mop_core::decimal::ParseNumberError;
 
     use super::ungroup;
 

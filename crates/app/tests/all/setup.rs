@@ -15,13 +15,13 @@ mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
     use eve_means_of_profit::{App, AppConfig};
-    use profit_core::freight::{Packing, RateCard};
-    use profit_core::industry::{Activity, TypeId};
-    use profit_core::money::{Money, Rate};
-    use profit_core::volume::Volume;
-    use profit_market::book::PriceRule;
-    use profit_sde::{Facility, Fetch, FetchError, RouteKind, Sde, Security, import};
-    use profit_store::{PlanRecord, Store};
+    use mop_core::freight::{Packing, RateCard};
+    use mop_core::industry::{Activity, TypeId};
+    use mop_core::money::{Money, Rate};
+    use mop_core::volume::Volume;
+    use mop_market::book::PriceRule;
+    use mop_sde::{Facility, Fetch, FetchError, RouteKind, Sde, Security, import};
+    use mop_store::{PlanRecord, Store};
     use tempfile::TempDir;
 
     const NOW: i64 = 1_000_000;
@@ -267,7 +267,7 @@ mod tests {
     }
 
     /// The type ids of a list of rigs, in the order given.
-    fn type_ids(rigs: &[profit_sde::Rig]) -> Vec<TypeId> {
+    fn type_ids(rigs: &[mop_sde::Rig]) -> Vec<TypeId> {
         rigs.iter().map(|rig| rig.type_id).collect()
     }
 

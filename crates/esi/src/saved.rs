@@ -7,8 +7,8 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use profit_core::money::Money;
-use profit_core::stock::{Asset, CharacterAssets, ItemId};
+use mop_core::money::Money;
+use mop_core::stock::{Asset, CharacterAssets, ItemId};
 use serde::{Deserialize, Serialize};
 
 use crate::character_data::{CharacterData, Fetched, Job, Order, OwnedAssets};
@@ -24,7 +24,7 @@ fn file_path(dir: &Path, character_id: u64) -> PathBuf {
 
 /// Money as its ten-thousandths, a whole number.
 pub(crate) mod money {
-    use profit_core::money::Money;
+    use mop_core::money::Money;
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub(crate) fn serialize<S: Serializer>(
@@ -43,7 +43,7 @@ pub(crate) mod money {
 
 /// An optional money amount: the ten-thousandths, or null.
 pub(crate) mod money_opt {
-    use profit_core::money::Money;
+    use mop_core::money::Money;
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub(crate) fn serialize<S: Serializer>(

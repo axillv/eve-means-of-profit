@@ -1,5 +1,5 @@
 //! A manual live login: prints the browser address, waits for EVE's answer, and reports the character.
-//! Run with: `EVE_CLIENT_ID=<id> cargo run -p profit-esi --example login -- <folder for the login files>`.
+//! Run with: `EVE_CLIENT_ID=<id> cargo run -p mop-esi --example login -- <folder for the login files>`.
 //! Never prints tokens.
 
 use std::error::Error;
@@ -8,10 +8,10 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use profit_esi::auth::Auth;
-use profit_esi::callback::wait_for_code;
-use profit_esi::http::UreqHttp;
-use profit_esi::secrets::open_secrets;
+use mop_esi::auth::Auth;
+use mop_esi::callback::wait_for_code;
+use mop_esi::http::UreqHttp;
+use mop_esi::secrets::open_secrets;
 
 const WAIT: Duration = Duration::from_secs(5 * 60);
 
@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         writeln!(
             stdout(),
             "{}",
-            profit_esi::secrets::fallback_warning(&dir, reason)
+            mop_esi::secrets::fallback_warning(&dir, reason)
         )?;
     }
     let mut auth = Auth::open(&dir, Box::new(UreqHttp::new()), secrets, &client_id)?;

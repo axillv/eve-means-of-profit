@@ -18,11 +18,11 @@ mod tests {
     use eve_means_of_profit::{App, AppConfig};
     use flate2::Compression;
     use flate2::write::GzEncoder;
-    use profit_market::book::PriceRule;
-    use profit_market::error::MarketError;
-    use profit_market::fuzzwork::{BytesHttp, BytesResponse};
-    use profit_sde::{Facility, Fetch, FetchError, Security, import};
-    use profit_store::Store;
+    use mop_market::book::PriceRule;
+    use mop_market::error::MarketError;
+    use mop_market::fuzzwork::{BytesHttp, BytesResponse};
+    use mop_sde::{Facility, Fetch, FetchError, Security, import};
+    use mop_store::Store;
     use tempfile::TempDir;
 
     const NOW: i64 = 1_000_000;
@@ -121,7 +121,7 @@ mod tests {
             .store;
         store
             .create_plan(
-                &profit_store::PlanRecord {
+                &mop_store::PlanRecord {
                     id: 0,
                     name: "Buy rule".to_owned(),
                     product: 2456,
@@ -133,7 +133,7 @@ mod tests {
                     price_rule: PriceRule::HighestBuy,
                     route: None,
                     service: None,
-                    packing: profit_core::freight::Packing::TopUp,
+                    packing: mop_core::freight::Packing::TopUp,
                     pasted_stock: String::new(),
                     created_at: NOW,
                     updated_at: NOW,
@@ -181,7 +181,7 @@ mod tests {
         ] {
             store
                 .create_plan(
-                    &profit_store::PlanRecord {
+                    &mop_store::PlanRecord {
                         id: 0,
                         name: name.to_owned(),
                         product: 2456,
@@ -193,7 +193,7 @@ mod tests {
                         price_rule: rule,
                         route: None,
                         service: None,
-                        packing: profit_core::freight::Packing::TopUp,
+                        packing: mop_core::freight::Packing::TopUp,
                         pasted_stock: String::new(),
                         created_at: NOW,
                         updated_at: NOW,

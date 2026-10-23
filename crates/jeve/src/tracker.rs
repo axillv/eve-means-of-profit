@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use profit_core::money::Money;
-use profit_core::net_worth::{CharacterKey, Part, Record, Snapshot};
+use mop_core::money::Money;
+use mop_core::net_worth::{CharacterKey, Part, Record, Snapshot};
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;

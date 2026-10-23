@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use profit_core::stock::{CharacterId, Places, StockScope};
+use mop_core::stock::{CharacterId, Places, StockScope};
 use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::error::{Result, StoreError};

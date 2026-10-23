@@ -5,8 +5,8 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use profit_core::invention::Decryptor;
-    use profit_sde::{Sde, SdeError, import};
+    use mop_core::invention::Decryptor;
+    use mop_sde::{Sde, SdeError, import};
     use serde_json::{Value, json};
     use tempfile::TempDir;
 

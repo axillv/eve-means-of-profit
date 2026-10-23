@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
 use egui::Context;
-use profit_sde::Fetch;
+use mop_sde::Fetch;
 
 /// Work for the worker thread. It runs once, then the worker asks the UI to repaint.
 pub type Job = Box<dyn FnOnce() + Send>;

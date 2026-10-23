@@ -1,7 +1,7 @@
 //! The decryptors an invention job can use: their chance, ME, TE and run changes.
 
-use profit_core::industry::TypeId;
-use profit_core::invention::Decryptor;
+use mop_core::industry::TypeId;
+use mop_core::invention::Decryptor;
 use rusqlite::{OptionalExtension, Row, params};
 
 use crate::error::SdeError;

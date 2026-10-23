@@ -4,10 +4,10 @@
 use std::cmp::Reverse;
 use std::collections::VecDeque;
 
-use profit_core::industry::TypeId;
-use profit_core::money::Money;
-use profit_core::price_history::{ROW_BYTES, Retention, RetentionError, days_to_drop};
-use profit_market::fuzzwork::{Side, SummaryRow};
+use mop_core::industry::TypeId;
+use mop_core::money::Money;
+use mop_core::price_history::{ROW_BYTES, Retention, RetentionError, days_to_drop};
+use mop_market::fuzzwork::{Side, SummaryRow};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{Result, StoreError};

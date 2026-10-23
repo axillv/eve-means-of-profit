@@ -11,7 +11,7 @@ use egui::{
     Align, Color32, CornerRadius, Id, Label, Layout, Pos2, Rect, ScrollArea, Sense, Shape, Ui,
     UiBuilder, pos2, vec2,
 };
-use profit_store::Density;
+use mop_store::Density;
 
 use crate::theme::Style;
 use model::{

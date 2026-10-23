@@ -8,7 +8,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use profit_core::stock::CharacterId;
+use mop_core::stock::CharacterId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

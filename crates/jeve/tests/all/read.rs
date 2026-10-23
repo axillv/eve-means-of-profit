@@ -3,8 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use profit_core::stock::{Asset, CharacterAssets, Places, StockScope, resolve};
-use profit_jeve::{
+use mop_core::stock::{Asset, CharacterAssets, Places, StockScope, resolve};
+use mop_jeve::{
     BlueprintKind, JeveCharacter, JeveData, JeveError, OwnedBlueprint, ReadOptions, read_profile,
 };
 use rusqlite::Connection;

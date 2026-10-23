@@ -8,10 +8,10 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use profit_core::industry::{Activity, Recipe};
-    use profit_core::volume::Volume;
-    use profit_sde::schema::SCHEMA_VERSION;
-    use profit_sde::{ImportReport, Sde, SdeError, import};
+    use mop_core::industry::{Activity, Recipe};
+    use mop_core::volume::Volume;
+    use mop_sde::schema::SCHEMA_VERSION;
+    use mop_sde::{ImportReport, Sde, SdeError, import};
     use rusqlite::Connection;
     use serde_json::{Value, json};
     use tempfile::TempDir;

@@ -16,17 +16,17 @@ mod tests {
     use base64::Engine as _;
     use base64::prelude::BASE64_URL_SAFE_NO_PAD;
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-    use profit_esi::auth::{Auth, LoginStart, REVOKE_URL, SCOPES, TOKEN_URL, authorize_url};
-    use profit_esi::callback::wait_for_code;
-    use profit_esi::characters::Login;
-    use profit_esi::error::EsiError;
-    use profit_esi::http::{Http, HttpRequest, HttpResponse, Method};
-    use profit_esi::jwt::{self, Jwks};
-    use profit_esi::pkce::Pkce;
-    use profit_esi::secrets::{
+    use mop_esi::auth::{Auth, LoginStart, REVOKE_URL, SCOPES, TOKEN_URL, authorize_url};
+    use mop_esi::callback::wait_for_code;
+    use mop_esi::characters::Login;
+    use mop_esi::error::EsiError;
+    use mop_esi::http::{Http, HttpRequest, HttpResponse, Method};
+    use mop_esi::jwt::{self, Jwks};
+    use mop_esi::pkce::Pkce;
+    use mop_esi::secrets::{
         FileStore, KeychainFirst, SecretStore, Secrets, fallback_warning, open_secrets,
     };
-    use profit_esi::token::{AccessToken, RefreshToken};
+    use mop_esi::token::{AccessToken, RefreshToken};
     use serde_json::{Value, json};
     use tempfile::TempDir;
 
@@ -858,7 +858,7 @@ mod tests {
 
     #[test]
     fn percent_decoding_accepts_both_hex_cases_and_refuses_bad_escapes() {
-        use profit_esi::http::{decode, encode};
+        use mop_esi::http::{decode, encode};
         assert_eq!(decode("a%2fb%2Fc").as_deref(), Some("a/b/c"));
         assert_eq!(decode("%41%5a%7a").as_deref(), Some("AZz"));
         assert_eq!(decode("%g1"), None);

@@ -6,9 +6,9 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use profit_core::industry::{Activity, IndustryError, Modifier, job_quantity};
-    use profit_sde::facility::{Facility, FacilityError, Rig, Security, Structure, StructureKind};
-    use profit_sde::{Sde, SdeError, import};
+    use mop_core::industry::{Activity, IndustryError, Modifier, job_quantity};
+    use mop_sde::facility::{Facility, FacilityError, Rig, Security, Structure, StructureKind};
+    use mop_sde::{Sde, SdeError, import};
     use rusqlite::Connection;
     use serde_json::{Value, json};
     use tempfile::TempDir;

@@ -1,13 +1,13 @@
 //! Imports a real download and times a search on the result.
 //!
-//! `cargo run --release -p profit-sde --example import -- <zip> <db>`
+//! `cargo run --release -p mop-sde --example import -- <zip> <db>`
 
 use std::error::Error;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Instant;
 
-use profit_sde::{Sde, import};
+use mop_sde::{Sde, import};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();

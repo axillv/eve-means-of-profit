@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use profit_jeve::{JeveError, ProfileFile, list_profiles, profiles_dir, profiles_dir_in};
+use mop_jeve::{JeveError, ProfileFile, list_profiles, profiles_dir, profiles_dir_in};
 
 #[cfg(test)]
 mod tests {

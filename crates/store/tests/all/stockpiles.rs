@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use profit_core::stockpile::{Characters, Filter, Include, Place, Source, Stockpile, Target};
-use profit_store::{Store, StoreError};
+use mop_core::stockpile::{Characters, Filter, Include, Place, Source, Stockpile, Target};
+use mop_store::{Store, StoreError};
 use rusqlite::Connection;
 
 #[cfg(test)]

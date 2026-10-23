@@ -6,20 +6,18 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use egui::{Button, Checkbox, ComboBox, Context, Id, RichText, TextEdit, Ui};
-use profit_core::buylist::{BuyInput, BuyList, BuyRow, Delivered, LinePrice, buy_list};
-use profit_core::format::group_thousands;
-use profit_core::freight::{
-    self, CargoLine, Contract, FreightError, FreightQuote, Packing, RateCard,
-};
-use profit_core::industry::TypeId;
-use profit_core::money::Money;
-use profit_core::plan::Plan;
-use profit_core::volume::Volume;
-use profit_market::book::PriceRule;
-use profit_market::fuzzwork::{Refresh, Side, Stat};
-use profit_sde::Sde;
-use profit_sde::map::StarMap;
-use profit_store::PlanRecord;
+use mop_core::buylist::{BuyInput, BuyList, BuyRow, Delivered, LinePrice, buy_list};
+use mop_core::format::group_thousands;
+use mop_core::freight::{self, CargoLine, Contract, FreightError, FreightQuote, Packing, RateCard};
+use mop_core::industry::TypeId;
+use mop_core::money::Money;
+use mop_core::plan::Plan;
+use mop_core::volume::Volume;
+use mop_market::book::PriceRule;
+use mop_market::fuzzwork::{Refresh, Side, Stat};
+use mop_sde::Sde;
+use mop_sde::map::StarMap;
+use mop_store::PlanRecord;
 
 use super::prices::{self, Held, Manual, OutOfRange, Outcome, STALE_SECS, age_text, failure_text};
 use super::state::{BuildPage, push_error, report, type_name};
@@ -1033,11 +1031,11 @@ fn apply(page: &mut BuildPage, cx: &mut Shared, edit: Edit) {
 
 #[cfg(test)]
 mod tests {
-    use profit_core::money::Money;
-    use profit_market::fuzzwork::Refresh;
+    use mop_core::money::Money;
+    use mop_market::fuzzwork::Refresh;
 
-    use profit_core::freight::Contract;
-    use profit_core::volume::Volume;
+    use mop_core::freight::Contract;
+    use mop_core::volume::Volume;
 
     use super::{Manual, contract_line, diff_text, too_soon_notice};
 

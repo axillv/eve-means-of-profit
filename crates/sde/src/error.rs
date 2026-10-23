@@ -1,7 +1,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use profit_core::industry::TypeId;
+use mop_core::industry::TypeId;
 
 /// Why the static data could not be imported or read.
 ///

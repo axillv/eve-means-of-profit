@@ -8,7 +8,7 @@ mod price_rule;
 
 use egui::Ui;
 
-use profit_store::StoreError;
+use mop_store::StoreError;
 
 use crate::Shared;
 

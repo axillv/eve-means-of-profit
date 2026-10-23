@@ -4,9 +4,9 @@
 
 use std::collections::BTreeMap;
 
-use profit_core::industry::TypeId;
-use profit_core::money::Money;
-use profit_core::stock::{Asset, CharacterAssets, ItemId};
+use mop_core::industry::TypeId;
+use mop_core::money::Money;
+use mop_core::stock::{Asset, CharacterAssets, ItemId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 

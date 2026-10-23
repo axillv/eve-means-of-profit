@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-use profit_core::industry::TypeId;
-use profit_core::stock::{Asset, CharacterAssets, CharacterId, ItemId, LocationId};
+use mop_core::industry::TypeId;
+use mop_core::stock::{Asset, CharacterAssets, CharacterId, ItemId, LocationId};
 use rusqlite::{Connection, ErrorCode, OpenFlags, Row};
 
 use crate::JeveError;

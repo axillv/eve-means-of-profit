@@ -5,10 +5,8 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use profit_core::money::Rate;
-    use profit_sde::{
-        InventionActivity, InventionProduct, Sde, SdeError, SkillRequirement, import,
-    };
+    use mop_core::money::Rate;
+    use mop_sde::{InventionActivity, InventionProduct, Sde, SdeError, SkillRequirement, import};
     use rusqlite::Connection;
     use serde_json::Value;
     use tempfile::TempDir;

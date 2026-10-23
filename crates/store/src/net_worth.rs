@@ -4,11 +4,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use profit_core::industry::TypeId;
-use profit_core::money::Money;
-use profit_core::net_worth::{
-    CharacterKey, Holdings, ItemPrices, Part, PriceBasis, Record, Snapshot,
-};
+use mop_core::industry::TypeId;
+use mop_core::money::Money;
+use mop_core::net_worth::{CharacterKey, Holdings, ItemPrices, Part, PriceBasis, Record, Snapshot};
 use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::error::{Result, StoreError};

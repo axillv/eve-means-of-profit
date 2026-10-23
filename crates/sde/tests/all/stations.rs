@@ -7,7 +7,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use profit_sde::{Sde, SdeError, Station, import};
+    use mop_sde::{Sde, SdeError, Station, import};
     use rusqlite::Connection;
     use serde_json::{Value, json};
     use tempfile::TempDir;

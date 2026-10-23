@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use profit_core::industry::{Activity, Recipe, TypeId};
-use profit_core::invention::Decryptor;
-use profit_core::money::Rate;
-use profit_core::volume::Volume;
+use mop_core::industry::{Activity, Recipe, TypeId};
+use mop_core::invention::Decryptor;
+use mop_core::money::Rate;
+use mop_core::volume::Volume;
 use rusqlite::{Connection, Transaction, params};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;

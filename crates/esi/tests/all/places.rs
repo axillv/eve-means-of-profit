@@ -6,17 +6,17 @@ mod tests {
     use std::fs;
     use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-    use profit_esi::auth::{Auth, TOKEN_URL};
-    use profit_esi::characters::{Character, CharacterList, Login};
-    use profit_esi::client::BASE_URL;
-    use profit_esi::error::EsiError;
-    use profit_esi::http::{Http, HttpRequest, HttpResponse};
-    use profit_esi::places::{
+    use mop_esi::auth::{Auth, TOKEN_URL};
+    use mop_esi::characters::{Character, CharacterList, Login};
+    use mop_esi::client::BASE_URL;
+    use mop_esi::error::EsiError;
+    use mop_esi::http::{Http, HttpRequest, HttpResponse};
+    use mop_esi::places::{
         FIRST_STRUCTURE_ID, NamingReport, StructureEntry, StructureNames, load_places,
         name_structures, place_label,
     };
-    use profit_esi::secrets::{FileStore, SecretStore, Secrets};
-    use profit_esi::token::RefreshToken;
+    use mop_esi::secrets::{FileStore, SecretStore, Secrets};
+    use mop_esi::token::RefreshToken;
     use tempfile::TempDir;
 
     const CHARACTER_A: i64 = 2_112_625_428;

@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use profit_core::industry::{Recipe, RecipeBook, TypeId};
-use profit_core::volume::Volume;
+use mop_core::industry::{Recipe, RecipeBook, TypeId};
+use mop_core::volume::Volume;
 use rusqlite::types::Type;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 

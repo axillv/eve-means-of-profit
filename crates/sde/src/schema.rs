@@ -2,7 +2,7 @@
 //!
 //! No migrations: a database with another version is imported again.
 
-use profit_core::industry::Activity;
+use mop_core::industry::Activity;
 
 /// Written to `PRAGMA user_version`. A database with any other value is not read.
 pub const SCHEMA_VERSION: u32 = 6;

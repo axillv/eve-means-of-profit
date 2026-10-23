@@ -8,8 +8,8 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::ops::Range;
 
-use profit_core::money::Money;
-use profit_store::Density;
+use mop_core::money::Money;
+use mop_store::Density;
 
 /// How a column's values are read and aligned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

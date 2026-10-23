@@ -1,8 +1,8 @@
 //! Named facilities: where a job is built, with its structure, security and rigs.
 
-use profit_core::industry::TypeId;
-use profit_core::job_cost::NPC_STATION_TAX;
-use profit_sde::{Facility, Security};
+use mop_core::industry::TypeId;
+use mop_core::job_cost::NPC_STATION_TAX;
+use mop_sde::{Facility, Security};
 use rusqlite::{Transaction, params};
 
 use crate::error::{Result, StoreError};

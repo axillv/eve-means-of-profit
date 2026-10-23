@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use profit_core::money::Money;
-use profit_core::net_worth::{CharacterKey, Part, Record, Snapshot};
-use profit_jeve::{JeveError, read_tracker, tracker_path};
+use mop_core::money::Money;
+use mop_core::net_worth::{CharacterKey, Part, Record, Snapshot};
+use mop_jeve::{JeveError, read_tracker, tracker_path};
 
 #[cfg(test)]
 mod tests {

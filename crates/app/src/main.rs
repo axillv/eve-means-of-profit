@@ -2,7 +2,7 @@ use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use eve_means_of_profit::{App, AppConfig};
-use profit_sde::HttpFetch;
+use mop_sde::HttpFetch;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let dirs = directories::ProjectDirs::from("", "", "eve-means-of-profit")

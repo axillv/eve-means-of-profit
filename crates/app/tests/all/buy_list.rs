@@ -22,14 +22,14 @@ mod tests {
     use eve_means_of_profit::{App, AppConfig};
     use flate2::Compression;
     use flate2::write::GzEncoder;
-    use profit_core::freight::RateCard;
-    use profit_core::money::{Money, Rate};
-    use profit_core::volume::Volume;
-    use profit_market::book::PriceRule;
-    use profit_market::error::MarketError;
-    use profit_market::fuzzwork::{BytesHttp, BytesResponse};
-    use profit_sde::{Fetch, FetchError, RouteKind, import};
-    use profit_store::Store;
+    use mop_core::freight::RateCard;
+    use mop_core::money::{Money, Rate};
+    use mop_core::volume::Volume;
+    use mop_market::book::PriceRule;
+    use mop_market::error::MarketError;
+    use mop_market::fuzzwork::{BytesHttp, BytesResponse};
+    use mop_sde::{Fetch, FetchError, RouteKind, import};
+    use mop_store::Store;
     use tempfile::TempDir;
 
     const NOW: i64 = 2_000_000;

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use profit_store::{Store, StoreError};
+use mop_store::{Store, StoreError};
 use rusqlite::Connection;
 
 #[cfg(test)]

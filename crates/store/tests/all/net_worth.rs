@@ -1,11 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use profit_core::money::Money;
-use profit_core::net_worth::{
-    CharacterKey, Holdings, ItemPrices, Part, PriceBasis, Record, Snapshot,
-};
-use profit_store::{NetWorthSettings, Store, StoreError};
+use mop_core::money::Money;
+use mop_core::net_worth::{CharacterKey, Holdings, ItemPrices, Part, PriceBasis, Record, Snapshot};
+use mop_store::{NetWorthSettings, Store, StoreError};
 use rusqlite::{Connection, params};
 
 #[cfg(test)]
@@ -192,7 +190,7 @@ mod tests {
 
         assert_eq!(
             first,
-            profit_store::ImportReport {
+            mop_store::ImportReport {
                 added: 2,
                 duplicates: 0,
                 after_app_data: 1
@@ -200,7 +198,7 @@ mod tests {
         );
         assert_eq!(
             second,
-            profit_store::ImportReport {
+            mop_store::ImportReport {
                 added: 0,
                 duplicates: 2,
                 after_app_data: 1

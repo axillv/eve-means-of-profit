@@ -1,5 +1,5 @@
 [package]
-name = "profit-sde"
+name = "mop-sde"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
@@ -8,7 +8,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-profit-core = { version = "0.1.0", path = "../core" }
+mop-core = { version = "0.1.0", path = "../core" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["arbitrary_precision"] }

@@ -2,7 +2,7 @@
 //! start with it, and existing plans keep their own.
 
 use egui::Ui;
-use profit_market::book::PriceRule;
+use mop_market::book::PriceRule;
 
 use crate::Shared;
 use crate::build::inputs::{PRICE_RULES, price_text};

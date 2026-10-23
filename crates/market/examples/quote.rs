@@ -1,14 +1,14 @@
 //! Prices a few items at Jita under each rule, from live ESI data.
 //!
-//! Run with `cargo run -p profit-market --example quote`.
+//! Run with `cargo run -p mop-market --example quote`.
 
 use std::error::Error;
 use std::io::{self, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use profit_market::book::{PriceRule, Quote, quote};
-use profit_market::cache::Market;
-use profit_market::http::UreqHttp;
+use mop_market::book::{PriceRule, Quote, quote};
+use mop_market::cache::Market;
+use mop_market::http::UreqHttp;
 
 const JITA: u64 = 60003760;
 const QTY: u64 = 10_000;

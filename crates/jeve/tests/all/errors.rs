@@ -3,7 +3,7 @@ mod tests {
     use std::error::Error;
     use std::path::PathBuf;
 
-    use profit_jeve::JeveError;
+    use mop_jeve::JeveError;
 
     #[test]
     fn messages_name_the_problem() {

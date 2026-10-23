@@ -18,8 +18,8 @@ mod tests {
     };
     use eve_means_of_profit::table::{Table, TableResponse, sort_mark_points};
     use eve_means_of_profit::theme::Style;
-    use profit_core::money::Money;
-    use profit_store::Density;
+    use mop_core::money::Money;
+    use mop_store::Density;
     use std::collections::BTreeSet;
 
     fn columns() -> Vec<Column> {

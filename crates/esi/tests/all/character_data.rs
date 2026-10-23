@@ -6,19 +6,19 @@ mod tests {
     use std::fs;
     use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-    use profit_core::money::Money;
-    use profit_core::stock::Asset;
-    use profit_esi::auth::{Auth, TOKEN_URL};
-    use profit_esi::character_data::{
+    use mop_core::money::Money;
+    use mop_core::stock::Asset;
+    use mop_esi::auth::{Auth, TOKEN_URL};
+    use mop_esi::character_data::{
         CharacterData, Job, JobStatus, Kind, Order, Refreshed, refresh, refresh_all,
     };
-    use profit_esi::characters::{Character, CharacterList, Login};
-    use profit_esi::client::{BASE_URL, Client};
-    use profit_esi::error::EsiError;
-    use profit_esi::http::{Http, HttpRequest, HttpResponse};
-    use profit_esi::saved::{forget, load_character, save_character};
-    use profit_esi::secrets::{FileStore, SecretStore, Secrets};
-    use profit_esi::token::RefreshToken;
+    use mop_esi::characters::{Character, CharacterList, Login};
+    use mop_esi::client::{BASE_URL, Client};
+    use mop_esi::error::EsiError;
+    use mop_esi::http::{Http, HttpRequest, HttpResponse};
+    use mop_esi::saved::{forget, load_character, save_character};
+    use mop_esi::secrets::{FileStore, SecretStore, Secrets};
+    use mop_esi::token::RefreshToken;
     use serde_json::{Value, json};
     use tempfile::TempDir;
 

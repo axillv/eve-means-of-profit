@@ -8,12 +8,12 @@ use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use profit_core::buylist::LinePrice;
-use profit_core::industry::TypeId;
-use profit_core::money::Money;
-use profit_market::book::PriceRule;
-use profit_market::error::MarketError;
-use profit_market::fuzzwork::{
+use mop_core::buylist::LinePrice;
+use mop_core::industry::TypeId;
+use mop_core::money::Money;
+use mop_market::book::PriceRule;
+use mop_market::error::MarketError;
+use mop_market::fuzzwork::{
     BytesHttp, BytesResponse, FORGE, FuzzworkMarket, MIN_GAP_SECS, Refresh, Side, Stat, SummaryRow,
 };
 
@@ -325,9 +325,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use profit_core::money::Money;
-    use profit_market::book::PriceRule;
-    use profit_market::fuzzwork::{Side, Stat};
+    use mop_core::money::Money;
+    use mop_market::book::PriceRule;
+    use mop_market::fuzzwork::{Side, Stat};
 
     use std::io::Write;
     use std::ops::ControlFlow;
@@ -337,10 +337,10 @@ mod tests {
     use std::time::Duration;
 
     use egui::Context;
-    use profit_core::buylist::LinePrice;
-    use profit_market::error::MarketError;
-    use profit_market::fuzzwork::BytesResponse;
-    use profit_sde::{Fetch, FetchError};
+    use mop_core::buylist::LinePrice;
+    use mop_market::error::MarketError;
+    use mop_market::fuzzwork::BytesResponse;
+    use mop_sde::{Fetch, FetchError};
 
     use super::{
         BytesHttp, Live, Manual, OutOfRange, Prices, Queued, age_text, line_price, rule_source,

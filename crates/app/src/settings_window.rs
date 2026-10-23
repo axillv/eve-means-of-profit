@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use egui::{Context, Window};
-use profit_store::Density;
+use mop_store::Density;
 
 use crate::Shared;
 

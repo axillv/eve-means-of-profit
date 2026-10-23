@@ -4,11 +4,11 @@
 use std::sync::Arc;
 
 use egui::{Button, ComboBox, Id, ScrollArea, TextEdit, Ui};
-use profit_core::freight::RateCard;
-use profit_core::money::{Money, Rate};
-use profit_core::volume::Volume;
-use profit_sde::{RouteKind, Sde, StarMap};
-use profit_store::{Density, RouteRow, ServiceRow, Store};
+use mop_core::freight::RateCard;
+use mop_core::money::{Money, Rate};
+use mop_core::volume::Volume;
+use mop_sde::{RouteKind, Sde, StarMap};
+use mop_store::{Density, RouteRow, ServiceRow, Store};
 
 use super::fields::{self, text_field};
 use super::store_text;

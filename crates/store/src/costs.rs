@@ -3,8 +3,8 @@
 
 use std::collections::BTreeMap;
 
-use profit_core::fees::Standing;
-use profit_core::money::Rate;
+use mop_core::fees::Standing;
+use mop_core::money::Rate;
 use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::error::{Result, StoreError};

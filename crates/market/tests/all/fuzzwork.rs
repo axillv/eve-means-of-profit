@@ -9,9 +9,9 @@ mod tests {
 
     use flate2::Compression;
     use flate2::write::GzEncoder;
-    use profit_core::money::Money;
-    use profit_market::error::MarketError;
-    use profit_market::fuzzwork::{
+    use mop_core::money::Money;
+    use mop_market::error::MarketError;
+    use mop_market::fuzzwork::{
         BytesHttp, BytesResponse, FORGE, FuzzworkMarket, Refresh, Side, Stat, parse_aggregates,
     };
 

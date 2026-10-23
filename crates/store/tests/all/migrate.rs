@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use profit_store::{Store, StoreError};
+    use mop_store::{Store, StoreError};
     use rusqlite::Connection;
     use rusqlite::types::FromSql;
     use std::path::{Path, PathBuf};

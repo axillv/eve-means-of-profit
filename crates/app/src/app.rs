@@ -26,11 +26,11 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use egui::{Context, Key, Modifiers, Ui, ViewportCommand};
 use egui_dock::DockState;
-use profit_sde::{
+use mop_sde::{
     Fetch, FetchError, ImportReport, Sde, SdeBuild, SdeError, download_and_import, latest_build,
     needs_update, update_due,
 };
-use profit_store::{Density, Settings, Store};
+use mop_store::{Density, Settings, Store};
 
 use build::{BuildPage, BuildPanel};
 use first_run::{Reply, Startup};
@@ -189,7 +189,7 @@ impl App {
                 store,
                 worker: Worker::spawn(ctx.clone(), config.fetch),
                 market: Arc::new(build::prices::Prices::new(Box::new(
-                    profit_market::http::UreqHttp::new(),
+                    mop_market::http::UreqHttp::new(),
                 ))),
                 style,
                 density: settings.density,

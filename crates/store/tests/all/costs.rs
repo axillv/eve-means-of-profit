@@ -3,12 +3,12 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
 
-    use profit_core::fees::Standing;
-    use profit_core::freight::Packing;
-    use profit_core::money::Rate;
-    use profit_market::book::PriceRule;
-    use profit_sde::{Facility, Security};
-    use profit_store::{FacilityCosts, FeeSettings, PlanRecord, SellMode, Store, StoreError};
+    use mop_core::fees::Standing;
+    use mop_core::freight::Packing;
+    use mop_core::money::Rate;
+    use mop_market::book::PriceRule;
+    use mop_sde::{Facility, Security};
+    use mop_store::{FacilityCosts, FeeSettings, PlanRecord, SellMode, Store, StoreError};
     use rusqlite::Connection;
 
     const JITA: u32 = 30_000_142;

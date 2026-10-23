@@ -2,9 +2,9 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use std::path::PathBuf;
 
-use profit_core::industry::TypeId;
-use profit_core::stockpile::{Characters, Filter, Place, Source, Target};
-use profit_jeve::{
+use mop_core::industry::TypeId;
+use mop_core::stockpile::{Characters, Filter, Place, Source, Target};
+use mop_jeve::{
     ImportedStockpile, JeveError, StockpileImport, read_stockpiles, read_stockpiles_file,
 };
 

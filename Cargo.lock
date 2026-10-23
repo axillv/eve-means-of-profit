@@ -1436,10 +1436,11 @@ dependencies = [
  "egui_dock",
  "egui_kittest",
  "flate2",
- "profit-core",
- "profit-market",
- "profit-sde",
- "profit-store",
+ "mop-core",
+ "mop-market",
+ "mop-sde",
+ "mop-store",
+ "serde_json",
  "tempfile",
  "zip",
 ]
@@ -2460,6 +2461,75 @@ dependencies = [
 ]
 
 [[package]]
+name = "mop-core"
+version = "0.1.0"
+
+[[package]]
+name = "mop-esi"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "getrandom 0.4.3",
+ "httpdate",
+ "jsonwebtoken",
+ "keyring",
+ "mop-core",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
+name = "mop-jeve"
+version = "0.1.0"
+dependencies = [
+ "mop-core",
+ "roxmltree",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "mop-market"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "httpdate",
+ "mop-core",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "mop-sde"
+version = "0.1.0"
+dependencies = [
+ "mop-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ureq",
+ "zip",
+]
+
+[[package]]
+name = "mop-store"
+version = "0.1.0"
+dependencies = [
+ "mop-core",
+ "mop-market",
+ "mop-sde",
+ "rusqlite",
+ "tempfile",
+]
+
+[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3361,75 +3431,6 @@ name = "profiling"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
-
-[[package]]
-name = "profit-core"
-version = "0.1.0"
-
-[[package]]
-name = "profit-esi"
-version = "0.1.0"
-dependencies = [
- "base64 0.23.1",
- "getrandom 0.4.3",
- "httpdate",
- "jsonwebtoken",
- "keyring",
- "profit-core",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "tempfile",
- "ureq",
-]
-
-[[package]]
-name = "profit-jeve"
-version = "0.1.0"
-dependencies = [
- "profit-core",
- "roxmltree",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "profit-market"
-version = "0.1.0"
-dependencies = [
- "flate2",
- "httpdate",
- "profit-core",
- "serde",
- "serde_json",
- "ureq",
-]
-
-[[package]]
-name = "profit-sde"
-version = "0.1.0"
-dependencies = [
- "profit-core",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "ureq",
- "zip",
-]
-
-[[package]]
-name = "profit-store"
-version = "0.1.0"
-dependencies = [
- "profit-core",
- "profit-market",
- "profit-sde",
- "rusqlite",
- "tempfile",
-]
 
 [[package]]
 name = "pxfm"

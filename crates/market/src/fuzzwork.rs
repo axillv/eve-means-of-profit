@@ -14,8 +14,8 @@ use std::io::Read;
 use std::time::UNIX_EPOCH;
 
 use flate2::read::GzDecoder;
-use profit_core::industry::TypeId;
-use profit_core::money::Money;
+use mop_core::industry::TypeId;
+use mop_core::money::Money;
 
 use crate::error::MarketError;
 

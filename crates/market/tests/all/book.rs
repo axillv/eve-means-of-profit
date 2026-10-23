@@ -2,10 +2,10 @@
 
 #[cfg(test)]
 mod tests {
-    use profit_core::money::Money;
-    use profit_market::book::{Order, PriceRule, Quote, parse_orders, quote};
-    use profit_market::error::MarketError;
-    use profit_market::fuzzwork::{Side, Stat};
+    use mop_core::money::Money;
+    use mop_market::book::{Order, PriceRule, Quote, parse_orders, quote};
+    use mop_market::error::MarketError;
+    use mop_market::fuzzwork::{Side, Stat};
 
     const FIXTURE: &str = include_str!("../fixtures/orders-10000002-11481.json");
     const JITA: u64 = 60003760;
