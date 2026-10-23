@@ -6,6 +6,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use mop_core::money::Rate;
+    use mop_sde::invention::{InventionSkill, split_skills};
     use mop_sde::{InventionActivity, InventionProduct, Sde, SdeError, SkillRequirement, import};
     use rusqlite::Connection;
     use serde_json::Value;
@@ -294,5 +295,113 @@ mod tests {
             (file.as_str(), bad_line, field.as_str(), id),
             ("blueprints.jsonl", line, "typeID", 23121)
         );
+    }
+
+    fn invention_skill(type_id: u32, name: &str, encryption: bool) -> InventionSkill {
+        InventionSkill {
+            type_id,
+            name: name.to_owned(),
+            encryption,
+        }
+    }
+
+    fn activity_with_skills(skills: Vec<SkillRequirement>) -> InventionActivity {
+        InventionActivity {
+            blueprint: 1,
+            products: vec![product(2, 340_000, 1)],
+            materials: vec![],
+            skills,
+        }
+    }
+
+    #[test]
+    fn hobgoblin_two_is_made_by_the_hobgoblin_one_invention_line_for_its_blueprint() {
+        let dir = TempDir::new().unwrap();
+        let sde = Sde::open(&imported(&dir)).unwrap();
+        assert_eq!(
+            sde.invention_for(2456).unwrap(),
+            Some((
+                InventionActivity {
+                    blueprint: 2455,
+                    products: vec![product(2457, 340_000, 10)],
+                    materials: vec![(20419, 1), (20418, 1)],
+                    skills: vec![
+                        skill(11453, "Electronic Engineering", 1),
+                        skill(11446, "Graviton Physics", 1),
+                        skill(23121, "Gallente Encryption Methods", 1),
+                    ],
+                },
+                product(2457, 340_000, 10),
+            ))
+        );
+    }
+
+    #[test]
+    fn a_product_whose_blueprint_no_invention_makes_has_no_invention() {
+        let dir = TempDir::new().unwrap();
+        let sde = Sde::open(&imported(&dir)).unwrap();
+        // The fixture has no Wolf or Jaguar blueprint, so the Rifter's invention makes nothing for them.
+        assert_eq!(sde.invention_for(11371).unwrap(), None);
+        assert_eq!(sde.invention_for(2454).unwrap(), None);
+        assert_eq!(sde.invention_for(1).unwrap(), None);
+    }
+
+    #[test]
+    fn invention_skills_are_the_distinct_skills_sorted_by_name() {
+        let dir = TempDir::new().unwrap();
+        let sde = Sde::open(&imported(&dir)).unwrap();
+        assert_eq!(
+            sde.invention_skills().unwrap(),
+            vec![
+                invention_skill(23087, "Amarr Encryption Methods", true),
+                invention_skill(11453, "Electronic Engineering", false),
+                invention_skill(23121, "Gallente Encryption Methods", true),
+                invention_skill(11446, "Graviton Physics", false),
+                invention_skill(11452, "Mechanical Engineering", false),
+                invention_skill(21791, "Minmatar Encryption Methods", true),
+                invention_skill(11445, "Minmatar Starship Engineering", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_skills_puts_the_encryption_skill_last_and_keeps_the_science_order() {
+        let dir = TempDir::new().unwrap();
+        let sde = Sde::open(&imported(&dir)).unwrap();
+        let hobgoblin = sde.invention(2455).unwrap().unwrap();
+        assert_eq!(split_skills(&hobgoblin), Some((11453, 11446, 23121)));
+        let rifter = sde.invention(691).unwrap().unwrap();
+        assert_eq!(split_skills(&rifter), Some((11445, 11452, 21791)));
+    }
+
+    #[test]
+    fn split_skills_is_none_without_exactly_one_encryption_skill_among_three() {
+        let two = activity_with_skills(vec![
+            skill(11453, "Electronic Engineering", 1),
+            skill(23121, "Gallente Encryption Methods", 1),
+        ]);
+        assert_eq!(split_skills(&two), None);
+        let none = activity_with_skills(vec![
+            skill(11453, "Electronic Engineering", 1),
+            skill(11446, "Graviton Physics", 1),
+            skill(11452, "Mechanical Engineering", 1),
+        ]);
+        assert_eq!(split_skills(&none), None);
+    }
+
+    #[test]
+    fn split_skills_finds_the_encryption_skill_wherever_it_is_in_the_order() {
+        let first = activity_with_skills(vec![
+            skill(23087, "Amarr Encryption Methods", 1),
+            skill(11453, "Electronic Engineering", 1),
+            skill(11446, "Graviton Physics", 1),
+        ]);
+        assert_eq!(split_skills(&first), Some((11453, 11446, 23087)));
+        let middle = activity_with_skills(vec![
+            skill(11453, "Electronic Engineering", 1),
+            skill(23121, "Gallente Encryption Methods", 1),
+            skill(11446, "Graviton Physics", 1),
+        ]);
+        assert_eq!(split_skills(&middle), Some((11453, 11446, 23121)));
     }
 }

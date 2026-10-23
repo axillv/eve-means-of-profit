@@ -2,7 +2,7 @@
 
 use mop_core::industry::TypeId;
 use mop_core::money::Rate;
-use rusqlite::{Row, params};
+use rusqlite::{OptionalExtension, Row, params};
 
 use crate::error::SdeError;
 use crate::query::Sde;
@@ -36,6 +36,16 @@ pub struct SkillRequirement {
     /// The skill's English name.
     pub name: String,
     pub level: u8,
+}
+
+/// A skill that some invention attempt needs, listed once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventionSkill {
+    pub type_id: TypeId,
+    /// The skill's English name.
+    pub name: String,
+    /// True for the encryption-methods skills, which pick the decryptor's effect.
+    pub encryption: bool,
 }
 
 impl Sde {
@@ -87,6 +97,96 @@ impl Sde {
             skills,
         }))
     }
+
+    /// The invention that makes the blueprint of `product`: its activity, and the product line that
+    /// is that blueprint. `None` when the product has no recipe or no invention makes its blueprint.
+    /// When several blueprints invent it, the one with the smallest id is used.
+    pub fn invention_for(
+        &self,
+        product: TypeId,
+    ) -> Result<Option<(InventionActivity, InventionProduct)>, SdeError> {
+        let blueprint: Option<TypeId> = self
+            .conn
+            .query_row(
+                "SELECT blueprint_id FROM recipes WHERE product_id = ?1",
+                params![product],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(blueprint) = blueprint else {
+            return Ok(None);
+        };
+        let source: Option<TypeId> = self
+            .conn
+            .query_row(
+                "SELECT blueprint_id FROM invention_products WHERE product_id = ?1
+                 ORDER BY blueprint_id LIMIT 1",
+                params![blueprint],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        let Some(activity) = self.invention(source)? else {
+            return Ok(None);
+        };
+        let line = activity
+            .products
+            .iter()
+            .find(|line| line.type_id == blueprint)
+            .cloned();
+        Ok(line.map(|line| (activity, line)))
+    }
+
+    /// Every skill that some invention attempt needs, once each, sorted by name ignoring case, then id.
+    pub fn invention_skills(&self) -> Result<Vec<InventionSkill>, SdeError> {
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT s.type_id, t.name FROM invention_skills s
+             JOIN types t ON t.type_id = s.type_id",
+        )?;
+        let mut skills = statement
+            .query_map([], |row| {
+                let name: String = row.get(1)?;
+                let encryption = is_encryption(&name);
+                Ok(InventionSkill {
+                    type_id: row.get(0)?,
+                    name,
+                    encryption,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        skills.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then(a.type_id.cmp(&b.type_id))
+        });
+        Ok(skills)
+    }
+}
+
+/// The two science skills of an activity and its encryption skill, as (science 1, science 2,
+/// encryption), in the activity's skill order. `None` unless the activity has exactly three skills,
+/// one of them encryption.
+pub fn split_skills(activity: &InventionActivity) -> Option<(TypeId, TypeId, TypeId)> {
+    let [first, second, third] = activity.skills.as_slice() else {
+        return None;
+    };
+    match (
+        is_encryption(&first.name),
+        is_encryption(&second.name),
+        is_encryption(&third.name),
+    ) {
+        (false, false, true) => Some((first.type_id, second.type_id, third.type_id)),
+        (false, true, false) => Some((first.type_id, third.type_id, second.type_id)),
+        (true, false, false) => Some((second.type_id, third.type_id, first.type_id)),
+        _ => None,
+    }
+}
+
+fn is_encryption(name: &str) -> bool {
+    name.ends_with(" Encryption Methods")
 }
 
 fn skill_from_row(row: &Row<'_>) -> rusqlite::Result<SkillRequirement> {
