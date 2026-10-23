@@ -82,9 +82,9 @@ mod tests {
         Down,
     }
 
-    /// The fake Fuzzwork file. Every request is counted.
+    /// The fake Fuzzwork file. Every request is counted. The answer can be changed by a test.
     struct FakeForge {
-        answer: Answer,
+        answer: Arc<Mutex<Answer>>,
         calls: Arc<Mutex<usize>>,
     }
 
@@ -95,7 +95,8 @@ mod tests {
             _if_none_match: Option<&str>,
         ) -> Result<BytesResponse, MarketError> {
             *self.calls.lock().unwrap_or_else(PoisonError::into_inner) += 1;
-            match &self.answer {
+            let answer = self.answer.lock().unwrap_or_else(PoisonError::into_inner);
+            match &*answer {
                 Answer::Down => Err(MarketError::Network("the file is down".to_owned())),
                 Answer::File { published, rows } => {
                     let text = format!("{HEADER}\n{rows}");
@@ -350,6 +351,15 @@ mod tests {
         env: &Env,
         eve: FakeEve,
         answer: Answer,
+    ) -> (Harness<'static, App>, Arc<Mutex<usize>>) {
+        start_with(env, eve, Arc::new(Mutex::new(answer)))
+    }
+
+    /// As `start`, with the Fuzzwork answer in `answer` so the test can change it.
+    fn start_with(
+        env: &Env,
+        eve: FakeEve,
+        answer: Arc<Mutex<Answer>>,
     ) -> (Harness<'static, App>, Arc<Mutex<usize>>) {
         let config = AppConfig {
             data_dir: env.data.clone(),
@@ -835,7 +845,74 @@ mod tests {
 
         assert!(shown(&harness, "Hobgoblin 10 · need 10"));
         assert!(!shown(&harness, "Rifter 31 · need 31"));
+        assert!(!shown(&harness, "Rifter 31 · product × 31"));
+        assert!(!shown(&harness, "Rifter 31 · could not work out the plan"));
         assert!(shown(&harness, "Missing · could not work out the plan"));
+    }
+
+    #[test]
+    fn clicking_a_plan_line_changes_nothing() {
+        let env = env();
+        with_main(&env);
+        save_plans(&env);
+        let (mut harness, _) = start(
+            &env,
+            FakeEve {
+                characters: vec![character(MAIN, "Main")],
+                jeve: None,
+            },
+            Answer::Down,
+        );
+        loaded(&mut harness);
+        select(&mut harness, PAU);
+
+        harness.get_by_label("Hobgoblin 10 · need 10").click();
+        harness.run();
+        assert_eq!(harness.state_mut().shared_mut().selection.item, Some(PAU));
+        assert!(shown(&harness, "Hobgoblin 10 · need 10"));
+    }
+
+    #[test]
+    fn a_working_download_after_a_failure_clears_the_line() {
+        let env = env();
+        with_main(&env);
+        let answer = Arc::new(Mutex::new(Answer::Down));
+        let (mut harness, _) = start_with(
+            &env,
+            FakeEve {
+                characters: vec![character(MAIN, "Main")],
+                jeve: None,
+            },
+            Arc::clone(&answer),
+        );
+        loaded(&mut harness);
+        select(&mut harness, PAU);
+        let shared = harness.state_mut().shared_mut();
+        let market = Arc::clone(&shared.market);
+        market.refresh(&shared.worker, NOW, true);
+        let failed = failure_text(&Failure::Market(MarketError::Network(
+            "the file is down".to_owned(),
+        )));
+        until(&mut harness, "the failure", |h| shown(h, &failed));
+
+        *answer.lock().unwrap_or_else(PoisonError::into_inner) = Answer::File {
+            published: NOW - 240,
+            rows: format!(
+                "{}{}",
+                row(PAU, false, "61200.00"),
+                row(PAU, true, "55010.00")
+            ),
+        };
+        {
+            // The failure holds the market for a minute, so the retry comes an hour later.
+            let shared = harness.state_mut().shared_mut();
+            let market = Arc::clone(&shared.market);
+            market.refresh(&shared.worker, NOW + 3_600, true);
+        }
+        until(&mut harness, "the file", |h| {
+            shown(h, "Forge sell 61,200.00 · buy 55,010.00")
+        });
+        assert!(!shown(&harness, &failed));
     }
 
     #[test]
