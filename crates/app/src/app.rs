@@ -4,11 +4,19 @@
 //! Each frame, [`App::show`] takes the results the worker has sent, then draws the menu bar, the
 //! status line, and either the first-run screen or the rail and the page.
 
+pub mod assets;
 pub mod build;
+pub mod characters;
 pub mod dock;
 pub mod first_run;
+pub mod item_panel;
+pub mod jobs;
 pub mod layout;
+pub mod net_worth;
+pub mod orders;
 pub mod rail;
+pub mod selection;
+pub mod session;
 pub mod settings_window;
 pub mod setup;
 pub mod status;
@@ -32,9 +40,16 @@ use mop_sde::{
 };
 use mop_store::{Density, Settings, Store};
 
+use assets::{AssetsPage, AssetsPanel};
 use build::{BuildPage, BuildPanel};
+use characters::{CharactersPage, CharactersPanel};
 use first_run::{Reply, Startup};
+use jobs::{JobsPage, JobsPanel};
+use net_worth::{NetWorthPage, NetWorthPanel};
+use orders::{OrdersPage, OrdersPanel};
 use rail::Page;
+use selection::Selection;
+use session::{EveAccess, Loaded, Session};
 use setup::{SetupPage, SetupPanel};
 use status::{Action, Notice};
 use theme::Style;
@@ -42,6 +57,8 @@ use worker::{Job, Worker, lock};
 
 const USER_DB: &str = "user.sqlite";
 const SDE_DB: &str = "sde.sqlite";
+/// Character data older than this (one day, in seconds) is worth a warning at start.
+const STALE_DATA_SECS: i64 = 86_400;
 /// Unix seconds, from the system or a fixed value in tests.
 pub type Clock = Box<dyn Fn() -> i64 + Send>;
 
@@ -53,10 +70,14 @@ pub struct AppConfig {
     pub cache_dir: PathBuf,
     pub fetch: Box<dyn Fetch + Send>,
     pub clock: Clock,
+    /// The EVE login and the files next to it: the real one in the app, a fake in tests.
+    pub eve: Box<dyn EveAccess>,
 }
 
 /// What a job reports back to the UI thread.
 pub enum Event {
+    /// The saved character data and jEve's profile, read at start.
+    Loaded(Loaded),
     /// The latest-build check finished. `first_run` is true when no game data exists yet.
     Checked {
         first_run: bool,
@@ -88,6 +109,10 @@ pub struct Shared {
     pub density: Density,
     pub notices: Vec<Notice>,
     pub clock: Clock,
+    /// The characters and their saved data, jEve's profile, and the structure names.
+    pub session: Session,
+    /// The item, place and character picked on the pages. Not saved.
+    pub selection: Selection,
 }
 
 impl Shared {
@@ -149,8 +174,18 @@ pub struct App {
     events_tx: Sender<Event>,
     page: Page,
     build_page: BuildPage,
-    setup_page: SetupPage,
     build_dock: DockState<BuildPanel>,
+    assets_page: AssetsPage,
+    assets_dock: DockState<AssetsPanel>,
+    net_worth_page: NetWorthPage,
+    net_worth_dock: DockState<NetWorthPanel>,
+    orders_page: OrdersPage,
+    orders_dock: DockState<OrdersPanel>,
+    jobs_page: JobsPage,
+    jobs_dock: DockState<JobsPanel>,
+    characters_page: CharactersPage,
+    characters_dock: DockState<CharactersPanel>,
+    setup_page: SetupPage,
     setup_dock: DockState<SetupPanel>,
     settings_open: bool,
 }
@@ -195,6 +230,8 @@ impl App {
                 density: settings.density,
                 notices,
                 clock: config.clock,
+                session: Session::new(config.eve),
+                selection: Selection::default(),
             },
             data_dir: config.data_dir,
             sde_path,
@@ -207,11 +244,22 @@ impl App {
             events_tx,
             page: Page::Build,
             build_page: BuildPage::default(),
-            setup_page: SetupPage,
             build_dock: dock::build_layout(),
+            assets_page: AssetsPage,
+            assets_dock: dock::assets_layout(),
+            net_worth_page: NetWorthPage,
+            net_worth_dock: dock::net_worth_layout(),
+            orders_page: OrdersPage,
+            orders_dock: dock::orders_layout(),
+            jobs_page: JobsPage,
+            jobs_dock: dock::jobs_layout(),
+            characters_page: CharactersPage,
+            characters_dock: dock::characters_layout(),
+            setup_page: SetupPage,
             setup_dock: dock::setup_layout(),
             settings_open: false,
         };
+        app.spawn_session_load();
         if app.shared.sde.is_none() {
             app.start_first_run();
         } else if update_due(settings.last_sde_check, now) {
@@ -291,6 +339,43 @@ impl App {
                 BuildPanel::title,
                 |ui, panel| build::show(&mut self.build_page, panel, ui, &mut self.shared),
             ),
+            Page::Assets => dock::show_locked(
+                ui,
+                &style,
+                &mut self.assets_dock,
+                AssetsPanel::title,
+                |ui, panel| assets::show(&mut self.assets_page, panel, ui, &mut self.shared),
+            ),
+            Page::NetWorth => dock::show_locked(
+                ui,
+                &style,
+                &mut self.net_worth_dock,
+                NetWorthPanel::title,
+                |ui, panel| net_worth::show(&mut self.net_worth_page, panel, ui, &mut self.shared),
+            ),
+            Page::Orders => dock::show_locked(
+                ui,
+                &style,
+                &mut self.orders_dock,
+                OrdersPanel::title,
+                |ui, panel| orders::show(&mut self.orders_page, panel, ui, &mut self.shared),
+            ),
+            Page::Jobs => dock::show_locked(
+                ui,
+                &style,
+                &mut self.jobs_dock,
+                JobsPanel::title,
+                |ui, panel| jobs::show(&mut self.jobs_page, panel, ui, &mut self.shared),
+            ),
+            Page::Characters => dock::show_locked(
+                ui,
+                &style,
+                &mut self.characters_dock,
+                CharactersPanel::title,
+                |ui, panel| {
+                    characters::show(&mut self.characters_page, panel, ui, &mut self.shared);
+                },
+            ),
             Page::Setup => dock::show_locked(
                 ui,
                 &style,
@@ -330,6 +415,7 @@ impl App {
                 let now = (self.shared.clock)();
                 format!(
                     "Market data: oldest {}",
+                    // May saturate for a publish time in the future: shown as an age of zero.
                     build::prices::age_text(now.saturating_sub(published))
                 )
             }
@@ -345,6 +431,7 @@ impl App {
 
     fn apply(&mut self, event: Event) {
         match event {
+            Event::Loaded(loaded) => self.loaded(loaded),
             Event::Checked { first_run, result } => self.checked(first_run, result),
             Event::Progress {
                 update,
@@ -357,6 +444,50 @@ impl App {
                 result,
             } => self.finished(update, build, result),
         }
+    }
+
+    /// Takes the start-up read: the login characters with their data, jEve's profile, and the
+    /// typed names. Warns once when the oldest data is a day old or more. Fetches nothing.
+    fn loaded(&mut self, loaded: Loaded) {
+        let saved_ok = loaded.saved.is_ok();
+        match loaded.saved {
+            Ok(saved) => {
+                self.shared.session.set_saved(saved);
+                let now = (self.shared.clock)();
+                if let Some(oldest) = self.shared.session.oldest_fetch() {
+                    // May saturate for a fetch time in the future (clock set back): the age is then very
+                    // small or zero, which is the right answer, not an error.
+                    let age = now.saturating_sub(oldest);
+                    if age > STALE_DATA_SECS {
+                        self.shared.notices.push(Notice::info(format!(
+                            "Character data is {} old. Refresh it on the Characters page.",
+                            build::prices::age_text(age)
+                        )));
+                    }
+                }
+            }
+            Err(error) => {
+                self.shared.session.clear();
+                self.shared.notices.push(Notice::error(format!(
+                    "Could not read the saved character data: {error}"
+                )));
+            }
+        }
+        match loaded.jeve {
+            // With the saved data unreadable the pages show no characters at all, jEve's included.
+            Ok(jeve) if saved_ok => self.shared.session.set_jeve(jeve),
+            Ok(_) => {}
+            Err(error) => self.shared.notices.push(Notice::error(format!(
+                "Could not read jEve's data file: {error}"
+            ))),
+        }
+        match self.shared.store.structure_names() {
+            Ok(typed) => self.shared.session.set_typed_names(typed),
+            Err(error) => self.shared.notices.push(Notice::error(format!(
+                "Could not read the typed structure names: {error}"
+            ))),
+        }
+        self.shared.session.mark_loaded();
     }
 
     fn checked(&mut self, first_run: bool, result: Result<SdeBuild, FetchError>) {
@@ -460,6 +591,18 @@ impl App {
     fn start_update(&mut self, build: u64) {
         self.update = Some((0, None));
         self.spawn_download(build, true, Arc::new(AtomicBool::new(false)));
+    }
+
+    /// Reads the saved character data and jEve's profile on the worker.
+    fn spawn_session_load(&self) {
+        let eve = self.shared.session.eve();
+        let (tx, ctx) = (self.events_tx.clone(), self.ctx.clone());
+        let data_dir = self.data_dir.clone();
+        let job: Job = Box::new(move || {
+            let loaded = session::load(&**session::lock_eve(&eve), &data_dir);
+            notify(&tx, &ctx, Event::Loaded(loaded));
+        });
+        self.shared.worker.run(job);
     }
 
     fn spawn_check(&self, first_run: bool) {

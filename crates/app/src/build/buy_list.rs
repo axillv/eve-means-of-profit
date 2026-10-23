@@ -119,6 +119,21 @@ pub fn show(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
     }
 }
 
+/// The freight quote the delivered total uses: none needed without a route, else the chosen offer's.
+fn quote_of<'a>(
+    record: &PlanRecord,
+    offers: &'a [Offer],
+    chosen: Option<usize>,
+    empty: &'a FreightQuote,
+) -> Option<&'a FreightQuote> {
+    if record.route.is_none() {
+        return Some(empty);
+    }
+    chosen
+        .and_then(|index| offers.get(index))
+        .and_then(|offer| offer.outcome.as_ref().ok())
+}
+
 /// Draws the panel and returns the change asked for in it, if any.
 fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Option<Edit> {
     // With no plan on screen the panel stays empty, as it did before it had rows.
@@ -150,13 +165,7 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Option<Edit> {
         contracts: Vec::new(),
         total: Money::ZERO,
     };
-    let quote = if record.route.is_none() {
-        Some(&empty)
-    } else {
-        chosen
-            .and_then(|index| offers.get(index))
-            .and_then(|offer| offer.outcome.as_ref().ok())
-    };
+    let quote = quote_of(record, &offers, chosen, &empty);
     let Ok(delivered) = buy.delivered(quote) else {
         report(cx, "Could not add up the delivered total.");
         return None;
@@ -194,8 +203,13 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Option<Edit> {
         }
     });
     ui.label(format!("Price rule: {}", rule_text(record.price_rule)));
-    let typed = table(ui, cx, record.id, now, &buy, &views, &hidden);
+    let (typed, clicked) = table(ui, cx, record.id, now, &buy, &views, &hidden);
     save_typed(cx, page.selected, &typed);
+    if let Some(key) = clicked
+        && let Ok(type_id) = TypeId::try_from(key)
+    {
+        cx.selection.item = Some(type_id);
+    }
     let totals = Totals {
         buy: &buy,
         delivered: &delivered,
@@ -841,7 +855,7 @@ fn table(
     buy: &BuyList,
     views: &BTreeMap<u64, View>,
     hidden: &[String],
-) -> Vec<(TypeId, Option<Manual>)> {
+) -> (Vec<(TypeId, Option<Manual>)>, Option<u64>) {
     let mut typed = Vec::new();
     let columns = shown(all_columns(), hidden);
     let rows: Vec<Row> = buy
@@ -883,10 +897,11 @@ fn table(
             _ => false,
         }
     };
-    Table::new(Id::new(super::BuildPanel::BuyList.title()), &columns)
+    let clicked = Table::new(Id::new(super::BuildPanel::BuyList.title()), &columns)
         .fit_rows(rows.len())
-        .show_with(ui, &cx.style, cx.density, &rows, Some(&footer), &mut draw);
-    typed
+        .show_with(ui, &cx.style, cx.density, &rows, Some(&footer), &mut draw)
+        .clicked;
+    (typed, clicked)
 }
 
 /// The Price cell: the price the line uses, typed over. The text is committed when the field loses

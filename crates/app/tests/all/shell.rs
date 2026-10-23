@@ -14,6 +14,7 @@ mod tests {
     use egui::{Event, Key, Modifiers, PointerButton, Pos2, vec2};
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
+    use eve_means_of_profit::session::NoEve;
     use eve_means_of_profit::theme::{Style, contrast};
     use eve_means_of_profit::{App, AppConfig};
     use mop_sde::{Fetch, FetchError, LATEST_URL, import};
@@ -226,6 +227,7 @@ mod tests {
             cache_dir: folders.cache.clone(),
             fetch: Box::new(fake),
             clock: Box::new(|| NOW),
+            eve: Box::new(NoEve),
         };
         Harness::builder()
             .with_size(vec2(1280.0, 800.0))

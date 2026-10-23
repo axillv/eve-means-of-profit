@@ -2,22 +2,67 @@
 //! bars hidden, tabs not draggable, no close buttons, no tab menus, and the show-tab-bar button
 //! kept at size 0. Each panel draws its own header with its name and a menu button.
 
-use egui::{CornerRadius, Id, Ui, WidgetText};
+use egui::{CornerRadius, Id, RichText, Ui, WidgetText};
 use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
 
+use crate::Shared;
+use crate::assets::AssetsPanel;
 use crate::build::BuildPanel;
+use crate::characters::CharactersPanel;
+use crate::jobs::JobsPanel;
+use crate::net_worth::NetWorthPanel;
+use crate::orders::OrdersPanel;
 use crate::setup::SetupPanel;
 use crate::table::copy_request;
 use crate::theme::Style;
 
-/// The Build page: Plans over Pasted stock on the left; Plan on top, then Steps beside Buy list.
+/// The Build page: Plans over Pasted stock on the left; Plan on top, then Steps and Buy list, with
+/// Item on the right of them.
 pub fn build_layout() -> DockState<BuildPanel> {
     let mut dock = DockState::new(vec![BuildPanel::Plans]);
     let surface = dock.main_surface_mut();
     let [plans, plan] = surface.split_right(NodeIndex::root(), 0.4, vec![BuildPanel::Plan]);
     surface.split_below(plans, 0.5, vec![BuildPanel::PastedStock]);
     let [_plan, lower] = surface.split_below(plan, 0.45, vec![BuildPanel::Steps]);
-    surface.split_right(lower, 0.5, vec![BuildPanel::BuyList]);
+    let [steps, _item] = surface.split_right(lower, 0.75, vec![BuildPanel::Item]);
+    surface.split_right(steps, 0.5, vec![BuildPanel::BuyList]);
+    dock
+}
+
+/// The Assets page: Places, Assets and Item side by side, at 25%, 50% and 25%.
+pub fn assets_layout() -> DockState<AssetsPanel> {
+    let mut dock = DockState::new(vec![AssetsPanel::Places]);
+    let surface = dock.main_surface_mut();
+    let [_places, rest] = surface.split_right(NodeIndex::root(), 0.25, vec![AssetsPanel::Assets]);
+    surface.split_right(rest, 2.0 / 3.0, vec![AssetsPanel::Item]);
+    dock
+}
+
+/// The Net worth page: Net worth on top at 60%, By character and Right now side by side below it.
+pub fn net_worth_layout() -> DockState<NetWorthPanel> {
+    let mut dock = DockState::new(vec![NetWorthPanel::NetWorth]);
+    let surface = dock.main_surface_mut();
+    let [_net_worth, lower] =
+        surface.split_below(NodeIndex::root(), 0.6, vec![NetWorthPanel::ByCharacter]);
+    surface.split_right(lower, 0.5, vec![NetWorthPanel::RightNow]);
+    dock
+}
+
+/// The Orders page: one panel.
+pub fn orders_layout() -> DockState<OrdersPanel> {
+    DockState::new(vec![OrdersPanel::Orders])
+}
+
+/// The Industry jobs page: one panel.
+pub fn jobs_layout() -> DockState<JobsPanel> {
+    DockState::new(vec![JobsPanel::IndustryJobs])
+}
+
+/// The Characters page: Characters above jEve data.
+pub fn characters_layout() -> DockState<CharactersPanel> {
+    let mut dock = DockState::new(vec![CharactersPanel::Characters]);
+    dock.main_surface_mut()
+        .split_below(NodeIndex::root(), 0.5, vec![CharactersPanel::JeveData]);
     dock
 }
 
@@ -29,6 +74,14 @@ pub fn setup_layout() -> DockState<SetupPanel> {
         surface.split_right(NodeIndex::root(), 0.5, vec![SetupPanel::FreightServices]);
     surface.split_below(freight, 0.5, vec![SetupPanel::PriceRule]);
     dock
+}
+
+/// The body of a panel whose page is not built yet. The header already names the panel, so the body
+/// shows only the loading text until the saved character data has arrived.
+pub fn placeholder(ui: &mut Ui, cx: &Shared) {
+    if !cx.session.loaded() {
+        ui.label(RichText::new("Loading character data…").color(cx.style.mute));
+    }
 }
 
 /// Draws a locked page. `title` names a panel; `body` draws the inside of one panel.

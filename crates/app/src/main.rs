@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use eve_means_of_profit::session::LiveEve;
 use eve_means_of_profit::{App, AppConfig};
 use mop_sde::HttpFetch;
 
@@ -12,6 +13,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         cache_dir: dirs.cache_dir().to_path_buf(),
         fetch: Box::new(HttpFetch::new()),
         clock: Box::new(system_clock),
+        eve: Box::new(LiveEve::open(dirs.data_dir())?),
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

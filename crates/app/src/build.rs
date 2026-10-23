@@ -12,7 +12,7 @@ pub mod stock;
 
 use egui::Ui;
 
-use crate::Shared;
+use crate::{Shared, item_panel};
 
 pub use state::BuildPage;
 
@@ -23,6 +23,7 @@ pub enum BuildPanel {
     Plan,
     Steps,
     BuyList,
+    Item,
 }
 
 impl BuildPanel {
@@ -33,6 +34,7 @@ impl BuildPanel {
             Self::Plan => "Plan",
             Self::Steps => "Steps",
             Self::BuyList => "Buy list",
+            Self::Item => "Item",
         }
     }
 }
@@ -45,5 +47,6 @@ pub fn show(page: &mut BuildPage, panel: BuildPanel, ui: &mut Ui, cx: &mut Share
         BuildPanel::Plan => inputs::show(page, ui, cx),
         BuildPanel::Steps => steps::show(page, ui, cx),
         BuildPanel::BuyList => buy_list::show(page, ui, cx),
+        BuildPanel::Item => item_panel::show(ui, cx),
     }
 }

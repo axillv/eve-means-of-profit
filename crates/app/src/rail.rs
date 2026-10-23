@@ -7,15 +7,33 @@ use crate::theme::Style;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Build,
+    Assets,
+    NetWorth,
+    Orders,
+    Jobs,
+    Characters,
     Setup,
 }
 
 impl Page {
-    pub const ALL: [Page; 2] = [Page::Build, Page::Setup];
+    pub const ALL: [Page; 7] = [
+        Page::Build,
+        Page::Assets,
+        Page::NetWorth,
+        Page::Orders,
+        Page::Jobs,
+        Page::Characters,
+        Page::Setup,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Build => "Build",
+            Self::Assets => "Assets",
+            Self::NetWorth => "Net worth",
+            Self::Orders => "Orders",
+            Self::Jobs => "Industry jobs",
+            Self::Characters => "Characters",
             Self::Setup => "Setup",
         }
     }

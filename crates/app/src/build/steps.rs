@@ -95,8 +95,13 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
             _ => false,
         }
     };
-    Table::new(Id::new("build_steps"), &columns)
+    let response = Table::new(Id::new("build_steps"), &columns)
         .show_with(ui, &cx.style, cx.density, &rows, None, &mut draw);
+    if let Some(key) = response.clicked
+        && let Ok(type_id) = TypeId::try_from(key)
+    {
+        cx.selection.item = Some(type_id);
+    }
     edits
 }
 

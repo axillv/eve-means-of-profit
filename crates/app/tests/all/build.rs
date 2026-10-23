@@ -15,6 +15,7 @@ mod tests {
     use egui_kittest::kittest::{NodeT, Queryable, by};
     use egui_kittest::{Harness, SnapshotResults};
     use eve_means_of_profit::build::prices::Prices;
+    use eve_means_of_profit::session::NoEve;
     use eve_means_of_profit::{App, AppConfig};
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -250,9 +251,10 @@ mod tests {
             cache_dir: env.cache.clone(),
             fetch: Box::new(NoNetwork),
             clock: Box::new(|| NOW),
+            eve: Box::new(NoEve),
         };
         let mut harness = Harness::builder()
-            .with_size(vec2(1280.0, 800.0))
+            .with_size(vec2(1900.0, 800.0))
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
         harness.state_mut().shared_mut().market = Arc::new(Prices::new(Box::new(EmptyForge)));
         harness

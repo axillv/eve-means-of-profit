@@ -14,6 +14,7 @@ mod tests {
     use egui::vec2;
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
+    use eve_means_of_profit::session::NoEve;
     use eve_means_of_profit::{App, AppConfig};
     use mop_core::freight::{Packing, RateCard};
     use mop_core::industry::{Activity, TypeId};
@@ -102,6 +103,7 @@ mod tests {
             cache_dir: folders.cache.clone(),
             fetch: Box::new(NoNetwork),
             clock: Box::new(|| NOW),
+            eve: Box::new(NoEve),
         };
         let mut harness = Harness::builder()
             .with_size(size)

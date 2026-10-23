@@ -19,6 +19,7 @@ mod tests {
     use egui_kittest::kittest::{NodeT, Queryable, by};
     use egui_kittest::{Harness, SnapshotResults};
     use eve_means_of_profit::build::prices::Prices;
+    use eve_means_of_profit::session::NoEve;
     use eve_means_of_profit::{App, AppConfig};
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -386,18 +387,24 @@ mod tests {
 
     /// Starts the app with the fake file in place of the real market, on the world's clock.
     fn start(env: &Env, world: &World) -> Harness<'static, App> {
+        start_sized(env, world, 1280.0)
+    }
+
+    /// `start` in a window `width` points wide.
+    fn start_sized(env: &Env, world: &World, width: f32) -> Harness<'static, App> {
         let clock = Arc::clone(&world.now);
         let config = AppConfig {
             data_dir: env.data.clone(),
             cache_dir: env.cache.clone(),
             fetch: Box::new(NoNetwork),
             clock: Box::new(move || clock.load(Ordering::SeqCst)),
+            eve: Box::new(NoEve),
         };
         let market = Arc::new(Prices::new(Box::new(FakeForge {
             state: Arc::clone(&world.forge),
         })));
         let mut harness = Harness::builder()
-            .with_size(vec2(1280.0, 800.0))
+            .with_size(vec2(width, 800.0))
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
         harness.state_mut().shared_mut().market = market;
         harness
@@ -568,8 +575,18 @@ mod tests {
         world: &World,
         services: &[(&'static str, RateCard, RouteKind, Option<u32>)],
     ) -> Harness<'static, App> {
+        complete_list_sized(world, services, 1280.0)
+    }
+
+    /// `complete_list` in a window `width` points wide. The Item panel narrows the Buy list, and the
+    /// freight amount needs the room to be hovered.
+    fn complete_list_sized(
+        world: &World,
+        services: &[(&'static str, RateCard, RouteKind, Option<u32>)],
+        width: f32,
+    ) -> Harness<'static, App> {
         let env = make_env(services);
-        let mut harness = start(&env, world);
+        let mut harness = start_sized(&env, world, width);
         harness.run();
         buy_list_for(&mut harness);
         settle(&mut harness, "Oldest: 4m");
@@ -756,7 +773,7 @@ mod tests {
     #[test]
     fn the_freight_hover_lists_every_service() {
         let world = World::new();
-        let mut harness = complete_list(&world, &standard_services());
+        let mut harness = complete_list_sized(&world, &standard_services(), 1600.0);
         hover(&mut harness, "107,998.43");
         assert!(shown(&harness, "Alliance 107,998.43"));
         assert!(shown(&harness, "Haulers 3,011,146.86"));
@@ -1018,7 +1035,7 @@ mod tests {
         );
         let mut services = standard_services();
         services.push(tiny);
-        let mut harness = complete_list(&world, &services);
+        let mut harness = complete_list_sized(&world, &services, 1600.0);
         hover(&mut harness, "107,998.43");
         assert!(shown(&harness, "Tiny: cannot carry Hobgoblin I"));
         assert!(shown(&harness, "Alliance 107,998.43"));
@@ -1744,7 +1761,7 @@ mod tests {
         results.extend_harness(&mut harness);
 
         let world = World::new();
-        let mut harness = complete_list(&world, &standard_services());
+        let mut harness = complete_list_sized(&world, &standard_services(), 1600.0);
         hover(&mut harness, "107,998.43");
         harness.snapshot("buylist-freight-hover");
         results.extend_harness(&mut harness);
