@@ -4,5 +4,6 @@ mod layout_model;
 mod names;
 mod pages;
 mod setup;
+mod setup_structures;
 mod shell;
 mod table;

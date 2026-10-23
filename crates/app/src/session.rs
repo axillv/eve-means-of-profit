@@ -162,6 +162,11 @@ impl Session {
         self.structures = structures;
     }
 
+    /// The structure names EVE gave, with each structure's last check.
+    pub fn structures(&self) -> &StructureNames {
+        &self.structures
+    }
+
     pub fn set_typed_names(&mut self, typed: BTreeMap<i64, String>) {
         self.typed = typed;
     }

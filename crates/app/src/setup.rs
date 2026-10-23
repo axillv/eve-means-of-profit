@@ -5,6 +5,7 @@ mod facilities;
 mod fields;
 mod freight;
 mod price_rule;
+mod structures;
 
 use egui::Ui;
 
@@ -20,6 +21,7 @@ pub enum SetupPanel {
     Facilities,
     FreightServices,
     PriceRule,
+    Structures,
 }
 
 impl SetupPanel {
@@ -28,6 +30,7 @@ impl SetupPanel {
             Self::Facilities => "Facilities",
             Self::FreightServices => "Freight services",
             Self::PriceRule => "Price rule",
+            Self::Structures => "Structures",
         }
     }
 }
@@ -49,5 +52,6 @@ pub fn show(_page: &mut SetupPage, panel: SetupPanel, ui: &mut Ui, cx: &mut Shar
         SetupPanel::Facilities => facilities::show(ui, cx),
         SetupPanel::FreightServices => freight::show(ui, cx),
         SetupPanel::PriceRule => price_rule::show(ui, cx),
+        SetupPanel::Structures => structures::show(ui, cx),
     }
 }
