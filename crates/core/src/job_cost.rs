@@ -21,6 +21,9 @@ pub const SCC_SURCHARGE: Rate = Rate::from_ppm(40_000);
 /// The facility tax of an NPC station: 0.25%.
 pub const NPC_STATION_TAX: Rate = Rate::from_ppm(2_500);
 
+/// The fees of an invention job are charged on this share of the job's item value: 2%.
+const INVENTION_BASE: Rate = Rate::from_ppm(20_000);
+
 /// A rate of 100% in parts per million.
 const FULL_RATE: i128 = 1_000_000;
 /// A structure multiplier of 100 hundredths means no bonus.
@@ -29,7 +32,7 @@ const FULL_MULTIPLIER: u32 = 100;
 /// The facility a job is installed in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CostSetup {
-    /// The system's cost index for the activity: manufacturing or reaction.
+    /// The system's cost index for the activity: manufacturing, reaction or invention.
     pub cost_index: Rate,
     /// The structure's job cost multiplier in hundredths (97 for a Raitaru); `None` for an NPC station.
     pub structure_multiplier: Option<u32>,
@@ -128,6 +131,8 @@ pub enum JobCostError {
     Overflow,
     /// The structure multiplier is above 100 hundredths.
     BadMultiplier(u32),
+    /// The item value of an invention job is below zero.
+    NegativeValue,
 }
 
 impl fmt::Display for JobCostError {
@@ -140,6 +145,7 @@ impl fmt::Display for JobCostError {
                     "structure cost multiplier {hundredths} hundredths is above 100"
                 )
             }
+            Self::NegativeValue => write!(f, "the item value is negative"),
         }
     }
 }
@@ -202,6 +208,31 @@ pub fn step_cost(
     full.plus(last)
 }
 
+/// The cost of one invention job of `runs` attempts on a T2 product whose one manufacturing run is
+/// worth `t2_item_value`.
+///
+/// The fees are charged on 2% of the job's item value, rounded to whole ISK on its own; the system,
+/// bonus, tax and surcharge parts are rounded from that base. Zero runs is no job and costs nothing.
+pub fn invention_job_cost(
+    t2_item_value: Money,
+    runs: u64,
+    setup: &CostSetup,
+) -> Result<JobCost, JobCostError> {
+    check_multiplier(setup)?;
+    if t2_item_value.ten_thousandths() < 0 {
+        return Err(JobCostError::NegativeValue);
+    }
+    if runs == 0 {
+        return Ok(JobCost::zero());
+    }
+    let item_value = t2_item_value
+        .checked_mul_qty(runs)
+        .ok_or(JobCostError::Overflow)?;
+    let base = share(item_value, i128::from(INVENTION_BASE.ppm()), FULL_RATE)?;
+    let cost = fees(base, setup)?;
+    Ok(JobCost { item_value, ..cost })
+}
+
 /// A structure multiplier above 100 hundredths is an error, whatever the run count.
 fn check_multiplier(setup: &CostSetup) -> Result<(), JobCostError> {
     match setup.structure_multiplier {
@@ -212,8 +243,10 @@ fn check_multiplier(setup: &CostSetup) -> Result<(), JobCostError> {
     }
 }
 
-/// The system, bonus, tax and surcharge parts of a job whose estimated item value is `item_value`.
-fn fees(item_value: Money, setup: &CostSetup) -> Result<JobCost, JobCostError> {
+/// The system, bonus, tax and surcharge parts of a job whose fee base is `base`: the estimated item
+/// value of a manufacturing job, or 2% of it for an invention job. The result's `item_value` is `base`.
+fn fees(base: Money, setup: &CostSetup) -> Result<JobCost, JobCostError> {
+    let item_value = base;
     let system_cost = share(item_value, i128::from(setup.cost_index.ppm()), FULL_RATE)?;
     let structure_bonus = match setup.structure_multiplier {
         None => Money::ZERO,
@@ -270,7 +303,9 @@ fn round_isk(numerator: i128, denominator: i128) -> Result<Money, JobCostError> 
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{CostSetup, JobCost, JobCostError, SCC_SURCHARGE, job_cost, step_cost};
+    use super::{
+        CostSetup, JobCost, JobCostError, SCC_SURCHARGE, invention_job_cost, job_cost, step_cost,
+    };
     use crate::industry::{JobSplit, TypeId};
     use crate::money::{Money, Rate};
 
@@ -568,6 +603,104 @@ mod tests {
         assert_eq!(
             one_job(&[(1, 1)], 1, &negative, &setup(0, None, 0)).item_value,
             isk("-10")
+        );
+    }
+
+    fn invention_job(
+        item_value: &str,
+        runs: u64,
+        setup: &CostSetup,
+    ) -> Result<JobCost, JobCostError> {
+        invention_job_cost(isk(item_value), runs, setup)
+    }
+
+    #[test]
+    fn invention_wolf_job_matches_the_cost_api() {
+        let cost = invention_job("14970781", 1, &setup(1_400, Some(97), 10_000)).expect("fits");
+        assert_eq!(
+            cost,
+            JobCost {
+                item_value: isk("14970781"),
+                system_cost: isk("419"),
+                structure_bonus: isk("13"),
+                facility_tax: isk("2994"),
+                scc: isk("11977"),
+                total: isk("15377"),
+            }
+        );
+    }
+
+    #[test]
+    fn invention_jaguar_job_matches_the_cost_api() {
+        let cost = invention_job("14245634", 1, &setup(1_400, Some(97), 10_000)).expect("fits");
+        assert_eq!(cost.item_value, isk("14245634"));
+        assert_eq!(cost.system_cost, isk("399"));
+        assert_eq!(cost.structure_bonus, isk("12"));
+        assert_eq!(cost.facility_tax, isk("2849"));
+        assert_eq!(cost.scc, isk("11397"));
+        assert_eq!(cost.total, isk("14633"));
+    }
+
+    #[test]
+    fn invention_npc_station_job_matches_the_cost_api() {
+        let npc = setup(1_400, None, 2_500);
+        let one = invention_job("101786", 1, &npc).expect("fits");
+        assert_eq!(
+            one,
+            JobCost {
+                item_value: isk("101786"),
+                system_cost: isk("3"),
+                structure_bonus: Money::ZERO,
+                facility_tax: isk("5"),
+                scc: isk("81"),
+                total: isk("89"),
+            }
+        );
+        let many = invention_job("101786", 22, &npc).expect("fits");
+        assert_eq!(many.item_value, isk("2239292"));
+        assert_eq!(many.system_cost, isk("63"));
+        assert_eq!(many.facility_tax, isk("112"));
+        assert_eq!(many.scc, isk("1791"));
+        assert_eq!(many.total, isk("1966"));
+    }
+
+    #[test]
+    fn invention_without_index_or_tax_pays_only_the_surcharge() {
+        let cost = invention_job("101786", 1, &setup(0, None, 0)).expect("fits");
+        assert_eq!(cost.system_cost, Money::ZERO);
+        assert_eq!(cost.facility_tax, Money::ZERO);
+        assert_eq!(cost.total, isk("81"));
+    }
+
+    #[test]
+    fn invention_zero_value_is_not_negative() {
+        let cost = invention_job("0", 3, &setup(1_400, None, 2_500)).expect("fits");
+        assert_eq!(cost, JobCost::zero());
+    }
+
+    #[test]
+    fn invention_zero_runs_cost_nothing() {
+        let cost = invention_job("101786", 0, &setup(1_400, None, 2_500)).expect("fits");
+        assert_eq!(cost, JobCost::zero());
+    }
+
+    #[test]
+    fn invention_job_errors() {
+        assert_eq!(
+            invention_job("-1", 1, &setup(1_400, None, 0)),
+            Err(JobCostError::NegativeValue)
+        );
+        assert_eq!(
+            JobCostError::NegativeValue.to_string(),
+            "the item value is negative"
+        );
+        assert_eq!(
+            invention_job("101786", 1, &setup(1_400, Some(101), 0)),
+            Err(JobCostError::BadMultiplier(101))
+        );
+        assert_eq!(
+            invention_job_cost(Money::from_ten_thousandths(i64::MAX), 2, &setup(0, None, 0)),
+            Err(JobCostError::Overflow)
         );
     }
 }
