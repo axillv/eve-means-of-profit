@@ -15,3 +15,4 @@ mod setup_costs;
 mod setup_structures;
 mod shell;
 mod table;
+mod ui;

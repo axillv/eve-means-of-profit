@@ -8,9 +8,8 @@ mod tests {
     use std::io::Write;
     use std::ops::ControlFlow;
     use std::path::{Path, PathBuf};
-    use std::thread;
-    use std::time::Duration;
 
+    use crate::ui::{click, on_row, shown, snapshot, top, until};
     use egui::vec2;
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
@@ -265,50 +264,11 @@ mod tests {
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"))
     }
 
-    fn shown(harness: &Harness<'_, App>, text: &str) -> bool {
-        harness.query_all_by_label(text).next().is_some()
-    }
-
     /// Runs frames until the start-up read has arrived: the page's loading line is gone.
     fn loaded(harness: &mut Harness<'_, App>) {
-        for _ in 0..500 {
-            harness.run();
-            if !shown(harness, "Loading character data…") {
-                return;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        panic!("the saved data did not load");
-    }
-
-    /// The height of the first node labelled `text`, to tell the rows apart.
-    fn top(harness: &Harness<'_, App>, text: &str) -> f32 {
-        harness
-            .query_all_by_label(text)
-            .next()
-            .unwrap_or_else(|| panic!("no node labelled {text:?}"))
-            .rect()
-            .min
-            .y
-    }
-
-    /// Whether a node labelled `text` sits on the same row as the first node labelled `anchor`.
-    fn on_row(harness: &Harness<'_, App>, anchor: &str, text: &str) -> bool {
-        let row = top(harness, anchor);
-        harness
-            .query_all_by_label(text)
-            .any(|node| (node.rect().min.y - row).abs() < 1.0)
-    }
-
-    /// Clicks the rail entry `label`. The rail is drawn first, so its entry is the first node with
-    /// that label.
-    fn rail(harness: &mut Harness<'_, App>, label: &str) {
-        harness
-            .get_all_by_label(label)
-            .next()
-            .expect("a rail entry")
-            .click();
-        harness.run();
+        until(harness, "the saved data", |h| {
+            !shown(h, "Loading character data…")
+        });
     }
 
     #[test]
@@ -317,7 +277,7 @@ mod tests {
         save_jobs(&env, main_jobs());
         let mut harness = start(&env, vec![character(MAIN, "Main")]);
         loaded(&mut harness);
-        rail(&mut harness, "Industry jobs");
+        click(&mut harness, "Industry jobs");
 
         assert!(shown(&harness, "4 jobs · 2 ready to deliver"));
         assert!(shown(&harness, "Reactions"));
@@ -329,12 +289,12 @@ mod tests {
         assert!(shown(&harness, "Copying"));
         assert!(shown(&harness, "Rifter Blueprint"));
         assert!(shown(&harness, "paused"));
-        assert!(on_row(&harness, "Manufacturing", "10"));
-        assert!(on_row(&harness, "Manufacturing", "Main"));
-        assert!(on_row(&harness, "Manufacturing", "Home Fort"));
-        assert!(on_row(&harness, "Manufacturing", "in 2h"));
-        assert!(on_row(&harness, "Reactions", "ready to deliver"));
-        assert!(on_row(&harness, "Copying", "paused"));
+        assert!(on_row(&harness, "Manufacturing", &["10"]));
+        assert!(on_row(&harness, "Manufacturing", &["Main"]));
+        assert!(on_row(&harness, "Manufacturing", &["Home Fort"]));
+        assert!(on_row(&harness, "Manufacturing", &["in 2h"]));
+        assert!(on_row(&harness, "Reactions", &["ready to deliver"]));
+        assert!(on_row(&harness, "Copying", &["paused"]));
         assert!(shown(&harness, "ready to deliver"));
         assert!(!shown(&harness, "1970-01-11 10:00"));
     }
@@ -345,13 +305,13 @@ mod tests {
         save_jobs(&env, main_jobs());
         let mut harness = start(&env, vec![character(MAIN, "Main")]);
         loaded(&mut harness);
-        rail(&mut harness, "Industry jobs");
+        click(&mut harness, "Industry jobs");
 
         assert!(top(&harness, "Reactions") < top(&harness, "Invention"));
         assert!(top(&harness, "Invention") < top(&harness, "Manufacturing"));
         assert!(top(&harness, "Manufacturing") < top(&harness, "Copying"));
-        assert!(on_row(&harness, "Invention", "Hobgoblin II Blueprint"));
-        assert!(on_row(&harness, "Invention", "ready to deliver"));
+        assert!(on_row(&harness, "Invention", &["Hobgoblin II Blueprint"]));
+        assert!(on_row(&harness, "Invention", &["ready to deliver"]));
     }
 
     #[test]
@@ -360,7 +320,7 @@ mod tests {
         save_jobs(&env, main_jobs());
         let mut harness = start(&env, vec![character(MAIN, "Main")]);
         loaded(&mut harness);
-        rail(&mut harness, "Industry jobs");
+        click(&mut harness, "Industry jobs");
         harness
             .get_all_by_label("Show finished")
             .next()
@@ -371,7 +331,7 @@ mod tests {
         assert!(shown(&harness, "5 jobs · 2 ready to deliver"));
         assert!(shown(&harness, "delivered"));
         assert!(top(&harness, "delivered") > top(&harness, "Copying"));
-        assert!(on_row(&harness, "delivered", "1970-01-11 10:00"));
+        assert!(on_row(&harness, "delivered", &["1970-01-11 10:00"]));
         assert!(shown(&harness, "1970-01-11 10:00"));
     }
 
@@ -392,7 +352,7 @@ mod tests {
         );
         let mut harness = start(&env, vec![character(MAIN, "Main")]);
         loaded(&mut harness);
-        rail(&mut harness, "Industry jobs");
+        click(&mut harness, "Industry jobs");
 
         assert!(shown(&harness, "Activity 2"));
         assert!(shown(&harness, "Rifter Blueprint"));
@@ -403,7 +363,7 @@ mod tests {
         let env = env();
         let mut harness = start(&env, Vec::new());
         loaded(&mut harness);
-        rail(&mut harness, "Industry jobs");
+        click(&mut harness, "Industry jobs");
 
         assert!(shown(&harness, EMPTY));
     }
@@ -414,8 +374,8 @@ mod tests {
         save_jobs(&env, main_jobs());
         let mut harness = start(&env, vec![character(MAIN, "Main")]);
         loaded(&mut harness);
-        rail(&mut harness, "Industry jobs");
+        click(&mut harness, "Industry jobs");
         harness.run();
-        harness.snapshot("jobs-page");
+        snapshot(&mut harness, "jobs-page");
     }
 }

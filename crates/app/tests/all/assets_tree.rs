@@ -12,9 +12,8 @@ mod tests {
     use std::ops::ControlFlow;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex, PoisonError};
-    use std::thread;
-    use std::time::Duration;
 
+    use crate::ui::{click, find, shown, snapshot, until};
     use egui::{Event, Key, Modifiers, vec2};
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
@@ -371,44 +370,6 @@ mod tests {
         }
     }
 
-    /// The node that shows `text`: its label, or its value for the widgets that keep their text there
-    /// (the dropdown and the table cells).
-    fn find<'h>(harness: &'h Harness<'_, App>, text: &'h str) -> Option<egui_kittest::Node<'h>> {
-        harness
-            .query_all_by_label(text)
-            .next()
-            .or_else(|| harness.query_all_by_value(text).next())
-    }
-
-    /// Whether some node shows `text`.
-    fn shown(harness: &Harness<'_, App>, text: &str) -> bool {
-        find(harness, text).is_some()
-    }
-
-    /// Runs frames until `done` holds, letting the worker finish between them.
-    fn until(harness: &mut Harness<'_, App>, what: &str, done: impl Fn(&Harness<'_, App>) -> bool) {
-        for _ in 0..500 {
-            harness.run();
-            if done(harness) {
-                return;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        panic!("{what} did not show");
-    }
-
-    /// Clicks the node that shows `label`, after scrolling it into view.
-    fn click(harness: &mut Harness<'_, App>, label: &str) {
-        find(harness, label)
-            .unwrap_or_else(|| panic!("no node labelled {label}"))
-            .scroll_to_me();
-        harness.run_steps(2);
-        find(harness, label)
-            .unwrap_or_else(|| panic!("no node labelled {label}"))
-            .click();
-        harness.run_steps(3);
-    }
-
     /// Right-clicks the node that shows `label` and opens its menu.
     fn right_click(harness: &mut Harness<'_, App>, label: &str) {
         find(harness, label)
@@ -759,6 +720,6 @@ mod tests {
         harness.run();
         click(&mut harness, JITA_4_4_NAME);
         harness.run();
-        harness.snapshot("assets-tree");
+        snapshot(&mut harness, "assets-tree");
     }
 }

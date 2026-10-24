@@ -9,9 +9,8 @@ mod tests {
     use std::ops::ControlFlow;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex, PoisonError};
-    use std::thread;
-    use std::time::Duration;
 
+    use crate::ui::{click, coloured, hover, on_row, shown, snapshot, top, until};
     use egui::vec2;
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
@@ -301,73 +300,24 @@ mod tests {
         harness
     }
 
-    fn shown(harness: &Harness<'_, App>, text: &str) -> bool {
-        harness.query_all_by_label(text).next().is_some()
-    }
-
     /// Runs frames until the start-up read has arrived: the page's loading line is gone.
     fn loaded(harness: &mut Harness<'_, App>) {
-        for _ in 0..500 {
-            harness.run();
-            if !shown(harness, "Loading character data…") {
-                return;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        panic!("the saved data did not load");
+        until(harness, "the saved data", |h| {
+            !shown(h, "Loading character data…")
+        });
     }
 
     /// Asks the Forge for its file and runs frames until the file is held.
     fn hold_forge(harness: &mut Harness<'_, App>) {
-        {
+        let market = {
             let shared = harness.state_mut().shared_mut();
             let market = Arc::clone(&shared.market);
             market.refresh(&shared.worker, NOW, true);
-        }
-        for _ in 0..500 {
-            harness.run();
-            if harness
-                .state_mut()
-                .shared_mut()
-                .market
-                .published_at()
-                .is_some()
-            {
-                return;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        panic!("the Forge file did not arrive");
-    }
-
-    /// The height of the first node labelled `text`, to tell the rows apart.
-    fn top(harness: &Harness<'_, App>, text: &str) -> f32 {
-        harness
-            .query_all_by_label(text)
-            .next()
-            .unwrap_or_else(|| panic!("no node labelled {text:?}"))
-            .rect()
-            .min
-            .y
-    }
-
-    /// Whether a node labelled `text` sits on the same row as the first node labelled `anchor`.
-    fn on_row(harness: &Harness<'_, App>, anchor: &str, text: &str) -> bool {
-        let row = top(harness, anchor);
-        harness
-            .query_all_by_label(text)
-            .any(|node| (node.rect().min.y - row).abs() < 1.0)
-    }
-
-    /// Clicks the rail entry `label`. The rail is drawn first, so its entry is the first node with
-    /// that label.
-    fn rail(harness: &mut Harness<'_, App>, label: &str) {
-        harness
-            .get_all_by_label(label)
-            .next()
-            .expect("a rail entry")
-            .click();
-        harness.run();
+            market
+        };
+        until(harness, "the Forge file", |_| {
+            market.published_at().is_some()
+        });
     }
 
     #[test]
@@ -378,7 +328,7 @@ mod tests {
         let mut harness = start(&env, vec![character(MAIN, "Main")], Arc::clone(&requests));
         loaded(&mut harness);
         hold_forge(&mut harness);
-        rail(&mut harness, "Orders");
+        click(&mut harness, "Orders");
 
         assert!(shown(&harness, "Sell"));
         assert!(shown(&harness, "Sell (corp)"));
@@ -405,22 +355,22 @@ mod tests {
         let mut harness = start(&env, vec![character(MAIN, "Main")], requests);
         loaded(&mut harness);
         hold_forge(&mut harness);
-        rail(&mut harness, "Orders");
+        click(&mut harness, "Orders");
 
         let pau = "Particle Accelerator Unit";
         assert!(top(&harness, pau) < top(&harness, "Morphite"));
-        assert!(on_row(&harness, pau, "100 / 200"));
-        assert!(on_row(&harness, pau, "61,500.00"));
-        assert!(on_row(&harness, pau, "in 3d"));
-        assert!(on_row(&harness, pau, "61,200.00"));
-        assert!(on_row(&harness, pau, "2m"));
-        assert!(on_row(&harness, pau, "Main"));
-        assert!(on_row(&harness, "Morphite", "10 / 10"));
-        assert!(on_row(&harness, "Morphite", "2,100.00"));
-        assert!(on_row(&harness, "Morphite", "expired"));
-        assert!(on_row(&harness, "Morphite", "2,150.00"));
-        assert!(on_row(&harness, "Morphite", "1970-01-11 10:00"));
-        assert!(on_row(&harness, "Sell (corp)", "50 / 50"));
+        assert!(on_row(&harness, pau, &["100 / 200"]));
+        assert!(on_row(&harness, pau, &["61,500.00"]));
+        assert!(on_row(&harness, pau, &["in 3d"]));
+        assert!(on_row(&harness, pau, &["61,200.00"]));
+        assert!(on_row(&harness, pau, &["2m"]));
+        assert!(on_row(&harness, pau, &["Main"]));
+        assert!(on_row(&harness, "Morphite", &["10 / 10"]));
+        assert!(on_row(&harness, "Morphite", &["2,100.00"]));
+        assert!(on_row(&harness, "Morphite", &["expired"]));
+        assert!(on_row(&harness, "Morphite", &["2,150.00"]));
+        assert!(on_row(&harness, "Morphite", &["1970-01-11 10:00"]));
+        assert!(on_row(&harness, "Sell (corp)", &["50 / 50"]));
     }
 
     #[test]
@@ -431,19 +381,27 @@ mod tests {
         let mut harness = start(&env, vec![character(MAIN, "Main")], requests);
         loaded(&mut harness);
         hold_forge(&mut harness);
-        rail(&mut harness, "Orders");
+        click(&mut harness, "Orders");
 
-        let at = harness
+        assert_eq!(hover(&mut harness, "2,150.00"), vec!["Beaten by 50.00"]);
+    }
+
+    #[test]
+    fn a_beaten_forge_best_is_amber() {
+        let env = env();
+        saved::save_character(&esi_dir(&env), &main_data(NOW - 120)).expect("Main's orders saved");
+        let requests = Arc::new(Mutex::new(0));
+        let mut harness = start(&env, vec![character(MAIN, "Main")], requests);
+        loaded(&mut harness);
+        hold_forge(&mut harness);
+        click(&mut harness, "Orders");
+
+        let area = harness
             .get_all_by_label("2,150.00")
             .next()
             .expect("the Forge best cell of the buy order")
-            .rect()
-            .center();
-        harness.hover_at(at);
-        for _ in 0..60 {
-            harness.run();
-        }
-        assert!(shown(&harness, "Beaten by 50.00"));
+            .rect();
+        assert!(coloured(&mut harness, area));
     }
 
     #[test]
@@ -454,19 +412,9 @@ mod tests {
         let mut harness = start(&env, vec![character(MAIN, "Main")], requests);
         loaded(&mut harness);
         hold_forge(&mut harness);
-        rail(&mut harness, "Orders");
+        click(&mut harness, "Orders");
 
-        let at = harness
-            .get_all_by_label("61,200.00")
-            .next()
-            .expect("the Forge best cell of the sell order")
-            .rect()
-            .center();
-        harness.hover_at(at);
-        for _ in 0..60 {
-            harness.run();
-        }
-        assert!(shown(&harness, "Beaten by 300.00"));
+        assert_eq!(hover(&mut harness, "61,200.00"), vec!["Beaten by 300.00"]);
     }
 
     #[test]
@@ -477,7 +425,7 @@ mod tests {
         let mut harness = start(&env, vec![character(MAIN, "Main")], requests);
         loaded(&mut harness);
         hold_forge(&mut harness);
-        rail(&mut harness, "Orders");
+        click(&mut harness, "Orders");
 
         assert!(shown(
             &harness,
@@ -515,18 +463,16 @@ mod tests {
         let mut harness = start(&env, vec![character(MAIN, "Main")], requests);
         loaded(&mut harness);
         hold_forge(&mut harness);
-        rail(&mut harness, "Orders");
+        click(&mut harness, "Orders");
 
         assert!(shown(&harness, "61,000.00"));
-        harness
+        let area = harness
             .get_all_by_label("61,200.00")
             .next()
             .expect("the Forge best cell")
-            .hover();
-        for _ in 0..60 {
-            harness.run();
-        }
-        assert!(!shown(&harness, "Beaten by 200.00"));
+            .rect();
+        assert!(!coloured(&mut harness, area));
+        assert!(hover(&mut harness, "61,200.00").is_empty());
     }
 
     #[test]
@@ -536,7 +482,7 @@ mod tests {
         let requests = Arc::new(Mutex::new(0));
         let mut harness = start(&env, vec![character(MAIN, "Main")], Arc::clone(&requests));
         loaded(&mut harness);
-        rail(&mut harness, "Orders");
+        click(&mut harness, "Orders");
         for _ in 0..20 {
             harness.run();
         }
@@ -547,7 +493,7 @@ mod tests {
         ));
         assert_eq!(*requests.lock().unwrap_or_else(PoisonError::into_inner), 0);
         assert!(!shown(&harness, "61,200.00"));
-        assert!(on_row(&harness, "Particle Accelerator Unit", "—"));
+        assert!(on_row(&harness, "Particle Accelerator Unit", &["—"]));
     }
 
     #[test]
@@ -557,7 +503,7 @@ mod tests {
         let requests = Arc::new(Mutex::new(0));
         let mut harness = start(&env, vec![character(MAIN, "Main")], requests);
         loaded(&mut harness);
-        rail(&mut harness, "Orders");
+        click(&mut harness, "Orders");
 
         harness
             .get_all_by_label("100 / 200")
@@ -574,7 +520,7 @@ mod tests {
         let requests = Arc::new(Mutex::new(0));
         let mut harness = start(&env, Vec::new(), requests);
         loaded(&mut harness);
-        rail(&mut harness, "Orders");
+        click(&mut harness, "Orders");
 
         assert!(shown(&harness, EMPTY));
     }
@@ -587,8 +533,7 @@ mod tests {
         let mut harness = start(&env, vec![character(MAIN, "Main")], requests);
         loaded(&mut harness);
         hold_forge(&mut harness);
-        rail(&mut harness, "Orders");
-        harness.run();
-        harness.snapshot("orders-page");
+        click(&mut harness, "Orders");
+        snapshot(&mut harness, "orders-page");
     }
 }
