@@ -4,18 +4,23 @@
 
 use std::collections::BTreeMap;
 
-use egui::{Checkbox, DragValue, Id, RichText, Ui};
+use egui::text::{LayoutJob, TextFormat};
+use egui::{Checkbox, DragValue, Id, Label, RichText, Sense, TextStyle, Ui};
 use mop_core::format::group_thousands;
 use mop_core::industry::{Activity, JobSplit, Recipe, RecipeBook, TypeId};
+use mop_core::make_or_buy::{Choice, Decision};
 use mop_core::plan::{BuyLine, Plan, Step};
 use mop_sde::Sde;
 use mop_store::PlanRecord;
 
+use super::costs::{self, Costs, PENDING};
+use super::prices::age_text;
 use super::state::{BuildPage, NO_REACTIONS, me_of, type_name};
-use crate::Shared;
 use crate::status::Notice;
 use crate::table::Table;
 use crate::table::model::{Cell, Column, ColumnKind, Row};
+use crate::theme::Style;
+use crate::{INDUSTRY_AGE_SECS, Shared};
 
 /// A change the table asked for, applied to the plan after the table is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +48,25 @@ struct View {
     me: Option<u8>,
     jobs_text: String,
     jobs_hover: String,
+    cost: Figure,
+    decide: Figure,
+}
+
+/// The text of a Job cost or Make or buy cell, its tone, its hover, and the change a click asks for.
+#[derive(Debug, Default)]
+struct Figure {
+    text: String,
+    tone: Tone,
+    hover: String,
+    click: Option<Edit>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Tone {
+    #[default]
+    Plain,
+    Mute,
+    Amber,
 }
 
 pub fn show(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
@@ -66,10 +90,24 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
             return Vec::new();
         }
     };
+    let now = (cx.clock)();
+    let costs = costs::compute(ui, page, record, plan, cx, now);
+    let mut names = BTreeMap::new();
+    let steps = costs
+        .jobs
+        .values()
+        .filter_map(|outcome| outcome.as_ref().ok());
+    for step in steps {
+        for &type_id in &step.missing_prices {
+            names
+                .entry(type_id)
+                .or_insert_with(|| type_name(type_id, cx.sde.as_ref(), &mut cx.notices));
+        }
+    }
     let lines = tree(plan, &page.recipes, record.product);
     let views: BTreeMap<u64, View> = lines
         .iter()
-        .map(|line| (u64::from(line.type_id), view(line, record)))
+        .map(|line| (u64::from(line.type_id), view(line, record, &costs, &names)))
         .collect();
     let rows: Vec<Row> = lines
         .iter()
@@ -82,8 +120,14 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
             )
         })
         .collect();
+    if let Some(error) = &costs.error {
+        ui.label(
+            RichText::new(format!("Could not work out the costs: {error}")).color(cx.style.neg),
+        );
+    }
     let columns = columns();
     let mut edits = Vec::new();
+    let style = cx.style;
     let mut draw = |ui: &mut Ui, key: u64, column: &'static str| -> bool {
         let Some(view) = views.get(&key) else {
             return false;
@@ -92,6 +136,8 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
             "build" => build_tick(ui, view, &mut edits),
             "me" => me_box(ui, view, &mut edits),
             "jobs" => jobs_label(ui, view),
+            "cost" => figure_cell(ui, &view.cost, &style, &mut edits),
+            "decide" => figure_cell(ui, &view.decide, &style, &mut edits),
             _ => false,
         }
     };
@@ -102,7 +148,87 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
     {
         cx.selection.item = Some(type_id);
     }
+    total_line(ui, &costs, &cx.style);
     edits
+}
+
+/// A Job cost or Make or buy cell: its text in its tone, its hover, and its click. Returns
+/// whether it drew the cell.
+fn figure_cell(ui: &mut Ui, figure: &Figure, style: &Style, edits: &mut Vec<Edit>) -> bool {
+    if figure.text.is_empty() {
+        return false;
+    }
+    let color = match figure.tone {
+        Tone::Plain => style.text,
+        Tone::Mute => style.mute,
+        Tone::Amber => style.stale,
+    };
+    let mut response =
+        ui.add(Label::new(RichText::new(figure.text.as_str()).color(color)).sense(Sense::click()));
+    if !figure.hover.is_empty() {
+        response = response.on_hover_text(figure.hover.as_str());
+    }
+    if let Some(edit) = figure.click
+        && response.clicked()
+    {
+        edits.push(edit);
+    }
+    true
+}
+
+/// The total under the table: the built steps' job costs, and the age of the data behind them.
+fn total_line(ui: &mut Ui, costs: &Costs, style: &Style) {
+    if costs.error.is_some() {
+        return;
+    }
+    let (sum, incomplete) = costs.total();
+    let sum_text = if costs.pending {
+        PENDING.to_owned()
+    } else {
+        sum.map_or_else(|| "—".to_owned(), |money| money.format_isk())
+    };
+    let plain = TextFormat {
+        color: ui.visuals().text_color(),
+        font_id: TextStyle::Body.resolve(ui.style()),
+        ..TextFormat::default()
+    };
+    let amber = TextFormat {
+        color: style.stale,
+        ..plain.clone()
+    };
+    let age_format = |seconds: Option<i64>| {
+        if seconds.is_some_and(|seconds| seconds > INDUSTRY_AGE_SECS) {
+            amber.clone()
+        } else {
+            plain.clone()
+        }
+    };
+    let mut job = LayoutJob::default();
+    job.append(
+        &format!("Job cost {sum_text} · cost indices "),
+        0.0,
+        plain.clone(),
+    );
+    job.append(
+        &age_label(costs.systems_age),
+        0.0,
+        age_format(costs.systems_age),
+    );
+    job.append(" · adjusted prices ", 0.0, plain.clone());
+    job.append(
+        &age_label(costs.prices_age),
+        0.0,
+        age_format(costs.prices_age),
+    );
+    if incomplete && !costs.pending {
+        job.append(" incomplete", 0.0, amber);
+    }
+    ui.label(job);
+}
+
+/// How old a fetch is, or `not fetched`.
+fn age_label(seconds: Option<i64>) -> String {
+    seconds.map_or_else(|| "not fetched".to_owned(), age_text)
 }
 
 /// The Build tick: drawn for types with a recipe. Returns whether it drew the cell.
@@ -248,7 +374,7 @@ fn walk<'a>(type_id: TypeId, depth: u32, tree: &Tree<'a>, out: &mut Vec<Line<'a>
     }
 }
 
-fn view(line: &Line, record: &PlanRecord) -> View {
+fn view(line: &Line, record: &PlanRecord, costs: &Costs, names: &BTreeMap<TypeId, String>) -> View {
     let is_product = line.type_id == record.product;
     let reaction = line
         .recipe
@@ -275,6 +401,114 @@ fn view(line: &Line, record: &PlanRecord) -> View {
             .step
             .map(|step| jobs_hover(&step.jobs))
             .unwrap_or_default(),
+        cost: cost_figure(line, costs, names),
+        decide: decide_figure(line, record, costs),
+    }
+}
+
+/// The Job cost of a built step: the total, amber with ` incomplete` when an adjusted price is
+/// missing, or the set-up message in mute.
+fn cost_figure(line: &Line, costs: &Costs, names: &BTreeMap<TypeId, String>) -> Figure {
+    let Some(outcome) = costs.jobs.get(&line.type_id) else {
+        return Figure::default();
+    };
+    match outcome {
+        Err(message) if message == PENDING => Figure {
+            text: PENDING.to_owned(),
+            ..Figure::default()
+        },
+        Err(message) => Figure {
+            text: message.clone(),
+            tone: Tone::Mute,
+            ..Figure::default()
+        },
+        Ok(step) => {
+            let cost = &step.cost;
+            let mut figure = Figure {
+                text: cost.total.format_isk(),
+                hover: format!(
+                    "item value {} · system cost {} · structure bonus -{} · facility tax {} · SCC {}",
+                    cost.item_value.format_isk(),
+                    cost.system_cost.format_isk(),
+                    cost.structure_bonus.format_isk(),
+                    cost.facility_tax.format_isk(),
+                    cost.scc.format_isk(),
+                ),
+                ..Figure::default()
+            };
+            if !step.missing_prices.is_empty() {
+                let listed: Vec<String> = step
+                    .missing_prices
+                    .iter()
+                    .map(|type_id| {
+                        names
+                            .get(type_id)
+                            .cloned()
+                            .unwrap_or_else(|| type_id.to_string())
+                    })
+                    .collect();
+                figure.text.push_str(" incomplete");
+                figure.tone = Tone::Amber;
+                figure.hover = format!(
+                    "{} · No adjusted price: {}",
+                    figure.hover,
+                    listed.join(", ")
+                );
+            }
+            figure
+        }
+    }
+}
+
+/// The Make or buy verdict. A part whose activity cannot be costed shows its set-up message in
+/// mute. A verdict the row does not match is amber, and a click applies it.
+fn decide_figure(line: &Line, record: &PlanRecord, costs: &Costs) -> Figure {
+    if line.type_id == record.product || line.recipe.is_none() {
+        return Figure::default();
+    }
+    if let Some(message) = costs.messages.get(&line.type_id) {
+        return Figure {
+            text: message.clone(),
+            tone: Tone::Mute,
+            ..Figure::default()
+        };
+    }
+    match costs.decisions.get(&line.type_id) {
+        Some(decision) => decision_figure(line, decision, costs.reasons.get(&line.type_id)),
+        None => Figure::default(),
+    }
+}
+
+fn decision_figure(line: &Line, decision: &Decision, reason: Option<&String>) -> Figure {
+    let mut text = reason.cloned().unwrap_or_else(|| decision.reason_text());
+    if !decision.job_cost_incomplete.is_empty() {
+        text.push_str(" (job cost incomplete)");
+    }
+    match decision.choice {
+        Choice::Unknown => Figure {
+            text,
+            tone: Tone::Mute,
+            ..Figure::default()
+        },
+        Choice::Build | Choice::Buy => {
+            let build = decision.choice == Choice::Build;
+            if build == line.step.is_some() {
+                return Figure {
+                    text,
+                    ..Figure::default()
+                };
+            }
+            Figure {
+                text,
+                tone: Tone::Amber,
+                hover: if build {
+                    "Click to build this part".to_owned()
+                } else {
+                    "Click to buy this part".to_owned()
+                },
+                click: Some(Edit::Build(line.type_id, build)),
+            }
+        }
     }
 }
 
@@ -320,6 +554,8 @@ fn row(line: &Line, view: Option<&View>, sde: Option<&Sde>, notices: &mut Vec<No
         }
         (None, None) => {}
     }
+    cells.push(Cell::text(""));
+    cells.push(Cell::text(""));
     Row {
         key: u64::from(line.type_id),
         depth: line.depth,
@@ -367,5 +603,7 @@ fn columns() -> Vec<Column> {
         column("runs", "Runs", ColumnKind::Number, 80.0),
         column("jobs", "Jobs", ColumnKind::Number, 80.0),
         column("spare", "Spare", ColumnKind::Number, 90.0),
+        column("cost", "Job cost", ColumnKind::Number, 150.0),
+        column("decide", "Make or buy", ColumnKind::Text, 330.0),
     ]
 }

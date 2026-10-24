@@ -35,6 +35,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use egui::{Context, Key, Modifiers, Ui, ViewportCommand};
 use egui_dock::DockState;
+use mop_esi::character_data::Refreshed;
+use mop_esi::error::EsiError;
+use mop_esi::industry::{self as esi_industry, IndustryData, IndustryKind};
 use mop_sde::{
     Fetch, FetchError, ImportReport, Sde, SdeBuild, SdeError, download_and_import, latest_build,
     needs_update, update_due,
@@ -58,6 +61,13 @@ use worker::{Job, Worker, lock};
 
 const USER_DB: &str = "user.sqlite";
 const SDE_DB: &str = "sde.sqlite";
+/// Seconds before a kind of industry data is fetched again after a fetch.
+const INDUSTRY_RETRY_SECS: i64 = 60;
+/// Seconds before a kind of industry data is fetched again after a failed fetch.
+const INDUSTRY_ERROR_RETRY_SECS: i64 = 300;
+/// The age a fetched kind of industry data is treated as fresh for, when ESI gave no expiry. The
+/// Steps total line shows an older age in amber.
+pub(crate) const INDUSTRY_AGE_SECS: i64 = 3_600;
 /// Character data older than this (one day, in seconds) is worth a warning at start.
 const STALE_DATA_SECS: i64 = 86_400;
 /// Unix seconds, from the system or a fixed value in tests.
@@ -90,6 +100,16 @@ pub enum Event {
         done: u64,
         total: Option<u64>,
     },
+    /// The saved industry data, read at start; the error text when it could not be read.
+    IndustryLoaded(Result<IndustryData, String>),
+    /// A refresh of one kind of industry data finished: the copy it worked on, its outcome, and
+    /// whether the saved file could not be read before the refresh (so the refresh replaces it).
+    Industry {
+        kind: IndustryKind,
+        data: IndustryData,
+        result: Result<Refreshed, EsiError>,
+        unreadable: bool,
+    },
     /// A download, check and import finished, or failed.
     Finished {
         update: bool,
@@ -114,6 +134,8 @@ pub struct Shared {
     pub session: Session,
     /// The item, place and character picked on the pages. Not saved.
     pub selection: Selection,
+    /// The EVE industry data the Steps table reads: cost indices and adjusted prices.
+    pub industry: IndustryData,
 }
 
 impl Shared {
@@ -193,6 +215,32 @@ pub struct App {
     setup_page: SetupPage,
     setup_dock: DockState<SetupPanel>,
     settings_open: bool,
+    /// Whether the saved industry data has been read.
+    industry_loaded: bool,
+    /// Per kind of industry data: whether a refresh is running and when it may run again.
+    industry_timing: IndustryTimings,
+}
+
+/// When one kind of industry data may be fetched again, and whether a request is running.
+#[derive(Debug, Default, Clone, Copy)]
+struct IndustryTiming {
+    busy: bool,
+    next: i64,
+}
+
+#[derive(Debug, Default)]
+struct IndustryTimings {
+    systems: IndustryTiming,
+    prices: IndustryTiming,
+}
+
+impl IndustryTimings {
+    fn get_mut(&mut self, kind: IndustryKind) -> &mut IndustryTiming {
+        match kind {
+            IndustryKind::Systems => &mut self.systems,
+            IndustryKind::Prices => &mut self.prices,
+        }
+    }
 }
 
 impl App {
@@ -203,13 +251,7 @@ impl App {
         fs::create_dir_all(&config.cache_dir)?;
         let now = (config.clock)();
         let opened = Store::open(&config.data_dir.join(USER_DB), now)?;
-        let mut notices = Vec::new();
-        if let Some(old) = &opened.started_fresh {
-            notices.push(Notice::info(format!(
-                "Your saved data came from an earlier test build and was set aside as {}. Starting fresh.",
-                old.display()
-            )));
-        }
+        let notices = fresh_start_notice(opened.started_fresh.as_ref());
         let mut store = opened.store;
         let recorder = Arc::new(history::Recorder::open(
             &config.data_dir.join(USER_DB),
@@ -242,6 +284,7 @@ impl App {
                 clock: config.clock,
                 session: Session::new(config.eve),
                 selection: Selection::default(),
+                industry: IndustryData::default(),
             },
             data_dir: config.data_dir,
             sde_path,
@@ -270,8 +313,11 @@ impl App {
             setup_page: SetupPage,
             setup_dock: dock::setup_layout(),
             settings_open: false,
+            industry_loaded: false,
+            industry_timing: IndustryTimings::default(),
         };
         app.spawn_session_load();
+        app.spawn_industry_load();
         if app.shared.sde.is_none() {
             app.start_first_run();
         } else if update_due(settings.last_sde_check, now) {
@@ -289,6 +335,7 @@ impl App {
     pub fn show(&mut self, ui: &mut Ui) {
         self.drain_events();
         history::background_refresh(&mut self.shared, &mut self.history_checked);
+        self.refresh_industry_when_due();
         for error in self.recorder.take_errors() {
             self.shared.notices.push(Notice::error(error));
         }
@@ -449,6 +496,13 @@ impl App {
         match event {
             Event::Loaded(loaded) => self.loaded(loaded),
             Event::Checked { first_run, result } => self.checked(first_run, result),
+            Event::IndustryLoaded(result) => self.industry_loaded(result),
+            Event::Industry {
+                kind,
+                data,
+                result,
+                unreadable,
+            } => self.industry_refreshed(kind, &data, result, unreadable),
             Event::Progress {
                 update,
                 done,
@@ -621,6 +675,136 @@ impl App {
         self.shared.worker.run(job);
     }
 
+    /// Reads the saved industry data on the worker. Refreshes wait for it.
+    fn spawn_industry_load(&self) {
+        let (tx, ctx) = (self.events_tx.clone(), self.ctx.clone());
+        let dir = self.data_dir.join("esi");
+        let job: Job = Box::new(move || {
+            let loaded = esi_industry::load_industry(&dir).map_err(|error| error.to_string());
+            notify(&tx, &ctx, Event::IndustryLoaded(loaded));
+        });
+        self.shared.worker.run(job);
+    }
+
+    /// Starts a refresh of the industry kinds that are due, while a plan is shown on the Build
+    /// page. One refresh per kind at a time; nothing is requested before the saved data is read.
+    fn refresh_industry_when_due(&mut self) {
+        if !self.industry_loaded
+            || !matches!(self.page, Page::Build)
+            || self.build_page.record.is_none()
+        {
+            return;
+        }
+        let now = (self.shared.clock)();
+        for kind in [IndustryKind::Systems, IndustryKind::Prices] {
+            let timing = *self.industry_timing.get_mut(kind);
+            if timing.busy || now < timing.next {
+                continue;
+            }
+            let expiry = match kind {
+                IndustryKind::Systems => self
+                    .shared
+                    .industry
+                    .systems
+                    .as_ref()
+                    .map(|fetched| fetched.next_refresh(INDUSTRY_AGE_SECS)),
+                IndustryKind::Prices => self
+                    .shared
+                    .industry
+                    .prices
+                    .as_ref()
+                    .map(|fetched| fetched.next_refresh(INDUSTRY_AGE_SECS)),
+            };
+            let due = match expiry {
+                None | Some(Err(_)) => true,
+                Some(Ok(at)) => at <= now,
+            };
+            if due {
+                self.spawn_industry_refresh(kind, now);
+            }
+        }
+    }
+
+    /// One job for one kind of industry data.
+    fn spawn_industry_refresh(&mut self, kind: IndustryKind, now: i64) {
+        self.industry_timing.get_mut(kind).busy = true;
+        let eve = self.shared.session.eve();
+        let mut data = self.shared.industry.clone();
+        let (tx, ctx) = (self.events_tx.clone(), self.ctx.clone());
+        let dir = self.data_dir.join("esi");
+        let job: Job = Box::new(move || {
+            // Read before the refresh saves over the file, so a corrupt file can be reported.
+            let unreadable = esi_industry::load_industry(&dir).is_err();
+            let result = session::lock_eve(&eve).refresh_industry(&mut data, kind, now);
+            notify(
+                &tx,
+                &ctx,
+                Event::Industry {
+                    kind,
+                    data,
+                    result,
+                    unreadable,
+                },
+            );
+        });
+        self.shared.worker.run(job);
+    }
+
+    fn industry_loaded(&mut self, result: Result<IndustryData, String>) {
+        self.industry_loaded = true;
+        match result {
+            Ok(data) => self.shared.industry = data,
+            Err(error) => self.shared.notices.push(Notice::error(format!(
+                "Could not read the saved industry data: {error}"
+            ))),
+        }
+    }
+
+    fn industry_refreshed(
+        &mut self,
+        kind: IndustryKind,
+        data: &IndustryData,
+        result: Result<Refreshed, EsiError>,
+        unreadable: bool,
+    ) {
+        let now = (self.shared.clock)();
+        let timing = self.industry_timing.get_mut(kind);
+        timing.busy = false;
+        match result {
+            Ok(Refreshed::Fetched) => {
+                match kind {
+                    IndustryKind::Systems => self.shared.industry.systems.clone_from(&data.systems),
+                    IndustryKind::Prices => self.shared.industry.prices.clone_from(&data.prices),
+                }
+                if unreadable {
+                    self.shared.notices.push(Notice::error(
+                        "The saved industry data could not be read and was replaced with fresh data.",
+                    ));
+                }
+                timing.next = now.saturating_add(INDUSTRY_RETRY_SECS);
+            }
+            // Never ask again before the retry interval, even when the answer says `now`: a
+            // request answered with `now` would otherwise be asked again on every frame.
+            Ok(Refreshed::NotYet { until }) => {
+                timing.next = until.max(now.saturating_add(INDUSTRY_RETRY_SECS));
+            }
+            Err(EsiError::RateLimited {
+                retry_after_seconds,
+            }) => {
+                self.shared.notices.push(Notice::error(format!(
+                    "EVE industry data paused for {retry_after_seconds} s (ESI rate limit)."
+                )));
+                timing.next = now.saturating_add(INDUSTRY_ERROR_RETRY_SECS);
+            }
+            Err(error) => {
+                self.shared.notices.push(Notice::error(format!(
+                    "Could not get EVE industry data: {error}"
+                )));
+                timing.next = now.saturating_add(INDUSTRY_ERROR_RETRY_SECS);
+            }
+        }
+    }
+
     fn spawn_check(&self, first_run: bool) {
         let fetch = self.shared.worker.fetch();
         let (tx, ctx) = (self.events_tx.clone(), self.ctx.clone());
@@ -674,6 +858,19 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
     }
+}
+
+/// The notice for saved data that an earlier test build left behind and that was set aside.
+fn fresh_start_notice(started_fresh: Option<&PathBuf>) -> Vec<Notice> {
+    started_fresh
+        .map(|old| {
+            Notice::info(format!(
+                "Your saved data came from an earlier test build and was set aside as {}. Starting fresh.",
+                old.display()
+            ))
+        })
+        .into_iter()
+        .collect()
 }
 
 /// Sends a job's result to the UI and wakes the UI up to read it.

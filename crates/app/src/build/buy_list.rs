@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use egui::{Button, Checkbox, ComboBox, Context, Id, RichText, TextEdit, Ui};
-use mop_core::buylist::{BuyInput, BuyList, BuyRow, Delivered, LinePrice, buy_list};
+use mop_core::buylist::{BuyInput, BuyList, BuyListError, BuyRow, Delivered, LinePrice, buy_list};
 use mop_core::format::group_thousands;
 use mop_core::freight::{self, CargoLine, Contract, FreightError, FreightQuote, Packing, RateCard};
 use mop_core::industry::TypeId;
@@ -46,6 +46,7 @@ struct Offer {
     id: i64,
     name: String,
     outcome: Result<FreightQuote, String>,
+    card: RateCard,
 }
 
 /// What the table shows beyond the row's own numbers.
@@ -453,9 +454,39 @@ fn offers(ui: &Ui, record: &PlanRecord, cx: &mut Shared, cargo: &[CargoLine]) ->
                 id: leg.id,
                 name: leg.name,
                 outcome,
+                card: leg.card,
             }
         })
         .collect()
+}
+
+/// The rate card of the freight service the Buy list shows as chosen: none when the plan has no
+/// route. The job cost code reads it, so a bought part's freight is the one the Buy list charges.
+///
+/// # Errors
+/// The buy list cannot be worked out, so neither can the service it would choose.
+pub(crate) fn chosen_card(
+    ui: &Ui,
+    record: &PlanRecord,
+    plan: &Plan,
+    cx: &mut Shared,
+    held: &Held,
+    now: i64,
+) -> Result<Option<RateCard>, String> {
+    if record.route.is_none() {
+        return Ok(None);
+    }
+    let (inputs, _) = buy_inputs(plan, record, cx, held, now);
+    let buy = buy_list(inputs).map_err(|BuyListError::Overflow| {
+        "the buy list does not add up: a volume or value does not fit the supported range"
+            .to_owned()
+    })?;
+    let cargo = buy.cargo();
+    let offers = offers(ui, record, cx, &cargo);
+    let Some(index) = chosen(record.service, &offers) else {
+        return Ok(None);
+    };
+    Ok(offers.into_iter().nth(index).map(|offer| offer.card))
 }
 
 /// The services of a route, read from the store at most once a second. The frames in between reuse

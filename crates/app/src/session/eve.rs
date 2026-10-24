@@ -15,6 +15,7 @@ use mop_esi::characters::Character;
 use mop_esi::client::Client;
 use mop_esi::error::EsiError;
 use mop_esi::http::UreqHttp;
+use mop_esi::industry::{self, IndustryData, IndustryKind};
 use mop_esi::places::{self, NamingReport, StructureNames};
 use mop_esi::saved;
 use mop_esi::secrets::{fallback_warning, open_secrets};
@@ -73,6 +74,16 @@ pub trait EveAccess: Send {
         data: &mut CharacterData,
         now: i64,
     ) -> Vec<(Kind, Result<Refreshed, EsiError>)>;
+    /// Fetches one kind of the shared industry data (cost indices or adjusted prices) when it is
+    /// due, and saves it. The default does nothing, so fakes need not implement it.
+    fn refresh_industry(
+        &mut self,
+        _data: &mut IndustryData,
+        _kind: IndustryKind,
+        now: i64,
+    ) -> Result<Refreshed, EsiError> {
+        Ok(Refreshed::NotYet { until: now })
+    }
     /// Names the structures in `ids` that are due for a check, with the login characters.
     fn name_structures(
         &mut self,
@@ -167,6 +178,17 @@ impl EveAccess for LiveEve {
         character_data::refresh_all(data, &mut self.auth, &mut client, now)
     }
 
+    fn refresh_industry(
+        &mut self,
+        data: &mut IndustryData,
+        kind: IndustryKind,
+        now: i64,
+    ) -> Result<Refreshed, EsiError> {
+        let done = industry::refresh_industry(data, kind, &self.http, now)?;
+        save_fetched(&self.esi_dir, data, kind)?;
+        Ok(done)
+    }
+
     fn name_structures(
         &mut self,
         names: &mut StructureNames,
@@ -206,6 +228,22 @@ impl EveAccess for LiveEve {
     fn jeve_folder(&self) -> Option<PathBuf> {
         self.jeve_dir.clone()
     }
+}
+
+/// Saves the `kind` just fetched into `data` to the industry file in `dir`. Only that kind is
+/// merged into what is on disk, so a job that started earlier with an older copy of the other
+/// kind cannot write that copy back over a newer file. A saved file that cannot be read is
+/// replaced by `data`, so the fetch is not lost and later refreshes can save again.
+///
+/// # Errors
+/// The file cannot be written.
+pub fn save_fetched(dir: &Path, data: &IndustryData, kind: IndustryKind) -> Result<(), EsiError> {
+    let mut saved = industry::load_industry(dir).unwrap_or_else(|_unreadable| data.clone());
+    match kind {
+        IndustryKind::Systems => saved.systems.clone_from(&data.systems),
+        IndustryKind::Prices => saved.prices.clone_from(&data.prices),
+    }
+    industry::save_industry(dir, &saved)
 }
 
 /// No characters and no login. Holds nothing and reads nothing.

@@ -285,7 +285,8 @@ mod tests {
             .nth(last)
             .expect("the button")
             .click();
-        harness.run();
+        // Steps, not `run`: the background industry job can keep the page repainting.
+        harness.run_steps(6);
     }
 
     /// Opens the dropdown that shows `current` and picks `option` from it.
@@ -535,7 +536,7 @@ mod tests {
         assert!(tops.windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(
             cells(&harness, "Hobgoblin II"),
-            ["Hobgoblin II", "2", "10", "0", "10", "—", "10", "1"]
+            ["Hobgoblin II", "2", "10", "0", "10", "—", "10", "1", "…"]
         );
         for part in parts {
             assert_eq!(cells(&harness, part), [part, "—", "10", "0", "—", "10"]);
@@ -550,11 +551,11 @@ mod tests {
         p3_plan(&mut harness);
         assert_eq!(
             cells(&harness, "Hobgoblin II"),
-            ["Hobgoblin II", "2", "10", "0", "10", "—", "10", "1"]
+            ["Hobgoblin II", "2", "10", "0", "10", "—", "10", "1", "…"]
         );
         assert_eq!(
             cells(&harness, "Hobgoblin I"),
-            ["Hobgoblin I", "10", "10", "0", "10", "—", "10", "1"]
+            ["Hobgoblin I", "10", "10", "0", "10", "—", "10", "1", "…"]
         );
         assert_eq!(
             cells(&harness, "Particle Accelerator Unit"),
@@ -566,7 +567,8 @@ mod tests {
                 "6",
                 "—",
                 "6",
-                "1"
+                "1",
+                "…"
             ]
         );
         assert_eq!(
@@ -706,7 +708,8 @@ mod tests {
                 "—",
                 "1",
                 "1",
-                "9,834"
+                "9,834",
+                "…"
             ]
         );
         assert_eq!(
@@ -744,7 +747,7 @@ mod tests {
         assert!(shown(&restarted, "PLAN  Hobgoblin II × 10"));
         assert_eq!(
             cells(&restarted, "Hobgoblin I"),
-            ["Hobgoblin I", "10", "10", "0", "10", "—", "10", "1"]
+            ["Hobgoblin I", "10", "10", "0", "10", "—", "10", "1", "…"]
         );
         assert_eq!(
             cells(&restarted, "Particle Accelerator Unit"),
@@ -756,7 +759,8 @@ mod tests {
                 "6",
                 "—",
                 "6",
-                "1"
+                "1",
+                "…"
             ]
         );
         assert!(has_value(

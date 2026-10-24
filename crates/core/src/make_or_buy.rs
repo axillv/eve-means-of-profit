@@ -75,6 +75,11 @@ pub struct Decision {
 impl Decision {
     /// The line the panel shows: the chosen side first, money with two decimals.
     pub fn reason_text(&self) -> String {
+        self.reason_text_named(|id| id.to_string())
+    }
+
+    /// The same line, with the types it names written by `name`.
+    pub fn reason_text_named(&self, name: impl Fn(TypeId) -> String) -> String {
         let buy = self.buy_total.map_or_else(String::new, Money::format_isk);
         let build = self.build_total.map_or_else(String::new, Money::format_isk);
         match (self.choice, &self.reason) {
@@ -87,7 +92,10 @@ impl Decision {
                 format!("buy: {buy} (no facility for {})", activity_name(*activity))
             }
             (_, Reason::MaterialsUnpriced(ids)) => {
-                format!("buy: {buy} (no price for materials: {})", join_ids(ids))
+                format!(
+                    "buy: {buy} (no price for materials: {})",
+                    join_names(ids, &name)
+                )
             }
             (_, Reason::Loop) => format!("buy: {buy} (needs itself)"),
         }
@@ -449,9 +457,9 @@ fn activity_name(activity: Activity) -> &'static str {
     }
 }
 
-fn join_ids(ids: &[TypeId]) -> String {
+fn join_names(ids: &[TypeId], name: &impl Fn(TypeId) -> String) -> String {
     ids.iter()
-        .map(ToString::to_string)
+        .map(|&id| name(id))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -638,6 +646,17 @@ mod tests {
         assert_eq!(
             result[&A].reason_text(),
             "buy: 22,200.00 (no price for materials: 400)"
+        );
+    }
+
+    #[test]
+    fn unpriced_materials_can_be_named() {
+        let mut world = World::standard();
+        world.unit_price.remove(&M);
+        let result = world.decided();
+        assert_eq!(
+            result[&A].reason_text_named(|id| format!("Item {id}")),
+            "buy: 22,200.00 (no price for materials: Item 400)"
         );
     }
 

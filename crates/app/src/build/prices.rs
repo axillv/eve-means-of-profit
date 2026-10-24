@@ -313,6 +313,30 @@ pub fn line_price(
     }
 }
 
+/// The per-unit price of each type for the build-or-buy decision, at the plan's rule. A typed price
+/// wins; a live side is read whether or not it is thin; a missing one gives no entry.
+pub fn decision_prices(
+    held: &Held,
+    rule: PriceRule,
+    types: impl IntoIterator<Item = TypeId>,
+    quantity: impl Fn(TypeId) -> u64,
+    manual: impl Fn(TypeId) -> Option<Manual>,
+) -> BTreeMap<TypeId, Money> {
+    let mut prices = BTreeMap::new();
+    for type_id in types {
+        let quote = live(held, type_id, rule);
+        let per_unit = match line_price(quote.as_ref(), manual(type_id), quantity(type_id).max(1)) {
+            Ok(LinePrice::Priced { per_unit, .. }) => Some(per_unit),
+            Ok(LinePrice::Thin { .. }) => quote.map(|quote| quote.per_unit),
+            Ok(LinePrice::Missing) | Err(OutOfRange) => None,
+        };
+        if let Some(per_unit) = per_unit {
+            prices.insert(type_id, per_unit);
+        }
+    }
+    prices
+}
+
 /// The notice text for a failed refresh. A rate limit names the wait.
 pub fn failure_text(failure: &Failure) -> String {
     match failure {

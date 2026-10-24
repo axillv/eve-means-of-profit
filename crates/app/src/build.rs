@@ -3,6 +3,7 @@
 //! the dock draws each panel's header.
 
 pub mod buy_list;
+pub mod costs;
 pub mod inputs;
 pub mod plans;
 pub mod prices;
