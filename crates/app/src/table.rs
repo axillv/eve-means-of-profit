@@ -440,6 +440,10 @@ fn draw_row(
             );
             arrow = Some(arrow_rect);
             Rect::from_min_max(pos2(arrow_rect.max.x, cell.min.y), cell.max)
+        } else if position == 0 {
+            // A leaf keeps the text place an arrow would take, so siblings line up.
+            let left = cell.min.x + depth * INDENT + ARROW_WIDTH;
+            Rect::from_min_max(pos2(left, cell.min.y), cell.max)
         } else {
             cell
         };
