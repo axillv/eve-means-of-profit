@@ -12,8 +12,8 @@ use crate::pkce::Pkce;
 use crate::secrets::Secrets;
 use crate::token::{self, AccessToken};
 
-pub const CALLBACK_PORT: u16 = 8638;
-pub const REDIRECT_URI: &str = "http://localhost:8638/callback";
+pub const CALLBACK_PORT: u16 = 9376;
+pub const REDIRECT_URI: &str = "http://localhost:9376/eve-means-of-profit";
 /// The app's public client id from the EVE developer portal. Empty until it is registered; logins cannot start while it is empty.
 pub const CLIENT_ID: &str = "";
 pub const SCOPES: [&str; 17] = [

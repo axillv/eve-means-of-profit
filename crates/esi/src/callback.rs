@@ -63,7 +63,7 @@ fn handle(stream: &TcpStream, expected_state: &str) -> Option<Result<String, Esi
         return None;
     };
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    if path != "/callback" {
+    if path != "/eve-means-of-profit" {
         respond(stream, 404, "Not Found", "Not found.");
         return None;
     }

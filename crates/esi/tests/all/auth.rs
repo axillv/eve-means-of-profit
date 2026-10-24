@@ -295,7 +295,7 @@ mod tests {
         );
         assert_eq!(
             url,
-            "https://login.eveonline.com/v2/oauth/authorize?response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A8638%2Fcallback&client_id=abc123&scope=esi-assets.read_assets.v1%20esi-wallet.read_character_wallet.v1&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256&state=AAAAAAAAAAAAAAAAAAAAAA"
+            "https://login.eveonline.com/v2/oauth/authorize?response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A9376%2Feve-means-of-profit&client_id=abc123&scope=esi-assets.read_assets.v1%20esi-wallet.read_character_wallet.v1&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256&state=AAAAAAAAAAAAAAAAAAAAAA"
         );
         assert_eq!(SCOPES.len(), 17);
         assert_eq!(SCOPES, EXPECTED_SCOPES);
@@ -868,7 +868,7 @@ mod tests {
 
     #[test]
     fn error_texts_name_the_problem() {
-        assert!(EsiError::PortInUse(8638).to_string().contains("8638"));
+        assert!(EsiError::PortInUse(9376).to_string().contains("9376"));
         assert!(
             EsiError::Denied("nope".to_owned())
                 .to_string()
@@ -883,7 +883,7 @@ mod tests {
         assert!(EsiError::Server(502).to_string().contains("502"));
     }
 
-    /// The callback tests share port 8638, so they run one at a time.
+    /// The callback tests share port 9376, so they run one at a time.
     static PORT_LOCK: Mutex<()> = Mutex::new(());
 
     fn port_lock() -> MutexGuard<'static, ()> {
@@ -895,13 +895,13 @@ mod tests {
     }
 
     fn assert_port_free() {
-        let probe = TcpListener::bind(("127.0.0.1", 8638));
-        probe.expect("port 8638 must be free after the wait");
+        let probe = TcpListener::bind(("127.0.0.1", 9376));
+        probe.expect("port 9376 must be free after the wait");
     }
 
     fn connect() -> TcpStream {
         for _ in 0..200 {
-            if let Ok(stream) = TcpStream::connect(("127.0.0.1", 8638)) {
+            if let Ok(stream) = TcpStream::connect(("127.0.0.1", 9376)) {
                 return stream;
             }
             sleep(Duration::from_millis(10));
@@ -932,7 +932,7 @@ mod tests {
         let _guard = port_lock();
         let handle = wait_in_thread(STATE, far_deadline());
         assert!(request("/favicon.ico").starts_with("HTTP/1.1 404"));
-        let answer = request(&format!("/callback?code=ab%2Fc&state={STATE}"));
+        let answer = request(&format!("/eve-means-of-profit?code=ab%2Fc&state={STATE}"));
         assert!(answer.starts_with("HTTP/1.1 200"));
         assert!(answer.contains("Login complete."));
         assert_eq!(handle.join().expect("thread").expect("code"), "ab/c");
@@ -943,7 +943,7 @@ mod tests {
     fn callback_refuses_another_state() {
         let _guard = port_lock();
         let handle = wait_in_thread(STATE, far_deadline());
-        let answer = request("/callback?code=x&state=BBBBBBBBBBBBBBBBBBBBBB");
+        let answer = request("/eve-means-of-profit?code=x&state=BBBBBBBBBBBBBBBBBBBBBB");
         assert!(answer.starts_with("HTTP/1.1 400"));
         assert!(matches!(
             handle.join().expect("thread"),
@@ -956,7 +956,7 @@ mod tests {
     fn callback_reports_the_player_cancelling() {
         let _guard = port_lock();
         let handle = wait_in_thread(STATE, far_deadline());
-        let answer = request("/callback?error=access_denied&error_description=User%20cancelled");
+        let answer = request("/eve-means-of-profit?error=access_denied&error_description=User%20cancelled");
         assert!(answer.starts_with("HTTP/1.1 400"));
         assert!(matches!(
             handle.join().expect("thread"),
@@ -999,9 +999,9 @@ mod tests {
     #[test]
     fn callback_reports_a_port_that_is_taken() {
         let _guard = port_lock();
-        let taken = TcpListener::bind(("127.0.0.1", 8638)).expect("hold the port");
+        let taken = TcpListener::bind(("127.0.0.1", 9376)).expect("hold the port");
         let result = wait_for_code(STATE, far_deadline(), &AtomicBool::new(false));
-        assert!(matches!(result, Err(EsiError::PortInUse(8638))));
+        assert!(matches!(result, Err(EsiError::PortInUse(9376))));
         drop(taken);
         assert_port_free();
     }
