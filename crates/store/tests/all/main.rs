@@ -1,4 +1,5 @@
 mod costs;
+mod invention;
 mod manual_prices;
 mod migrate;
 mod net_worth;

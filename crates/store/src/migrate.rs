@@ -99,6 +99,13 @@ CREATE TABLE plan_manual_prices (
     set_at INTEGER NOT NULL,
     PRIMARY KEY (plan, type_id)
 ) WITHOUT ROWID;
+CREATE TABLE plan_invention (
+    plan_id INTEGER NOT NULL REFERENCES plans (id) ON DELETE CASCADE,
+    type_id INTEGER NOT NULL,
+    invent INTEGER NOT NULL CHECK (invent IN (0, 1)),
+    decryptor INTEGER,
+    PRIMARY KEY (plan_id, type_id)
+) WITHOUT ROWID;
 CREATE TABLE job_assignments (
     job_id INTEGER PRIMARY KEY,
     plan_id INTEGER NOT NULL REFERENCES plans (id) ON DELETE CASCADE,

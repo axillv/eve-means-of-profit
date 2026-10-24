@@ -8,6 +8,7 @@ use mop_market::book::PriceRule;
 use rusqlite::{OptionalExtension, Row, Transaction, params};
 
 use crate::error::{Result, StoreError};
+use crate::invention::copy_invention;
 use crate::migrate::Store;
 use crate::{
     bad_code, clean_name, copy_scope, ensure_free, from_stored, id_names, is_taken,
@@ -447,6 +448,7 @@ impl Store {
         };
         let new_id = insert_plan(&tx, &plan, &name, now)?;
         copy_scope(&tx, id, new_id)?;
+        copy_invention(&tx, id, new_id)?;
         tx.execute(
             "UPDATE plans SET sell_mode = (SELECT sell_mode FROM plans WHERE id = ?1) WHERE id = ?2",
             params![id, new_id],
