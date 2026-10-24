@@ -1,11 +1,13 @@
 //! The Facilities panel: the places the player builds, each with its structure, security and rigs.
 
-use egui::{Button, ComboBox, Id, ScrollArea, Ui};
+use egui::{Button, ComboBox, Id, ScrollArea, TextEdit, Ui};
 use mop_core::industry::{Activity, TypeId};
+use mop_core::money::Rate;
 use mop_sde::{Facility, FacilityError, Sde, Security, Structure, StructureKind};
-use mop_store::{FacilityRow, StoreError};
+use mop_store::{FacilityCosts, FacilityRow, StoreError};
 
-use super::fields::text_field;
+use super::fees::percent_text;
+use super::fields::{percent, text_field};
 use crate::Shared;
 use crate::table::Table;
 use crate::table::model::{Cell, Column, ColumnKind, Row};
@@ -16,6 +18,14 @@ const NPC_STATION: &str = "NPC station";
 const RIG_SLOTS: usize = 3;
 /// The most facility rows the list shows before it scrolls.
 const TABLE_ROWS: usize = 12;
+/// The most system names the search lists under the System field.
+const SEARCH_LIMIT: usize = 10;
+/// The tax an NPC station charges: the tax field starts with it and returns to it.
+const NPC_TAX: &str = "0.25";
+/// The mute hint of the Tax field.
+fn tax_hint() -> String {
+    format!("The structure owner's tax. NPC stations: {NPC_TAX}%.")
+}
 
 /// What the panel keeps between frames, in the window's temporary memory.
 #[derive(Debug, Clone, Default)]
@@ -34,6 +44,12 @@ struct Form {
     structure: Option<TypeId>,
     security: Security,
     rigs: [Option<TypeId>; RIG_SLOTS],
+    /// The system as typed; empty is no system.
+    system: String,
+    /// The tax as typed, in percent; empty is no tax.
+    tax: String,
+    /// Once the user has typed in the tax, the form no longer changes it.
+    tax_typed: bool,
 }
 
 /// What a button or the form asked for in this frame.
@@ -42,7 +58,7 @@ enum Action {
     New,
     Edit(i64),
     Delete(i64),
-    Save,
+    Save(FacilityCosts),
     Cancel,
 }
 
@@ -54,10 +70,13 @@ impl Form {
             structure: None,
             security: Security::High,
             rigs: [None; RIG_SLOTS],
+            system: String::new(),
+            tax: NPC_TAX.to_owned(),
+            tax_typed: false,
         }
     }
 
-    fn edit(row: &FacilityRow) -> Self {
+    fn edit(row: &FacilityRow, costs: FacilityCosts, system: String) -> Self {
         let mut rigs = [None; RIG_SLOTS];
         for (slot, rig) in rigs.iter_mut().zip(&row.facility.rigs) {
             *slot = Some(*rig);
@@ -68,6 +87,9 @@ impl Form {
             structure: row.facility.structure,
             security: row.facility.security,
             rigs,
+            system,
+            tax: costs.tax.map(Rate::to_percent_string).unwrap_or_default(),
+            tax_typed: true,
         }
     }
 
@@ -111,6 +133,10 @@ fn draw(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
             return;
         }
     };
+    let (costs, costs_error) = match cx.store.all_facility_costs() {
+        Ok(costs) => (costs, None),
+        Err(error) => (Default::default(), Some(error.to_string())),
+    };
 
     let style = &cx.style;
     let mut action = toolbar(ui, panel.selected);
@@ -127,7 +153,7 @@ fn draw(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
     }
     let rows: Vec<Row> = facilities
         .iter()
-        .map(|row| facility_row(row, &structures, sde))
+        .map(|row| facility_row(row, &structures, sde, costs.get(&row.id).copied()))
         .collect();
     let columns = columns();
     let response = Table::new(Id::new("setup facilities"), &columns)
@@ -138,6 +164,9 @@ fn draw(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
         && let Ok(id) = i64::try_from(key)
     {
         panel.selected = Some(id);
+    }
+    if let Some(error) = costs_error {
+        ui.colored_label(style.neg, error);
     }
 
     if let Some(action) = action {
@@ -178,12 +207,11 @@ fn apply(panel: &mut Panel, cx: &mut Shared, facilities: &[FacilityRow], action:
         }
         Action::Edit(id) => {
             if let Some(row) = facilities.iter().find(|row| row.id == id) {
-                panel.form = Some(Form::edit(row));
-                panel.message = None;
+                edit(panel, cx, row);
             }
         }
         Action::Delete(id) => delete(panel, cx, id),
-        Action::Save => save(panel, cx),
+        Action::Save(costs) => save(panel, cx, costs),
         Action::Cancel => {
             panel.form = None;
             panel.message = None;
@@ -201,8 +229,24 @@ fn delete(panel: &mut Panel, cx: &mut Shared, id: i64) {
     }
 }
 
-/// Saves the open form as a new facility, or over the one it was made from.
-fn save(panel: &mut Panel, cx: &mut Shared) {
+/// Opens the form over a facility, with its system and tax as the store holds them.
+fn edit(panel: &mut Panel, cx: &mut Shared, row: &FacilityRow) {
+    match cx.store.facility_costs(row.id) {
+        Ok(costs) => {
+            let system = match (cx.sde.as_ref(), costs.system) {
+                (Some(sde), Some(system)) => system_name(sde, system),
+                _ => String::new(),
+            };
+            panel.form = Some(Form::edit(row, costs, system));
+            panel.message = None;
+        }
+        Err(error) => panel.message = Some(error.to_string()),
+    }
+}
+
+/// Saves the open form as a new facility, or over the one it was made from, then its costs. If
+/// the costs fail the facility is saved all the same, and the form stays open over it.
+fn save(panel: &mut Panel, cx: &mut Shared, costs: FacilityCosts) {
     let Some(form) = panel.form.clone() else {
         return;
     };
@@ -215,11 +259,21 @@ fn save(panel: &mut Panel, cx: &mut Shared) {
             .map(|()| id),
     };
     match saved {
-        Ok(id) => {
-            panel.selected = Some(id);
-            panel.form = None;
-            panel.message = None;
-        }
+        Ok(id) => match cx.store.set_facility_costs(id, &costs) {
+            Ok(()) => {
+                panel.selected = Some(id);
+                panel.form = None;
+                panel.message = None;
+            }
+            Err(error) => {
+                panel.selected = Some(id);
+                panel.form = Some(Form {
+                    editing: Some(id),
+                    ..form
+                });
+                panel.message = Some(error.to_string());
+            }
+        },
         Err(error) => panel.message = Some(store_text(&error)),
     }
 }
@@ -240,6 +294,8 @@ fn draw_form(
     if let Some(structure) = structure {
         rig_fields(ui, sde, structure, form);
     }
+    let system = system_field(ui, style, sde, &mut form.system);
+    let tax = tax_field(ui, style, form);
 
     let error = sde
         .check_facility(&form.facility(), activity_of(structure))
@@ -248,8 +304,67 @@ fn draw_form(
     if let Some(error) = &error {
         ui.colored_label(style.neg, error.as_str());
     }
-    let can_save = error.is_none() && !form.name.trim().is_empty();
-    save_buttons(ui, can_save)
+    let can_save = error.is_none() && tax.is_ok() && !form.name.trim().is_empty();
+    let costs = FacilityCosts {
+        system,
+        tax: tax.ok().flatten(),
+    };
+    save_buttons(ui, can_save, costs)
+}
+
+/// The System field: the system the text names exactly, if any. Until then the systems it could
+/// be are listed under it, and a click on one fills it in.
+fn system_field(ui: &mut Ui, style: &Style, sde: &Sde, query: &mut String) -> Option<u32> {
+    let chosen = match sde.find_system(query) {
+        Ok(chosen) => chosen,
+        Err(error) => {
+            ui.colored_label(style.neg, error.to_string());
+            None
+        }
+    };
+    ui.horizontal(|ui| {
+        let caption = ui.label("System");
+        ui.add(
+            TextEdit::singleline(query)
+                .hint_text("Needed for job costs.")
+                .desired_width(220.0),
+        )
+        .labelled_by(caption.id);
+    });
+    if chosen.is_none() && !query.trim().is_empty() {
+        let candidates = match sde.search_systems(query, SEARCH_LIMIT) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                ui.colored_label(style.neg, error.to_string());
+                Vec::new()
+            }
+        };
+        if candidates.is_empty() {
+            ui.colored_label(style.mute, "No system has that name.");
+        }
+        for id in candidates {
+            let name = system_name(sde, id);
+            if ui.button(name.as_str()).clicked() {
+                *query = name;
+            }
+        }
+    }
+    chosen
+}
+
+/// The Tax % field. Typing in it is what keeps the form from changing it again. Returns the tax
+/// the text holds: `None` when it is empty.
+fn tax_field(ui: &mut Ui, style: &Style, form: &mut Form) -> Result<Option<Rate>, String> {
+    let before = form.tax.clone();
+    text_field(ui, style, "Tax %", &mut form.tax, &tax_hint(), None);
+    if form.tax != before {
+        form.tax_typed = true;
+    }
+    let tax = percent("Tax %", &form.tax);
+    if let Err(error) = &tax {
+        ui.colored_label(style.neg, error.as_str());
+    }
+    tax
 }
 
 /// The error text with the rig named, so the player can tell which of the dropdowns it is about.
@@ -293,6 +408,14 @@ fn structure_field(ui: &mut Ui, structures: &[Structure], form: &mut Form) {
     if form.structure != before {
         // Rigs fit one structure only, and a refinery has no high sec: start the set-up again.
         form.rigs = [None; RIG_SLOTS];
+        // The tax follows the structure until the user types one: an NPC station charges 0.25%.
+        if !form.tax_typed {
+            form.tax = if form.structure.is_none() {
+                NPC_TAX.to_owned()
+            } else {
+                String::new()
+            };
+        }
         let allowed = securities(structure_of(structures, form.structure));
         if let Some(first) = allowed
             .first()
@@ -342,11 +465,11 @@ fn rig_fields(ui: &mut Ui, sde: &Sde, structure: &Structure, form: &mut Form) {
     }
 }
 
-fn save_buttons(ui: &mut Ui, can_save: bool) -> Option<Action> {
+fn save_buttons(ui: &mut Ui, can_save: bool, costs: FacilityCosts) -> Option<Action> {
     let mut action = None;
     ui.horizontal(|ui| {
         if ui.add_enabled(can_save, Button::new("Save")).clicked() {
-            action = Some(Action::Save);
+            action = Some(Action::Save(costs));
         }
         if ui.button("Cancel").clicked() {
             action = Some(Action::Cancel);
@@ -376,6 +499,18 @@ fn columns() -> Vec<Column> {
             width: 80.0,
         },
         Column {
+            id: "system",
+            label: "System".to_owned(),
+            kind: ColumnKind::Text,
+            width: 120.0,
+        },
+        Column {
+            id: "tax",
+            label: "Tax".to_owned(),
+            kind: ColumnKind::Text,
+            width: 90.0,
+        },
+        Column {
             id: "rigs",
             label: "Rigs".to_owned(),
             kind: ColumnKind::Text,
@@ -384,7 +519,21 @@ fn columns() -> Vec<Column> {
     ]
 }
 
-fn facility_row(row: &FacilityRow, structures: &[Structure], sde: &Sde) -> Row {
+/// The system and tax cells: a dash where the store holds none.
+fn facility_row(
+    row: &FacilityRow,
+    structures: &[Structure],
+    sde: &Sde,
+    costs: Option<FacilityCosts>,
+) -> Row {
+    let costs = costs.unwrap_or(FacilityCosts {
+        system: None,
+        tax: None,
+    });
+    let system = costs
+        .system
+        .map_or_else(|| "—".to_owned(), |system| system_name(sde, system));
+    let tax = costs.tax.map_or_else(|| "—".to_owned(), percent_text);
     let structure = match (
         row.facility.structure,
         structure_of(structures, row.facility.structure),
@@ -411,8 +560,19 @@ fn facility_row(row: &FacilityRow, structures: &[Structure], sde: &Sde) -> Row {
             Cell::text(row.name.clone()),
             Cell::text(structure),
             Cell::text(security_word(row.facility.security)),
+            Cell::text(system),
+            Cell::text(tax),
             Cell::text(rigs),
         ],
+    }
+}
+
+/// The name of a system, as the Setup pages show it.
+fn system_name(sde: &Sde, id: u32) -> String {
+    match sde.system(id) {
+        Ok(Some(system)) => system.name,
+        Ok(None) => format!("system {id}"),
+        Err(error) => error.to_string(),
     }
 }
 

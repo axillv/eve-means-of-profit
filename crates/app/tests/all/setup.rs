@@ -333,6 +333,23 @@ mod tests {
 
         let rig_name = folders.sde().item(RIGS[3]).unwrap().unwrap().name;
         assert!(shown(&harness, "Raitaru null"));
+        // The row's System and Tax are dashes: the facility has no system and no tax yet.
+        let row = harness
+            .query_all_by_label("Raitaru null")
+            .next()
+            .unwrap()
+            .rect()
+            .min
+            .y;
+        let on_row = |text: &str| {
+            harness
+                .query_all_by_label(text)
+                .filter(|node| (node.rect().min.y - row).abs() < 1.0)
+                .count()
+        };
+        assert_eq!(on_row("Raitaru"), 1);
+        assert_eq!(on_row("Null"), 1);
+        assert_eq!(on_row("—"), 2);
         assert!(shown(&harness, &rig_name));
         let stored = folders.store().facilities().unwrap();
         assert_eq!(stored.len(), 1);

@@ -2,6 +2,7 @@
 //! dock draws each panel's header, and [`show`] draws the body.
 
 mod facilities;
+mod fees;
 mod fields;
 mod freight;
 mod price_rule;
@@ -22,6 +23,7 @@ pub enum SetupPanel {
     FreightServices,
     PriceRule,
     Structures,
+    Fees,
 }
 
 impl SetupPanel {
@@ -31,6 +33,7 @@ impl SetupPanel {
             Self::FreightServices => "Freight services",
             Self::PriceRule => "Price rule",
             Self::Structures => "Structures",
+            Self::Fees => "Fees and skills",
         }
     }
 }
@@ -53,5 +56,6 @@ pub fn show(_page: &mut SetupPage, panel: SetupPanel, ui: &mut Ui, cx: &mut Shar
         SetupPanel::FreightServices => freight::show(ui, cx),
         SetupPanel::PriceRule => price_rule::show(ui, cx),
         SetupPanel::Structures => structures::show(ui, cx),
+        SetupPanel::Fees => fees::show(ui, cx),
     }
 }

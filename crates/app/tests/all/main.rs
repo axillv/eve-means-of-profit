@@ -10,6 +10,7 @@ mod names;
 mod orders;
 mod pages;
 mod setup;
+mod setup_costs;
 mod setup_structures;
 mod shell;
 mod table;

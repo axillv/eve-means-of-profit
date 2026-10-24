@@ -73,7 +73,7 @@ pub fn setup_layout() -> DockState<SetupPanel> {
     let [_facilities, freight] =
         surface.split_right(NodeIndex::root(), 0.5, vec![SetupPanel::FreightServices]);
     let [_freight, price] = surface.split_below(freight, 0.5, vec![SetupPanel::PriceRule]);
-    surface.split_below(price, 0.5, vec![SetupPanel::Structures]);
+    surface.split_below(price, 0.5, vec![SetupPanel::Structures, SetupPanel::Fees]);
     dock
 }
 
@@ -94,8 +94,9 @@ pub fn show_locked<T: Copy>(
     body: impl FnMut(&mut Ui, T),
 ) {
     for (_, node) in state.iter_all_nodes_mut() {
+        // A node with one panel hides its tab bar; a node with several keeps it so its tabs can be picked.
         if let Some(leaf) = node.get_leaf_mut() {
-            leaf.tab_bar_hidden = true;
+            leaf.tab_bar_hidden = leaf.tabs.len() == 1;
         }
     }
     let mut viewer = Locked { title, body };
