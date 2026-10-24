@@ -119,6 +119,12 @@ mod tests {
         let mut settings = store.settings().expect("settings");
         settings.last_sde_check = Some(NOW);
         store.save_settings(&settings).expect("settings saved");
+        // The background price refresh stays off: the test asks for each download itself.
+        let mut history = store.history_settings().expect("history settings");
+        history.auto_refresh = false;
+        store
+            .save_history_settings(&history)
+            .expect("history settings saved");
         let places = format!(
             "{{\"version\":1,\"structures\":{{\"{HOME_FORT}\":{{\"name\":\"Home Fort\",\"system_id\":null,\"refused\":false,\"checked_at\":900000}}}}}}"
         );

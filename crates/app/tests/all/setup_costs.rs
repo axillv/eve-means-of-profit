@@ -73,6 +73,10 @@ mod tests {
             let mut settings = store.settings().unwrap();
             settings.last_sde_check = Some(NOW);
             store.save_settings(&settings).unwrap();
+            // The background price refresh stays off: no test here asks for prices.
+            let mut history = store.history_settings().unwrap();
+            history.auto_refresh = false;
+            store.save_history_settings(&history).unwrap();
             folders
         }
 
@@ -125,6 +129,21 @@ mod tests {
                 .query_all_by_label(cell)
                 .any(|node| (node.rect().min.y - row).abs() < 1.0)
         })
+    }
+
+    /// How many nodes labelled `label` sit on the row of `anchor`.
+    fn count_on_row(harness: &Harness<'_, App>, anchor: &str, label: &str) -> usize {
+        let row = harness
+            .get_all_by_label(anchor)
+            .next()
+            .expect("the row")
+            .rect()
+            .min
+            .y;
+        harness
+            .query_all_by_label(label)
+            .filter(|node| (node.rect().min.y - row).abs() < 1.0)
+            .count()
     }
 
     fn click(harness: &mut Harness<'_, App>, label: &str) {
@@ -494,7 +513,7 @@ mod tests {
             row_has(&harness, "NPC hisec", &["0.25%", "—"]),
             "the row shows the tax and a dash for the system"
         );
-        assert_eq!(harness.query_all_by_label("—").count(), 1);
+        assert_eq!(count_on_row(&harness, "NPC hisec", "—"), 1);
     }
 
     #[test]
@@ -518,7 +537,7 @@ mod tests {
             row_has(&harness, "Raitaru Jita", &["Jita", "—"]),
             "the row shows the system and a dash for the tax"
         );
-        assert_eq!(harness.query_all_by_label("—").count(), 1);
+        assert_eq!(count_on_row(&harness, "Raitaru Jita", "—"), 1);
     }
 
     #[test]
