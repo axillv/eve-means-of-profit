@@ -1,3 +1,4 @@
+mod assets_tree;
 mod build;
 mod buy_list;
 mod characters;

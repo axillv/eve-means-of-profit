@@ -52,6 +52,15 @@ impl PriceHistory {
             .next_back()
             .map(|(_, prices)| *prices)
     }
+
+    /// The day of the prices [`PriceHistory::get`] returns for `type_id` on `day`; `None` when there is none.
+    pub fn saved_day(&self, type_id: TypeId, day: i64) -> Option<i64> {
+        self.rows
+            .get(&type_id)?
+            .range(..=day)
+            .next_back()
+            .map(|(saved, _)| *saved)
+    }
 }
 
 impl Store {

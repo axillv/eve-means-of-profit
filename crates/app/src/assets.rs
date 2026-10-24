@@ -6,6 +6,10 @@ use egui::Ui;
 use crate::Shared;
 use crate::{dock, item_panel};
 
+mod name_dialog;
+mod tree;
+mod value;
+
 #[derive(Debug, Default)]
 pub struct AssetsPage;
 
@@ -30,6 +34,7 @@ impl AssetsPanel {
 pub fn show(_page: &mut AssetsPage, panel: AssetsPanel, ui: &mut Ui, cx: &mut Shared) {
     match panel {
         AssetsPanel::Item => item_panel::show(ui, cx),
-        AssetsPanel::Places | AssetsPanel::Assets => dock::placeholder(ui, cx),
+        AssetsPanel::Places => tree::show(ui, cx),
+        AssetsPanel::Assets => dock::placeholder(ui, cx),
     }
 }
