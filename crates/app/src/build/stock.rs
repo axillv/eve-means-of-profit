@@ -3,6 +3,8 @@
 
 use egui::{RichText, TextEdit, Ui};
 
+use mop_store::reservations::PlanStock;
+
 use super::state::{BuildPage, type_name};
 use crate::Shared;
 
@@ -11,16 +13,25 @@ pub fn show(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
         ui.label(RichText::new("No plan selected.").color(cx.style.mute));
         return;
     }
+    let from_characters = matches!(page.stock, PlanStock::Characters(_));
+    if from_characters {
+        let line = "This plan uses stock from characters. The pasted text is kept but not used.";
+        ui.label(RichText::new(line).color(cx.style.mute));
+    }
     let mut changed = false;
     if let Some(record) = page.record.as_mut() {
         let text = TextEdit::multiline(&mut record.pasted_stock)
             .desired_width(f32::INFINITY)
             .desired_rows(12)
-            .hint_text("Paste what you own");
+            .hint_text("Paste what you own")
+            .interactive(!from_characters);
         changed = ui.add(text).changed();
     }
     if changed {
         page.edited(cx);
+    }
+    if from_characters {
+        return;
     }
     problems(page, ui, cx);
     unused(page, ui, cx);

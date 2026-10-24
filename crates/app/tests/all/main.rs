@@ -1,5 +1,6 @@
 mod assets_tree;
 mod build;
+mod build_stock;
 mod buy_list;
 mod characters;
 mod item_panel;

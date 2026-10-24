@@ -23,7 +23,7 @@ mod tests {
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use mop_core::freight::Packing;
-    use mop_core::stock::{Asset, CharacterAssets};
+    use mop_core::stock::{Asset, CharacterAssets, Places, StockScope};
     use mop_esi::character_data::{
         CharacterData, Fetched, Job, JobStatus, Kind, OwnedAssets, Refreshed,
     };
@@ -35,6 +35,7 @@ mod tests {
     use mop_market::error::MarketError;
     use mop_market::fuzzwork::{BytesHttp, BytesResponse};
     use mop_sde::{Fetch, FetchError, Sde, import};
+    use mop_store::reservations::PlanStock;
     use mop_store::{PlanRecord, Store};
     use rusqlite::Connection;
     use tempfile::TempDir;
@@ -851,6 +852,57 @@ mod tests {
         assert!(!shown(&harness, "Rifter 31 · product × 31"));
         assert!(!shown(&harness, "Rifter 31 · could not work out the plan"));
         assert!(shown(&harness, "Missing · could not work out the plan"));
+    }
+
+    #[test]
+    fn a_plan_on_character_stock_still_lists_its_need() {
+        let env = env();
+        with_main(&env);
+        save_plans(&env);
+        let mut store = Store::open(&env.data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
+        let id = store
+            .plans()
+            .expect("the plans")
+            .iter()
+            .find(|plan| plan.name == "Hobgoblin 10")
+            .expect("the plan")
+            .id;
+        let mut record = store
+            .plan(id)
+            .expect("the plan reads")
+            .expect("the plan is saved");
+        record.quantity = 300;
+        record.name = "Hobgoblin 300".to_owned();
+        store.save_plan(&record, NOW).expect("the plan is saved");
+        store
+            .set_plan_stock(
+                id,
+                &PlanStock::Characters(StockScope {
+                    characters: BTreeSet::from([i64::try_from(MAIN).expect("the id fits")]),
+                    places: Places::All,
+                }),
+            )
+            .expect("the character stock is saved");
+        drop(store);
+        let (mut harness, _) = start(
+            &env,
+            FakeEve {
+                characters: vec![character(MAIN, "Main")],
+                jeve: None,
+            },
+            Answer::Down,
+        );
+        loaded(&mut harness);
+        select(&mut harness, PAU);
+
+        assert!(shown(&harness, "Hobgoblin 300 · need 300"));
+        assert!(shown(&harness, "Missing · could not work out the plan"));
+        assert!(!shown(
+            &harness,
+            "Hobgoblin 300 · could not work out the plan"
+        ));
     }
 
     #[test]

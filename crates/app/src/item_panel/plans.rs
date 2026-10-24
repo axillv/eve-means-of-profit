@@ -109,7 +109,11 @@ fn lines_for(cx: &mut Shared, type_id: TypeId, summaries: &[PlanSummary]) -> Vec
                 continue;
             }
         };
-        match plan_for(&record, cx, &facilities) {
+        let Ok(stock) = cx.store.plan_stock(summary.id) else {
+            lines.push(not_worked_out(&summary.name));
+            continue;
+        };
+        match plan_for(&record, &stock, cx, &facilities) {
             Ok(plan) => {
                 if let Some(text) = usage(&record, &plan, type_id) {
                     lines.push(Line { text, muted: false });

@@ -9,7 +9,9 @@ use mop_core::freight::Packing;
 use mop_core::industry::{Activity, Modifier, RecipeBook, TypeId};
 use mop_core::paste::{Pasted, parse_stock};
 use mop_core::plan::{self, Plan, PlanError, PlanInput};
+use mop_core::stock::{StockError, resolve};
 use mop_sde::{Facility, Sde, Security};
+use mop_store::reservations::PlanStock;
 use mop_store::{FacilityRow, PlanRecord};
 
 use crate::Shared;
@@ -50,6 +52,10 @@ pub struct BuildPage {
     pub result: Result<Plan, String>,
     /// The pasted text, read against the game data.
     pub pasted: Pasted,
+    /// Where the plan on screen takes its stock from, as saved with the plan.
+    pub stock: PlanStock,
+    /// Why the last stock choice was refused, shown under the Stock row.
+    pub stock_error: Option<String>,
     /// The recipes of the game data, for the product search and the steps.
     pub recipes: RecipeBook,
     /// The quantity as typed, and whether it reads as a whole number of 1 or more.
@@ -71,6 +77,8 @@ impl Default for BuildPage {
                 stock: BTreeMap::new(),
                 problems: Vec::new(),
             },
+            stock: PlanStock::Pasted,
+            stock_error: None,
             recipes: RecipeBook::new(),
             quantity_text: String::new(),
             quantity_ok: true,
@@ -100,7 +108,7 @@ impl BuildPage {
         self.result = match self.record.as_ref() {
             None => Err(NO_PRODUCT.to_owned()),
             Some(record) => match cx.store.facilities() {
-                Ok(facilities) => plan_for(record, cx, &facilities),
+                Ok(facilities) => plan_for(record, &self.stock, cx, &facilities),
                 Err(error) => Err(error.to_string()),
             },
         };
@@ -117,6 +125,14 @@ impl BuildPage {
     pub fn load(&mut self, id: i64, cx: &mut Shared) {
         match cx.store.plan(id) {
             Ok(Some(record)) => {
+                match cx.store.plan_stock(id) {
+                    Ok(stock) => self.stock = stock,
+                    Err(error) => {
+                        self.stock = PlanStock::Pasted;
+                        report(cx, format!("Could not read the plan's stock: {error}"));
+                    }
+                }
+                self.stock_error = None;
                 self.quantity_text = record.quantity.to_string();
                 self.quantity_ok = true;
                 self.product_query.clear();
@@ -138,6 +154,8 @@ impl BuildPage {
         self.selected = None;
         self.record = None;
         self.dirty = false;
+        self.stock = PlanStock::Pasted;
+        self.stock_error = None;
         self.quantity_text.clear();
         self.product_query.clear();
         self.result = Err(NO_PRODUCT.to_owned());
@@ -310,6 +328,7 @@ fn read_paste(text: &str, sde: Option<&Sde>) -> (Pasted, Option<String>) {
 /// a `&Shared` cannot give. The recipe book is read here, so this reads it once per call.
 pub(crate) fn plan_for(
     record: &PlanRecord,
+    stock: &PlanStock,
     cx: &Shared,
     facilities: &[FacilityRow],
 ) -> Result<Plan, String> {
@@ -318,17 +337,51 @@ pub(crate) fn plan_for(
     }
     let sde = cx.sde.as_ref().ok_or("the game data is not loaded yet")?;
     let recipes = sde.recipe_book().map_err(|error| error.to_string())?;
-    let input = plan_input(record, sde, &recipes, facilities)?;
+    let counted = counted_stock(record, stock, cx, sde)?;
+    let input = plan_input(record, sde, &recipes, facilities, counted)?;
     plan::plan(&input, &recipes).map_err(|error| explain(&error, record, &recipes))
 }
 
+/// The stock the plan counts: the pasted text when it is pasted, else what the chosen characters
+/// own in the chosen places. The pasted text is not read when the characters are used.
+fn counted_stock(
+    record: &PlanRecord,
+    stock: &PlanStock,
+    cx: &Shared,
+    sde: &Sde,
+) -> Result<BTreeMap<TypeId, u64>, String> {
+    match stock {
+        PlanStock::Pasted => {
+            let (pasted, failure) = read_paste(&record.pasted_stock, Some(sde));
+            if let Some(error) = failure {
+                return Err(format!("the pasted stock could not be read: {error}"));
+            }
+            Ok(pasted.stock)
+        }
+        PlanStock::Characters(scope) => resolve(&cx.session.stock_characters())
+            .owned(scope)
+            .map_err(|error| stock_error_text(error, sde)),
+    }
+}
+
+/// The plan error for a stock that cannot be counted, naming the type.
+fn stock_error_text(error: StockError, sde: &Sde) -> String {
+    let StockError::Overflow { type_id } = error;
+    let name = match sde.item(type_id) {
+        Ok(Some(item)) => item.name,
+        _ => format!("type {type_id}"),
+    };
+    format!("the stock of {name} is too large to count")
+}
+
 /// The plan engine's input: the record's product, quantity and built types, a modifier for each
-/// built type, and the stock read from the pasted text.
+/// built type, and the stock it counts.
 fn plan_input(
     record: &PlanRecord,
     sde: &Sde,
     recipes: &RecipeBook,
     facilities: &[FacilityRow],
+    stock: BTreeMap<TypeId, u64>,
 ) -> Result<PlanInput, String> {
     let manufacturing = saved_facility(record.manufacturing, facilities)?.unwrap_or(NPC_STATION);
     let reactions = saved_facility(record.reactions, facilities)?;
@@ -339,16 +392,12 @@ fn plan_input(
             .map_err(|error| error.to_string())?;
     }
     let modifiers = modifiers(record, sde, recipes, &manufacturing, reactions.as_ref())?;
-    let (pasted, failure) = read_paste(&record.pasted_stock, Some(sde));
-    if let Some(error) = failure {
-        return Err(format!("the pasted stock could not be read: {error}"));
-    }
     Ok(PlanInput {
         product: record.product,
         quantity: record.quantity,
         build: record.build.clone(),
         modifiers,
-        stock: pasted.stock,
+        stock,
     })
 }
 
