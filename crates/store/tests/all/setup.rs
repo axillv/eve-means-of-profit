@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use mop_market::book::PriceRule;
-    use mop_store::{Density, Settings, Store, StoreError};
+    use mop_store::{Density, InterfaceSize, Settings, Store, StoreError};
     use rusqlite::Connection;
     use std::path::Path;
 
@@ -28,6 +28,8 @@ mod tests {
             Settings {
                 default_price_rule: PriceRule::SellFivePercent,
                 density: Density::Normal,
+                interface_size: InterfaceSize::P100,
+                rail_icons_only: false,
                 last_sde_check: None,
             }
         );
@@ -40,6 +42,8 @@ mod tests {
         let saved = Settings {
             default_price_rule: PriceRule::HighestBuy,
             density: Density::Dense,
+            interface_size: InterfaceSize::P100,
+            rail_icons_only: false,
             last_sde_check: Some(86_400),
         };
         let mut store = open_store(&path, 1_000);
@@ -79,6 +83,8 @@ mod tests {
                 let saved = Settings {
                     default_price_rule: rule,
                     density,
+                    interface_size: InterfaceSize::P100,
+                    rail_icons_only: false,
                     last_sde_check: None,
                 };
                 store.save_settings(&saved).expect("save");
@@ -180,5 +186,140 @@ mod tests {
 
         assert!(matches!(err, StoreError::TooLarge), "{err}");
         assert_eq!(store.setting("note").expect("setting"), Some(largest));
+    }
+
+    fn default_settings() -> Settings {
+        Settings {
+            default_price_rule: PriceRule::SellFivePercent,
+            density: Density::Normal,
+            interface_size: InterfaceSize::P100,
+            rail_icons_only: false,
+            last_sde_check: None,
+        }
+    }
+
+    #[test]
+    fn a_new_store_has_the_default_interface_size_and_rail_choice() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = open_store(&dir.path().join("eve.db"), 1_000);
+
+        let settings = store.settings().expect("settings");
+
+        assert_eq!(settings.interface_size, InterfaceSize::P100);
+        assert!(!settings.rail_icons_only);
+    }
+
+    #[test]
+    fn each_interface_size_is_saved_and_read_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eve.db");
+        let mut store = open_store(&path, 1_000);
+        for size in InterfaceSize::ALL {
+            let saved = Settings {
+                interface_size: size,
+                ..default_settings()
+            };
+            store.save_settings(&saved).expect("save");
+            assert_eq!(store.settings().expect("settings"), saved);
+        }
+        let saved = Settings {
+            interface_size: InterfaceSize::P175,
+            ..default_settings()
+        };
+        store.save_settings(&saved).expect("save");
+        let stored = Connection::open(&path)
+            .expect("open")
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'interface_size'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("row");
+        assert_eq!(stored, "175");
+    }
+
+    #[test]
+    fn a_stored_interface_size_that_is_not_valid_is_bad_data_naming_the_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eve.db");
+        let mut store = open_store(&path, 1_000);
+        for (value, shown) in [("130", "\"130\""), ("abc", "\"abc\"")] {
+            Connection::open(&path)
+                .expect("open")
+                .execute(
+                    "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('interface_size', ?1)",
+                    [value],
+                )
+                .expect("write");
+            let err = store.settings().expect_err("must refuse");
+            let expected =
+                format!("setting interface_size has the value {shown}, which is not valid");
+            assert!(
+                matches!(&err, StoreError::BadData(text) if *text == expected),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn saving_a_size_leaves_the_other_settings_as_saved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eve.db");
+        let saved = Settings {
+            default_price_rule: PriceRule::HighestBuy,
+            density: Density::Dense,
+            interface_size: InterfaceSize::P150,
+            rail_icons_only: false,
+            last_sde_check: Some(86_400),
+        };
+        let mut store = open_store(&path, 1_000);
+        store.save_settings(&saved).expect("save");
+        drop(store);
+
+        let mut reopened = open_store(&path, 2_000);
+
+        assert_eq!(reopened.settings().expect("settings"), saved);
+    }
+
+    #[test]
+    fn rail_icons_only_is_saved_as_one_or_zero_and_other_text_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eve.db");
+        let mut store = open_store(&path, 1_000);
+        let saved = Settings {
+            rail_icons_only: true,
+            ..default_settings()
+        };
+        store.save_settings(&saved).expect("save");
+        assert_eq!(store.settings().expect("settings"), saved);
+        let stored = Connection::open(&path)
+            .expect("open")
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'rail_icons_only'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("row");
+        assert_eq!(stored, "1");
+
+        Connection::open(&path)
+            .expect("open")
+            .execute(
+                "UPDATE app_settings SET value = 'yes' WHERE key = 'rail_icons_only'",
+                [],
+            )
+            .expect("write");
+        let err = store.settings().expect_err("must refuse");
+        assert!(
+            matches!(&err, StoreError::BadData(text) if text == "setting rail_icons_only has the value \"yes\", which is not valid"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn from_percent_accepts_only_the_five_sizes() {
+        assert_eq!(InterfaceSize::from_percent(150), Some(InterfaceSize::P150));
+        assert_eq!(InterfaceSize::from_percent(0), None);
+        assert_eq!(InterfaceSize::from_percent(201), None);
     }
 }

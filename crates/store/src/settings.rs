@@ -16,16 +16,58 @@ pub enum Density {
     Dense,
 }
 
+/// The player's interface size, as a percentage of the normal size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterfaceSize {
+    P100,
+    P125,
+    P150,
+    P175,
+    P200,
+}
+
+impl InterfaceSize {
+    pub const ALL: [InterfaceSize; 5] = [
+        InterfaceSize::P100,
+        InterfaceSize::P125,
+        InterfaceSize::P150,
+        InterfaceSize::P175,
+        InterfaceSize::P200,
+    ];
+
+    /// The size as a percentage: 100, 125, 150, 175 or 200.
+    pub fn percent(self) -> u16 {
+        match self {
+            InterfaceSize::P100 => 100,
+            InterfaceSize::P125 => 125,
+            InterfaceSize::P150 => 150,
+            InterfaceSize::P175 => 175,
+            InterfaceSize::P200 => 200,
+        }
+    }
+
+    /// The size for a percentage, or `None` when it is not one of the five sizes.
+    pub fn from_percent(percent: i64) -> Option<InterfaceSize> {
+        InterfaceSize::ALL
+            .into_iter()
+            .find(|size| i64::from(size.percent()) == percent)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub default_price_rule: PriceRule,
     pub density: Density,
+    pub interface_size: InterfaceSize,
+    pub rail_icons_only: bool,
     /// Unix time of the last game-data check; `None` until one has run.
     pub last_sde_check: Option<i64>,
 }
 
 const KEY_PRICE_RULE: &str = "default_price_rule";
 const KEY_DENSITY: &str = "density";
+const KEY_INTERFACE_SIZE: &str = "interface_size";
+const KEY_RAIL_ICONS_ONLY: &str = "rail_icons_only";
 const KEY_LAST_SDE_CHECK: &str = "last_sde_check";
 const MAX_KEY_LEN: usize = 64;
 const MAX_VALUE_LEN: usize = 4_096;
@@ -135,6 +177,22 @@ impl Store {
                 density_from_code(code).ok_or_else(|| bad_value(KEY_DENSITY, &text))?
             }
         };
+        let interface_size = match read_setting(&tx, KEY_INTERFACE_SIZE)? {
+            None => InterfaceSize::P100,
+            Some(text) => {
+                let percent = stored_number(KEY_INTERFACE_SIZE, &text)?;
+                InterfaceSize::from_percent(percent)
+                    .ok_or_else(|| bad_value(KEY_INTERFACE_SIZE, &text))?
+            }
+        };
+        let rail_icons_only = match read_setting(&tx, KEY_RAIL_ICONS_ONLY)? {
+            None => false,
+            Some(text) => match text.as_str() {
+                "1" => true,
+                "0" => false,
+                _ => return Err(bad_value(KEY_RAIL_ICONS_ONLY, &text)),
+            },
+        };
         let last_sde_check = match read_setting(&tx, KEY_LAST_SDE_CHECK)? {
             None => None,
             Some(text) => Some(stored_number(KEY_LAST_SDE_CHECK, &text)?),
@@ -143,6 +201,8 @@ impl Store {
         Ok(Settings {
             default_price_rule,
             density,
+            interface_size,
+            rail_icons_only,
             last_sde_check,
         })
     }
@@ -160,6 +220,13 @@ impl Store {
             KEY_DENSITY,
             &density_code(settings.density).to_string(),
         )?;
+        write_setting(
+            &tx,
+            KEY_INTERFACE_SIZE,
+            &settings.interface_size.percent().to_string(),
+        )?;
+        let rail = if settings.rail_icons_only { "1" } else { "0" };
+        write_setting(&tx, KEY_RAIL_ICONS_ONLY, rail)?;
         match settings.last_sde_check {
             Some(at) => write_setting(&tx, KEY_LAST_SDE_CHECK, &at.to_string())?,
             None => clear_setting_in(&tx, KEY_LAST_SDE_CHECK)?,

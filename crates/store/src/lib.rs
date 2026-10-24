@@ -31,7 +31,7 @@ pub use net_worth::{ImportReport, NetWorthSettings, PriceHistory};
 pub use plans::{PlanRecord, PlanSummary, SellMode};
 pub use reservations::PlanStock;
 pub(crate) use reservations::copy_scope;
-pub use settings::{Density, Settings};
+pub use settings::{Density, InterfaceSize, Settings};
 
 /// Trims a name and refuses an empty one.
 pub(crate) fn clean_name(name: &str) -> Result<String> {
