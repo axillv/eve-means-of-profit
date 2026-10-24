@@ -13,4 +13,5 @@ pub mod pkce;
 pub mod places;
 pub mod saved;
 pub mod secrets;
+pub mod skills;
 pub mod token;
