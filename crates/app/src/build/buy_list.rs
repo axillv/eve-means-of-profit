@@ -75,11 +75,6 @@ struct PriceEdit {
     bad: bool,
 }
 
-/// Whether the timer refreshes the prices. On by default; the tick lasts for the session.
-fn auto_key() -> Id {
-    Id::new("build buy list auto refresh")
-}
-
 /// The columns the player hid on the Buy list, kept in the frame memory after the saved setting is
 /// read on the first frame of a session.
 fn hidden_key() -> Id {
@@ -149,7 +144,7 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Option<Edit> {
         show_outcome(cx, outcome, now);
     }
     let held = cx.market.held();
-    let mut auto = ui.data(|data| data.get_temp(auto_key())).unwrap_or(true);
+    let mut auto = auto_refresh(cx);
     ask_when_due(cx, &held, auto, now);
 
     load_typed(ui, cx, page.selected);
@@ -192,7 +187,7 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Option<Edit> {
             .add(Checkbox::new(&mut auto, "Refresh automatically"))
             .changed()
         {
-            ui.data_mut(|data| data.insert_temp(auto_key(), auto));
+            save_auto_refresh(cx, auto);
         }
         copy_button(ui, &buy, cx);
         if column_menu(ui, &mut hidden) {
@@ -267,6 +262,34 @@ fn save_typed(cx: &mut Shared, saved: Option<i64>, typed: &[(TypeId, Option<Manu
         if let Err(error) = result {
             report(cx, format!("Could not save the price: {error}"));
         }
+    }
+}
+
+/// Whether the prices refresh in the background, as the setting is saved.
+fn auto_refresh(cx: &mut Shared) -> bool {
+    match cx.store.history_settings() {
+        Ok(settings) => settings.auto_refresh,
+        Err(error) => {
+            report(
+                cx,
+                format!("Could not read the price history settings: {error}"),
+            );
+            false
+        }
+    }
+}
+
+/// Saves whether the prices refresh in the background; the setting is shared with the Setup panel.
+fn save_auto_refresh(cx: &mut Shared, auto: bool) {
+    let saved = cx.store.history_settings().and_then(|mut settings| {
+        settings.auto_refresh = auto;
+        cx.store.save_history_settings(&settings)
+    });
+    if let Err(error) = saved {
+        report(
+            cx,
+            format!("Could not save the price history settings: {error}"),
+        );
     }
 }
 

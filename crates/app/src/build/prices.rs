@@ -17,6 +17,7 @@ use mop_market::fuzzwork::{
     BytesHttp, BytesResponse, FORGE, FuzzworkMarket, MIN_GAP_SECS, Refresh, Side, Stat, SummaryRow,
 };
 
+use crate::history::Recorder;
 use crate::worker::Worker;
 
 /// A price older than this, in seconds, is shown in the stale colour.
@@ -90,6 +91,8 @@ pub struct Prices {
     stopped: AtomicBool,
     /// Typed prices, by plan id and item.
     manual: Mutex<BTreeMap<i64, BTreeMap<TypeId, Manual>>>,
+    /// Saves a reading of each download; `None` when the history is not kept.
+    recorder: Option<Arc<Recorder>>,
 }
 
 impl Prices {
@@ -104,7 +107,14 @@ impl Prices {
             first_asked: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             manual: Mutex::new(BTreeMap::new()),
+            recorder: None,
         }
+    }
+
+    /// Saves a reading of each download through `recorder`, on the worker thread.
+    pub fn recording(mut self, recorder: Arc<Recorder>) -> Self {
+        self.recorder = Some(recorder);
+        self
     }
 
     /// Asks the worker thread to refresh the file. A request already queued or running is not
@@ -155,6 +165,9 @@ impl Prices {
             published_at: market.published_at(),
             next_refresh_at: market.next_refresh_at(),
         };
+        if let (Ok(Refresh::Downloaded), Some(recorder)) = (&result, &self.recorder) {
+            recorder.record_download(&held);
+        }
         *lock(&self.held) = Arc::new(held);
         result
     }

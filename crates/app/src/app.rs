@@ -9,6 +9,7 @@ pub mod build;
 pub mod characters;
 pub mod dock;
 pub mod first_run;
+pub mod history;
 pub mod item_panel;
 pub mod jobs;
 pub mod layout;
@@ -170,6 +171,10 @@ pub struct App {
     installed: Option<u64>,
     /// Progress of a background update: bytes done and the total when known.
     update: Option<(u64, Option<u64>)>,
+    /// Saves the readings of the downloads; the Setup panel reads the history through the shared store.
+    recorder: Arc<history::Recorder>,
+    /// When the background refresh last checked, in seconds.
+    history_checked: Option<i64>,
     events: Receiver<Event>,
     events_tx: Sender<Event>,
     page: Page,
@@ -206,6 +211,10 @@ impl App {
             )));
         }
         let mut store = opened.store;
+        let recorder = Arc::new(history::Recorder::open(
+            &config.data_dir.join(USER_DB),
+            now,
+        )?);
         let settings = store.settings()?;
         let sde_path = config.data_dir.join(SDE_DB);
         let sde = open_sde(&sde_path)?;
@@ -223,9 +232,10 @@ impl App {
                 sde,
                 store,
                 worker: Worker::spawn(ctx.clone(), config.fetch),
-                market: Arc::new(build::prices::Prices::new(Box::new(
-                    mop_market::http::UreqHttp::new(),
-                ))),
+                market: Arc::new(
+                    build::prices::Prices::new(Box::new(mop_market::http::UreqHttp::new()))
+                        .recording(Arc::clone(&recorder)),
+                ),
                 style,
                 density: settings.density,
                 notices,
@@ -240,6 +250,8 @@ impl App {
             cancel: Arc::new(AtomicBool::new(false)),
             installed,
             update: None,
+            recorder,
+            history_checked: None,
             events,
             events_tx,
             page: Page::Build,
@@ -276,6 +288,10 @@ impl App {
     /// One frame: take the worker's results, then draw.
     pub fn show(&mut self, ui: &mut Ui) {
         self.drain_events();
+        history::background_refresh(&mut self.shared, &mut self.history_checked);
+        for error in self.recorder.take_errors() {
+            self.shared.notices.push(Notice::error(error));
+        }
         if ui.input_mut(|input| input.consume_key(Modifiers::CTRL, Key::Comma)) {
             self.settings_open = true;
         }

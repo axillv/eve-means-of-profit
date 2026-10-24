@@ -3,6 +3,7 @@ mod build;
 mod build_stock;
 mod buy_list;
 mod characters;
+mod history;
 mod item_panel;
 mod jobs;
 mod layout_model;

@@ -21,6 +21,7 @@ mod tests {
     use mop_core::money::{Money, Rate};
     use mop_core::volume::Volume;
     use mop_market::book::PriceRule;
+    use mop_market::fuzzwork::{Side, SummaryRow};
     use mop_sde::{Facility, Fetch, FetchError, RouteKind, Sde, Security, import};
     use mop_store::{PlanRecord, Store};
     use tempfile::TempDir;
@@ -98,6 +99,7 @@ mod tests {
     }
 
     fn start_at(folders: &Folders, size: egui::Vec2) -> Harness<'static, App> {
+        history_off(&folders.data.join("user.sqlite"));
         let config = AppConfig {
             data_dir: folders.data.clone(),
             cache_dir: folders.cache.clone(),
@@ -300,6 +302,16 @@ mod tests {
     fn new_facility(harness: &mut Harness<'_, App>, name: &str) {
         click_nth(harness, "New", 0);
         type_into(harness, "Name", name);
+    }
+
+    /// The background price refresh stays off here: the test asks for each download itself.
+    fn history_off(db: &Path) {
+        let mut store = Store::open(db, NOW).expect("the store opens").store;
+        let mut settings = store.history_settings().expect("history settings");
+        settings.auto_refresh = false;
+        store
+            .save_history_settings(&settings)
+            .expect("history settings saved");
     }
 
     #[test]
@@ -702,6 +714,57 @@ mod tests {
             .accesskit_node()
             .toggled()
             == Some(egui::accesskit::Toggled::True)
+    }
+
+    /// A Forge history of 92 days, three rows a reading, under the default rule.
+    fn seed_forge_history(folders: &Folders) {
+        let mut store = Store::open(&folders.data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
+        let market = store
+            .history_markets()
+            .expect("the markets")
+            .iter()
+            .find(|market| market.place == 10_000_002)
+            .expect("the Forge is listed")
+            .id;
+        let row = || SummaryRow {
+            min: Money::from_ten_thousandths(500),
+            max: Money::ZERO,
+            weighted_average: Money::ZERO,
+            median: Money::ZERO,
+            five_percent: Money::ZERO,
+            volume: 1,
+            orders: 1,
+        };
+        for day in 20_000..20_092 {
+            store
+                .record(
+                    market,
+                    day,
+                    &[
+                        (34, Side::Sell, row()),
+                        (34, Side::Buy, row()),
+                        (11481, Side::Sell, row()),
+                    ],
+                )
+                .expect("the reading is recorded");
+        }
+    }
+
+    #[test]
+    fn the_price_history_picture_for_the_owner_is_taken() {
+        let folders = Folders::new();
+        seed_forge_history(&folders);
+        let mut harness = start_at(&folders, vec2(1280.0, 800.0));
+        harness.run_steps(2);
+        click_nth(&mut harness, "The Forge", 0);
+        harness.run_steps(3);
+        assert!(shown(
+            &harness,
+            "Forecast for The Forge: about 39.0 kB after 1 year"
+        ));
+        harness.snapshot("history-panel");
     }
 
     #[test]

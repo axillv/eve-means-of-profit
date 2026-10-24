@@ -106,6 +106,7 @@ mod tests {
 
     /// The window the checks run in: tall, so that the Structures panel shows its rows.
     fn start(folders: &Folders) -> Harness<'static, App> {
+        history_off(&folders.data.join("user.sqlite"));
         let config = AppConfig {
             data_dir: folders.data.clone(),
             cache_dir: folders.cache.clone(),
@@ -185,6 +186,16 @@ mod tests {
         }
     }
 
+    /// The background price refresh stays off here: the test asks for each download itself.
+    fn history_off(db: &Path) {
+        let mut store = Store::open(db, NOW).expect("the store opens").store;
+        let mut settings = store.history_settings().expect("history settings");
+        settings.auto_refresh = false;
+        store
+            .save_history_settings(&settings)
+            .expect("history settings saved");
+    }
+
     #[test]
     fn the_panel_lists_the_structures_in_order() {
         let folders = Folders::new();
@@ -226,9 +237,12 @@ mod tests {
         );
 
         // Row 2 has no system, row 3 has no system and no check time: three dashes, two on row 3.
+        // The Price history panel on the same page also shows dashes; only those on these rows count.
+        let (row_two_y, row_three_y) = (row_two[0].center().y, row_three[0].center().y);
         let mut dashes: Vec<f32> = harness
             .query_all_by_label("—")
             .map(|node| node.rect().center().y)
+            .filter(|y| (y - row_two_y).abs() < 2.0 || (y - row_three_y).abs() < 2.0)
             .collect();
         dashes.sort_by(f32::total_cmp);
         assert_eq!(
@@ -236,7 +250,6 @@ mod tests {
             3,
             "rows 2 and 3 show a dash for each missing value"
         );
-        let (row_two_y, row_three_y) = (row_two[0].center().y, row_three[0].center().y);
         assert!(
             (dashes[0] - row_two_y).abs() < 2.0,
             "the first dash is on row 2"

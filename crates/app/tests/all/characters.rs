@@ -92,6 +92,7 @@ mod tests {
         let cache = dir.path().join("cache");
         fs::create_dir_all(&data).expect("the data folder");
         import(&fixture(), &data.join("sde.sqlite")).expect("the fixture imports");
+        history_off(&data.join("user.sqlite"));
         let mut store = Store::open(&data.join("user.sqlite"), NOW)
             .expect("the store opens")
             .store;
@@ -548,6 +549,16 @@ mod tests {
             .rect()
             .center()
             .y
+    }
+
+    /// The background price refresh stays off here: the test asks for each download itself.
+    fn history_off(db: &Path) {
+        let mut store = Store::open(db, NOW).expect("the store opens").store;
+        let mut settings = store.history_settings().expect("history settings");
+        settings.auto_refresh = false;
+        store
+            .save_history_settings(&settings)
+            .expect("history settings saved");
     }
 
     #[test]

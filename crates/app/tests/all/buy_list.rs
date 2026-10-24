@@ -1143,6 +1143,8 @@ mod tests {
         let mut harness = start(&env, &world);
         harness.run();
         click(&mut harness, "New plan");
+        // The new app downloads the file at its start, so the price can arrive after the label.
+        settle(&mut harness, "107,998.43");
         settle(&mut harness, "Cheapest (Alliance)");
         assert!(shown(&harness, "107,998.43"));
     }
@@ -1647,7 +1649,7 @@ mod tests {
     }
 
     #[test]
-    fn with_another_page_open_no_timer_request_runs() {
+    fn with_another_page_open_the_timer_request_still_runs() {
         let world = World::new();
         let mut harness = complete_list(&world, &standard_services());
         click(&mut harness, "Setup");
@@ -1655,8 +1657,9 @@ mod tests {
         for _ in 0..5 {
             harness.run();
         }
-        assert_eq!(world.requests(), 1);
-        // Back on the Build page the list is drawn again, and its timer asks for the file.
+        // The background refresh asks whatever page is open, so the timer's request runs on Setup.
+        assert_eq!(world.requests(), 2);
+        // Back on the Build page the list is drawn again, with the next refresh already set.
         click(&mut harness, "Build");
         settle(&mut harness, "Next refresh in 15m");
         assert_eq!(world.requests(), 2);

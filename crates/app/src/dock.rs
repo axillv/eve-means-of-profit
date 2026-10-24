@@ -66,12 +66,13 @@ pub fn characters_layout() -> DockState<CharactersPanel> {
     dock
 }
 
-/// The Setup page: Facilities on the left; Freight services over Price rule over Structures on the right.
+/// The Setup page: Facilities over Price history on the left; Freight services over Price rule over Structures on the right.
 pub fn setup_layout() -> DockState<SetupPanel> {
     let mut dock = DockState::new(vec![SetupPanel::Facilities]);
     let surface = dock.main_surface_mut();
-    let [_facilities, freight] =
+    let [facilities, freight] =
         surface.split_right(NodeIndex::root(), 0.5, vec![SetupPanel::FreightServices]);
+    surface.split_below(facilities, 0.5, vec![SetupPanel::PriceHistory]);
     let [_freight, price] = surface.split_below(freight, 0.5, vec![SetupPanel::PriceRule]);
     surface.split_below(price, 0.5, vec![SetupPanel::Structures, SetupPanel::Fees]);
     dock

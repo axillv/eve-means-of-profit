@@ -5,6 +5,7 @@ mod facilities;
 mod fees;
 mod fields;
 mod freight;
+pub mod history;
 mod price_rule;
 mod structures;
 
@@ -21,6 +22,7 @@ pub struct SetupPage;
 pub enum SetupPanel {
     Facilities,
     FreightServices,
+    PriceHistory,
     PriceRule,
     Structures,
     Fees,
@@ -31,6 +33,7 @@ impl SetupPanel {
         match self {
             Self::Facilities => "Facilities",
             Self::FreightServices => "Freight services",
+            Self::PriceHistory => "Price history",
             Self::PriceRule => "Price rule",
             Self::Structures => "Structures",
             Self::Fees => "Fees and skills",
@@ -54,6 +57,7 @@ pub fn show(_page: &mut SetupPage, panel: SetupPanel, ui: &mut Ui, cx: &mut Shar
     match panel {
         SetupPanel::Facilities => facilities::show(ui, cx),
         SetupPanel::FreightServices => freight::show(ui, cx),
+        SetupPanel::PriceHistory => history::show(ui, cx),
         SetupPanel::PriceRule => price_rule::show(ui, cx),
         SetupPanel::Structures => structures::show(ui, cx),
         SetupPanel::Fees => fees::show(ui, cx),
