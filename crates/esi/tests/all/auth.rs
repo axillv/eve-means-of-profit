@@ -956,7 +956,8 @@ mod tests {
     fn callback_reports_the_player_cancelling() {
         let _guard = port_lock();
         let handle = wait_in_thread(STATE, far_deadline());
-        let answer = request("/eve-means-of-profit?error=access_denied&error_description=User%20cancelled");
+        let answer =
+            request("/eve-means-of-profit?error=access_denied&error_description=User%20cancelled");
         assert!(answer.starts_with("HTTP/1.1 400"));
         assert!(matches!(
             handle.join().expect("thread"),
