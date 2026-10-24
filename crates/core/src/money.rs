@@ -16,6 +16,15 @@ use crate::volume::Volume;
 const FULL_RATE_PPM: u32 = 1_000_000;
 /// Decimals a fraction of one keeps: a rate is counted in parts per million.
 const PPM_DECIMALS: u32 = 6;
+/// Units of the short ISK form, smallest first, with each unit's size in ten-thousandths of ISK.
+const SHORT_UNITS: [(&str, i128); 4] = [
+    ("K", 10_000_000),
+    ("M", 10_000_000_000),
+    ("B", 10_000_000_000_000),
+    ("T", 10_000_000_000_000_000),
+];
+/// Amounts with an absolute value below this (under 1,000.00 ISK) keep the full form.
+const SHORT_FORM_LIMIT: i128 = 9_999_950;
 
 /// An amount of ISK, counted in ten-thousandths of ISK (0.0001).
 ///
@@ -105,6 +114,50 @@ impl Money {
     /// The amount rounded to 0.01 ISK, grouped by thousands, always with two decimals.
     pub fn format_isk(self) -> String {
         fixed_2(self.0)
+    }
+
+    /// The amount in a short form for headlines and axes: `12.41 B`, `310 M`, `950.25`.
+    /// Amounts under 1,000.00 ISK keep the full form; unit letters are upper case.
+    pub fn format_isk_short(self) -> String {
+        self.short_form().unwrap_or_else(|| self.format_isk())
+    }
+
+    /// As `format_isk_short`, with a leading `+` on positive amounts that do not show `0.00`.
+    pub fn format_isk_short_signed(self) -> String {
+        let text = self.format_isk_short();
+        if self.0 > 0 && text != "0.00" {
+            format!("+{text}")
+        } else {
+            text
+        }
+    }
+
+    /// `None` only if an intermediate `i128` step overflows, which an `i64` amount cannot do.
+    fn short_form(self) -> Option<String> {
+        let amount = i128::from(self.0);
+        let a = amount.checked_abs()?;
+        if a < SHORT_FORM_LIMIT {
+            return Some(self.format_isk());
+        }
+        let sign = if amount < 0 { "-" } else { "" };
+        let idx = (0..SHORT_UNITS.len())
+            .rev()
+            .find(|&i| SHORT_UNITS.get(i).is_some_and(|unit| a >= unit.1))
+            .unwrap_or(0);
+        let (letter, size) = *SHORT_UNITS.get(idx)?;
+        let hundredths = div_round(a.checked_mul(100)?, size)?;
+        if hundredths < 10_000 {
+            let whole = hundredths.checked_div(100)?;
+            let part = hundredths.checked_rem(100)?;
+            return Some(format!("{sign}{whole}.{part:02} {letter}"));
+        }
+        let whole_units = div_round(a, size)?;
+        if whole_units < 1_000 {
+            return Some(format!("{sign}{whole_units} {letter}"));
+        }
+        // Rounds up to the next unit; T is the largest, and no i64 amount reaches 1,000 T.
+        let (next_letter, _) = *SHORT_UNITS.get(idx.checked_add(1)?)?;
+        Some(format!("{sign}1.00 {next_letter}"))
     }
 
     fn scaled(self, numerator: i128, denominator: i128) -> Option<Money> {
@@ -312,6 +365,59 @@ mod tests {
         assert_eq!(m(-50).format_isk(), "-0.01");
         assert_eq!(m(i64::MAX).format_isk(), "922,337,203,685,477.58");
         assert_eq!(m(i64::MIN).format_isk(), "-922,337,203,685,477.58");
+    }
+
+    #[test]
+    fn format_isk_short_uses_the_largest_unit() {
+        assert_eq!(m(12_410_000_000 * 10_000).format_isk_short(), "12.41 B");
+        assert_eq!(m(1_250_000_000 * 10_000).format_isk_short(), "1.25 B");
+        assert_eq!(m(310_400_000 * 10_000).format_isk_short(), "310 M");
+        assert_eq!(m(999_600_000 * 10_000).format_isk_short(), "1.00 B");
+        assert_eq!(m(4_500 * 10_000).format_isk_short(), "4.50 K");
+    }
+
+    #[test]
+    fn format_isk_short_keeps_small_amounts_in_full() {
+        assert_eq!(m(9_502_500).format_isk_short(), "950.25");
+        assert_eq!(m(0).format_isk_short(), "0.00");
+        assert_eq!(m(9_999_940).format_isk_short(), "999.99");
+        assert_eq!(m(9_999_950).format_isk_short(), "1.00 K");
+    }
+
+    #[test]
+    fn format_isk_short_rounds_up_into_the_next_unit() {
+        assert_eq!(m(99_995 * 10_000).format_isk_short(), "100 K");
+        assert_eq!(m(99_994 * 10_000).format_isk_short(), "99.99 K");
+        assert_eq!(m(999_999 * 10_000).format_isk_short(), "1.00 M");
+        assert_eq!(m(1_000_000 * 10_000).format_isk_short(), "1.00 M");
+        assert_eq!(m(100_000_000_000 * 10_000).format_isk_short(), "100 B");
+    }
+
+    #[test]
+    fn format_isk_short_reaches_the_extremes() {
+        assert_eq!(m(i64::MAX).format_isk_short(), "922 T");
+        assert_eq!(m(i64::MIN).format_isk_short(), "-922 T");
+    }
+
+    #[test]
+    fn format_isk_short_keeps_the_sign() {
+        assert_eq!(m(-1_250_000_000 * 10_000).format_isk_short(), "-1.25 B");
+        assert_eq!(m(-49).format_isk_short(), "0.00");
+        assert_eq!(m(-9_502_500).format_isk_short(), "-950.25");
+    }
+
+    #[test]
+    fn format_isk_short_signed_adds_a_plus_to_gains() {
+        assert_eq!(m(310_400_000 * 10_000).format_isk_short_signed(), "+310 M");
+        assert_eq!(
+            m(-1_250_000_000 * 10_000).format_isk_short_signed(),
+            "-1.25 B"
+        );
+        assert_eq!(m(0).format_isk_short_signed(), "0.00");
+        assert_eq!(m(-49).format_isk_short_signed(), "0.00");
+        assert_eq!(m(4_500 * 10_000).format_isk_short_signed(), "+4.50 K");
+        assert_eq!(m(125_000).format_isk_short_signed(), "+12.50");
+        assert_eq!(m(49).format_isk_short_signed(), "0.00");
     }
 
     #[test]
