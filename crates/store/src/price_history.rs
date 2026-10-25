@@ -2,7 +2,7 @@
 //! market's retention allows, and the room the history takes.
 
 use std::cmp::Reverse;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use mop_core::industry::TypeId;
 use mop_core::money::Money;
@@ -567,5 +567,285 @@ impl Store {
         tx.execute("DELETE FROM history_markets WHERE id = ?1", params![market])?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Saves the market prices of one net worth point. A copy already saved at the same time is
+    /// replaced whole. A failed row writes nothing.
+    pub fn save_point_prices(&mut self, prices: &PointPrices) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM point_price_rows WHERE at = ?1",
+            params![prices.at],
+        )?;
+        tx.execute("DELETE FROM point_prices WHERE at = ?1", params![prices.at])?;
+        tx.execute(
+            "INSERT INTO point_prices (at, published_at) VALUES (?1, ?2)",
+            params![prices.at, prices.published_at],
+        )?;
+        for ((type_id, side), row) in &prices.rows {
+            write_point_row(&tx, prices.at, *type_id, *side, row)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The saved copies whose time is from `from` to `to`, both included, oldest first.
+    pub fn point_prices(&self, from: i64, to: i64) -> Result<Vec<PointPrices>> {
+        let mut heads = self.conn.prepare(
+            "SELECT at, published_at FROM point_prices WHERE at BETWEEN ?1 AND ?2 ORDER BY at",
+        )?;
+        let heads = heads
+            .query_map(params![from, to], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<(i64, Option<i64>)>>>()?;
+        heads
+            .into_iter()
+            .map(|(at, published_at)| {
+                Ok(PointPrices {
+                    at,
+                    published_at,
+                    rows: point_rows(&self.conn, at)?,
+                })
+            })
+            .collect()
+    }
+
+    /// How many copies and how many price rows are saved, in that order.
+    pub fn point_prices_size(&self) -> Result<(u64, u64)> {
+        let copies: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM point_prices", [], |row| row.get(0))?;
+        let rows: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM point_price_rows", [], |row| {
+                    row.get(0)
+                })?;
+        Ok((
+            from_stored(copies, "point_prices", 0, "at")?,
+            from_stored(rows, "point_price_rows", 0, "at")?,
+        ))
+    }
+}
+
+/// The market prices of every type and side at the moment a net worth point was recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PointPrices {
+    /// When the point was recorded.
+    pub at: i64,
+    /// When the market published the prices, if it was known.
+    pub published_at: Option<i64>,
+    /// One row for each type and side that had a price.
+    pub rows: BTreeMap<(TypeId, Side), SummaryRow>,
+}
+
+/// One saved price row: type, side code, then the five prices, volume and orders as stored.
+type RawPointRow = (i64, i64, i64, i64, i64, i64, i64, i64, i64);
+
+fn write_point_row(
+    conn: &Connection,
+    at: i64,
+    type_id: TypeId,
+    side: Side,
+    row: &SummaryRow,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO point_price_rows \
+         (at, type_id, side, min, max, weighted_average, median, five_percent, volume, orders) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            at,
+            i64::from(type_id),
+            side_code(side),
+            row.min.ten_thousandths(),
+            row.max.ten_thousandths(),
+            row.weighted_average.ten_thousandths(),
+            row.median.ten_thousandths(),
+            row.five_percent.ten_thousandths(),
+            to_stored_u64(row.volume)?,
+            i64::from(row.orders),
+        ],
+    )?;
+    Ok(())
+}
+
+/// The saved price rows of one copy, by type and side.
+fn point_rows(conn: &Connection, at: i64) -> Result<BTreeMap<(TypeId, Side), SummaryRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT type_id, side, min, max, weighted_average, median, five_percent, volume, orders \
+         FROM point_price_rows WHERE at = ?1",
+    )?;
+    let raws = stmt
+        .query_map(params![at], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<RawPointRow>>>()?;
+    let mut rows = BTreeMap::new();
+    for (type_value, side_value, min, max, weighted, median, five, volume, orders) in raws {
+        let type_id: TypeId = from_stored(type_value, "point_price_rows", at, "type_id")?;
+        let side = side_from_code(side_value)
+            .ok_or_else(|| bad_code("point_price_rows", at, "side", side_value))?;
+        let row = SummaryRow {
+            min: Money::from_ten_thousandths(min),
+            max: Money::from_ten_thousandths(max),
+            weighted_average: Money::from_ten_thousandths(weighted),
+            median: Money::from_ten_thousandths(median),
+            five_percent: Money::from_ten_thousandths(five),
+            volume: from_stored(volume, "point_price_rows", at, "volume")?,
+            orders: from_stored(orders, "point_price_rows", at, "orders")?,
+        };
+        rows.insert((type_id, side), row);
+    }
+    Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FORGE_PLACE: u64 = 10_000_002;
+    const TRITANIUM: TypeId = 34;
+    const PAU: TypeId = 11_688;
+
+    fn isk(whole: i64) -> Money {
+        Money::from_ten_thousandths(whole * 10_000)
+    }
+
+    fn row(prices: [i64; 5], volume: u64, orders: u32) -> SummaryRow {
+        let [min, max, weighted_average, median, five_percent] = prices;
+        SummaryRow {
+            min: isk(min),
+            max: isk(max),
+            weighted_average: isk(weighted_average),
+            median: isk(median),
+            five_percent: isk(five_percent),
+            volume,
+            orders,
+        }
+    }
+
+    fn pau_sell() -> SummaryRow {
+        row([61_000, 75_000, 63_100, 66_000, 61_200], 1_200, 14)
+    }
+
+    fn pau_buy() -> SummaryRow {
+        row([50_000, 55_500, 53_000, 51_000, 55_010], 800, 9)
+    }
+
+    fn pau_copy(at: i64, published_at: Option<i64>) -> PointPrices {
+        PointPrices {
+            at,
+            published_at,
+            rows: BTreeMap::from([
+                ((PAU, Side::Sell), pau_sell()),
+                ((PAU, Side::Buy), pau_buy()),
+            ]),
+        }
+    }
+
+    fn open_temp() -> (tempfile::TempDir, std::path::PathBuf, Store) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eve.db");
+        let store = Store::open(&path, 1_000).expect("open").store;
+        (dir, path, store)
+    }
+
+    #[test]
+    fn a_copy_comes_back_whole_after_reopening() {
+        let (_dir, path, mut store) = open_temp();
+        let copy = pau_copy(1_000_000_000, Some(999_999_000));
+        store.save_point_prices(&copy).expect("save");
+        drop(store);
+
+        let reopened = Store::open(&path, 2_000).expect("reopen").store;
+
+        assert_eq!(
+            reopened
+                .point_prices(999_999_999, 1_000_000_000)
+                .expect("read"),
+            vec![copy]
+        );
+        assert!(
+            reopened
+                .point_prices(0, 999_999_999)
+                .expect("read")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn saving_again_at_the_same_time_replaces_the_copy() {
+        let (_dir, _path, mut store) = open_temp();
+        store
+            .save_point_prices(&pau_copy(1_000_000_000, Some(999_999_000)))
+            .expect("first");
+        let tritanium = PointPrices {
+            at: 1_000_000_000,
+            published_at: None,
+            rows: BTreeMap::from([((TRITANIUM, Side::Sell), pau_sell())]),
+        };
+        store.save_point_prices(&tritanium).expect("replace");
+        store
+            .save_point_prices(&pau_copy(1_000_086_400, None))
+            .expect("second");
+
+        let copies = store.point_prices(0, i64::MAX).expect("read");
+
+        assert_eq!(copies.len(), 2);
+        assert_eq!(copies.first(), Some(&tritanium));
+        assert_eq!(store.point_prices_size().expect("size"), (2, 3));
+    }
+
+    #[test]
+    fn a_negative_price_writes_nothing_and_keeps_the_earlier_copies() {
+        let (_dir, _path, mut store) = open_temp();
+        let good = pau_copy(1_000_000_000, Some(999_999_000));
+        store.save_point_prices(&good).expect("first");
+        let mut bad = pau_copy(1_000_086_400, None);
+        bad.rows.insert(
+            (PAU, Side::Sell),
+            SummaryRow {
+                five_percent: Money::from_ten_thousandths(-1),
+                ..pau_sell()
+            },
+        );
+
+        let result = store.save_point_prices(&bad);
+        assert!(matches!(result, Err(StoreError::Sqlite(_))), "{result:?}");
+        let mut replacing = bad.clone();
+        replacing.at = good.at;
+        assert!(store.save_point_prices(&replacing).is_err());
+
+        assert_eq!(store.point_prices(0, i64::MAX).expect("read"), vec![good]);
+        assert_eq!(store.point_prices_size().expect("size"), (1, 2));
+    }
+
+    #[test]
+    fn forgetting_a_market_keeps_every_copy() {
+        let (_dir, _path, mut store) = open_temp();
+        store
+            .save_point_prices(&pau_copy(1_000_000_000, None))
+            .expect("save");
+        let forge = store
+            .history_markets()
+            .expect("markets")
+            .into_iter()
+            .find(|market| market.place == FORGE_PLACE)
+            .expect("the Forge");
+
+        store.forget_market(forge.id).expect("forget");
+
+        assert_eq!(store.point_prices(0, i64::MAX).expect("read").len(), 1);
+        assert_eq!(store.point_prices_size().expect("size"), (1, 2));
     }
 }

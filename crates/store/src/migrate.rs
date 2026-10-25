@@ -240,6 +240,23 @@ CREATE TABLE price_history (
     orders INTEGER NOT NULL,
     PRIMARY KEY (market, type_id, side, day)
 ) WITHOUT ROWID;
+CREATE TABLE point_prices (
+    at INTEGER PRIMARY KEY,
+    published_at INTEGER
+);
+CREATE TABLE point_price_rows (
+    at INTEGER NOT NULL REFERENCES point_prices (at),
+    type_id INTEGER NOT NULL CHECK (type_id >= 0),
+    side INTEGER NOT NULL CHECK (side IN (0, 1)),
+    min INTEGER NOT NULL CHECK (min >= 0),
+    max INTEGER NOT NULL CHECK (max >= 0),
+    weighted_average INTEGER NOT NULL CHECK (weighted_average >= 0),
+    median INTEGER NOT NULL CHECK (median >= 0),
+    five_percent INTEGER NOT NULL CHECK (five_percent >= 0),
+    volume INTEGER NOT NULL CHECK (volume >= 0),
+    orders INTEGER NOT NULL CHECK (orders >= 0),
+    PRIMARY KEY (at, type_id, side)
+) WITHOUT ROWID;
 CREATE TABLE history_settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     limit_bytes INTEGER,
