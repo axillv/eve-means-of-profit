@@ -478,7 +478,7 @@ impl App {
                 let now = (self.shared.clock)();
                 format!(
                     "Market data: oldest {}",
-                    // May saturate for a publish time in the future: shown as an age of zero.
+                    // A floor at 0 is meant here: a publish time in the future shows as an age of zero.
                     build::prices::age_text(now.saturating_sub(published))
                 )
             }
@@ -525,8 +525,8 @@ impl App {
                 self.shared.session.set_saved(saved);
                 let now = (self.shared.clock)();
                 if let Some(oldest) = self.shared.session.oldest_fetch() {
-                    // May saturate for a fetch time in the future (clock set back): the age is then very
-                    // small or zero, which is the right answer, not an error.
+                    // A floor at 0 is meant here: a fetch time in the future (clock set back) gives a
+                    // very small or zero age, which is the right answer, not an error.
                     let age = now.saturating_sub(oldest);
                     if age > STALE_DATA_SECS {
                         self.shared.notices.push(Notice::info(format!(
@@ -781,11 +781,13 @@ impl App {
                         "The saved industry data could not be read and was replaced with fresh data.",
                     ));
                 }
+                // Cannot saturate: `now` is a Unix time in seconds, and adding 60 cannot reach i64::MAX.
                 timing.next = now.saturating_add(INDUSTRY_RETRY_SECS);
             }
             // Never ask again before the retry interval, even when the answer says `now`: a
             // request answered with `now` would otherwise be asked again on every frame.
             Ok(Refreshed::NotYet { until }) => {
+                // Cannot saturate: `now` is a Unix time in seconds, and adding 60 cannot reach i64::MAX.
                 timing.next = until.max(now.saturating_add(INDUSTRY_RETRY_SECS));
             }
             Err(EsiError::RateLimited {
@@ -794,12 +796,14 @@ impl App {
                 self.shared.notices.push(Notice::error(format!(
                     "EVE industry data paused for {retry_after_seconds} s (ESI rate limit)."
                 )));
+                // Cannot saturate: `now` is a Unix time in seconds, and adding 300 cannot reach i64::MAX.
                 timing.next = now.saturating_add(INDUSTRY_ERROR_RETRY_SECS);
             }
             Err(error) => {
                 self.shared.notices.push(Notice::error(format!(
                     "Could not get EVE industry data: {error}"
                 )));
+                // Cannot saturate: `now` is a Unix time in seconds, and adding 300 cannot reach i64::MAX.
                 timing.next = now.saturating_add(INDUSTRY_ERROR_RETRY_SECS);
             }
         }

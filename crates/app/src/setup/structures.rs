@@ -228,8 +228,8 @@ fn places_of(
             let checked = entry.map_or_else(
                 || NO_VALUE.to_owned(),
                 |entry| {
-                    // May saturate for a check time in the future (clock set back): the age is then
-                    // zero, which is the right answer, not an error.
+                    // A floor at 0 is meant here: a check time in the future (clock set back) gives an
+                    // age of zero, which is the right answer, not an error.
                     let age = age_text(now.saturating_sub(entry.checked_at));
                     if entry.refused { age + NO_ACCESS } else { age }
                 },
