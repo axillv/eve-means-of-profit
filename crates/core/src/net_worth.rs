@@ -257,6 +257,20 @@ pub fn value(
     prices: &dyn Fn(TypeId, i64) -> Option<ItemPrices>,
     shown: &BTreeSet<Part>,
 ) -> Result<PointValue, NetWorthError> {
+    value_with(
+        point,
+        &|type_id, at| prices(type_id, at).and_then(|item| item.price(basis)),
+        shown,
+    )
+}
+
+/// Values one point with the price of each type given directly. `price` gets the type and the
+/// point's UTC day; `None` means no price, and the units go into `unpriced`.
+pub fn value_with(
+    point: &Point,
+    price: &dyn Fn(TypeId, i64) -> Option<Money>,
+    shown: &BTreeSet<Part>,
+) -> Result<PointValue, NetWorthError> {
     let day = point.at.div_euclid(SECONDS_PER_DAY);
     let mut by_part: BTreeMap<Part, Money> =
         Part::ALL.iter().map(|&part| (part, Money::ZERO)).collect();
@@ -265,7 +279,7 @@ pub fn value(
     let mut unpriced: BTreeMap<TypeId, u64> = BTreeMap::new();
 
     for (key, member) in &point.members {
-        let valued = value_member(&member.snapshot, basis, prices, day)?;
+        let valued = value_member(&member.snapshot, price, day)?;
         let mut character = Money::ZERO;
         for (&part, &amount) in &valued.parts {
             let sum = by_part.entry(part).or_insert(Money::ZERO);
@@ -300,8 +314,7 @@ pub fn value(
 
 fn value_member(
     snapshot: &Snapshot,
-    basis: PriceBasis,
-    prices: &dyn Fn(TypeId, i64) -> Option<ItemPrices>,
+    price: &dyn Fn(TypeId, i64) -> Option<Money>,
     day: i64,
 ) -> Result<Valued, NetWorthError> {
     let mut parts: BTreeMap<Part, Money> =
@@ -315,8 +328,8 @@ fn value_member(
                 holdings.sell_orders.unwrap_or(Money::ZERO),
             );
             parts.insert(Part::BuyEscrow, holdings.buy_escrow.unwrap_or(Money::ZERO));
-            let (assets, assets_unpriced) = priced_units(&holdings.assets, basis, prices, day)?;
-            let (jobs, jobs_unpriced) = priced_units(&holdings.jobs_output, basis, prices, day)?;
+            let (assets, assets_unpriced) = priced_units(&holdings.assets, price, day)?;
+            let (jobs, jobs_unpriced) = priced_units(&holdings.jobs_output, price, day)?;
             parts.insert(Part::Assets, assets);
             parts.insert(Part::IndustryJobs, jobs);
             unpriced.insert(Part::Assets, assets_unpriced);
@@ -336,14 +349,13 @@ fn value_member(
 /// The value of counted units at `basis`, and the units of each type that had no price.
 fn priced_units(
     units: &BTreeMap<TypeId, u64>,
-    basis: PriceBasis,
-    prices: &dyn Fn(TypeId, i64) -> Option<ItemPrices>,
+    price: &dyn Fn(TypeId, i64) -> Option<Money>,
     day: i64,
 ) -> Result<(Money, BTreeMap<TypeId, u64>), NetWorthError> {
     let mut total = Money::ZERO;
     let mut unpriced = BTreeMap::new();
     for (&type_id, &count) in units {
-        match prices(type_id, day).and_then(|item| item.price(basis)) {
+        match price(type_id, day) {
             Some(price) => {
                 let value = price
                     .checked_mul_qty(count)
@@ -357,6 +369,51 @@ fn priced_units(
         }
     }
     Ok((total, unpriced))
+}
+
+/// One point per UTC day: the last point of each day, in day order. Members are not changed.
+pub fn daily(points: &[Point]) -> Vec<Point> {
+    let mut last: BTreeMap<i64, &Point> = BTreeMap::new();
+    for point in points {
+        let day = point.at.div_euclid(SECONDS_PER_DAY);
+        last.entry(day)
+            .and_modify(|kept| {
+                if point.at >= kept.at {
+                    *kept = point;
+                }
+            })
+            .or_insert(point);
+    }
+    last.into_values().cloned().collect()
+}
+
+/// The characters carried for at least `min_age` seconds at the point's time, in key order.
+/// A record that is after the point, or whose age overflows, is not carried.
+pub fn long_carried(point: &Point, min_age: i64) -> Vec<CharacterKey> {
+    point
+        .members
+        .iter()
+        .filter(|(_, member)| {
+            point
+                .at
+                .checked_sub(member.record_at)
+                .is_some_and(|age| age >= min_age)
+        })
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
+/// A copy of the point without the given characters; `at` is kept.
+pub fn leave_out(point: &Point, keys: &BTreeSet<CharacterKey>) -> Point {
+    Point {
+        at: point.at,
+        members: point
+            .members
+            .iter()
+            .filter(|(key, _)| !keys.contains(key))
+            .map(|(key, member)| (key.clone(), member.clone()))
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -760,6 +817,120 @@ mod tests {
         assert_eq!(
             worth(&records, 1_000, PriceBasis::Midpoint).total,
             isk("95.00")
+        );
+    }
+
+    fn pau_point(at: i64, main_record: i64) -> Point {
+        let main = CharacterKey::Name("Main".to_string());
+        Point {
+            at,
+            members: BTreeMap::from([(
+                main,
+                Member {
+                    record_at: main_record,
+                    snapshot: seen("1,000,000.00", &[(12_612, 160)]),
+                },
+            )]),
+        }
+    }
+
+    fn pau_price(type_id: TypeId, _at: i64) -> Option<ItemPrices> {
+        (type_id == 12_612).then(|| ItemPrices {
+            lowest_sell: Some(isk("61,200.00")),
+            highest_buy: Some(isk("61,200.00")),
+            average: Some(isk("61,200.00")),
+        })
+    }
+
+    #[test]
+    fn daily_keeps_the_last_point_of_each_utc_day() {
+        let points: Vec<Point> = [1_000_000_000, 1_000_050_000, 1_000_079_999, 1_000_080_000]
+            .into_iter()
+            .map(|at| pau_point(at, at))
+            .collect();
+        let kept: Vec<i64> = daily(&points).iter().map(|point| point.at).collect();
+        assert_eq!(kept, vec![1_000_079_999, 1_000_080_000]);
+        assert!(daily(&[]).is_empty());
+    }
+
+    #[test]
+    fn daily_keeps_members_as_they_are() {
+        let point = pau_point(1_000_000_000, 1_000_000_000 - 900_000);
+        let kept = daily(std::slice::from_ref(&point));
+        assert_eq!(kept, vec![point]);
+    }
+
+    #[test]
+    fn value_with_prices_each_unit_given() {
+        let point = pau_point(1_000_000_000, 1_000_000_000);
+        let value = value_with(&point, &|_, _| Some(isk("61,200.00")), &all_parts()).unwrap();
+        assert_eq!(value.total, isk("10,792,000.00"));
+        assert_eq!(value.by_part[&Part::Assets], isk("9,792,000.00"));
+        assert!(value.unpriced.is_empty());
+    }
+
+    #[test]
+    fn value_with_no_price_leaves_units_unpriced() {
+        let point = pau_point(1_000_000_000, 1_000_000_000);
+        let value = value_with(&point, &|_, _| None, &all_parts()).unwrap();
+        assert_eq!(value.total, isk("1,000,000.00"));
+        assert_eq!(value.unpriced, BTreeMap::from([(12_612, 160)]));
+    }
+
+    #[test]
+    fn value_matches_value_with_at_each_basis() {
+        let point = pau_point(1_000_000_000, 1_000_000_000);
+        for basis in [
+            PriceBasis::Midpoint,
+            PriceBasis::HighestBuy,
+            PriceBasis::LowestSell,
+            PriceBasis::Average,
+        ] {
+            let by_basis = value(&point, basis, &pau_price, &all_parts()).unwrap();
+            let direct = value_with(&point, &|_, _| Some(isk("61,200.00")), &all_parts()).unwrap();
+            assert_eq!(by_basis, direct, "basis {basis:?}");
+        }
+    }
+
+    #[test]
+    fn long_carried_finds_members_a_week_old_or_more() {
+        let at = 1_000_000_000;
+        let point = Point {
+            at,
+            members: BTreeMap::from([
+                (
+                    CharacterKey::Name("Main".into()),
+                    Member {
+                        record_at: at,
+                        snapshot: seen("1.00", &[]),
+                    },
+                ),
+                (
+                    CharacterKey::Name("Alt".into()),
+                    Member {
+                        record_at: at - 604_800,
+                        snapshot: seen("1.00", &[]),
+                    },
+                ),
+                (
+                    CharacterKey::Name("Old".into()),
+                    Member {
+                        record_at: at - 604_799,
+                        snapshot: seen("1.00", &[]),
+                    },
+                ),
+            ]),
+        };
+        let carried = long_carried(&point, 604_800);
+        assert_eq!(carried, vec![CharacterKey::Name("Alt".into())]);
+        let left = leave_out(&point, &BTreeSet::from([CharacterKey::Name("Alt".into())]));
+        assert_eq!(left.at, at);
+        assert_eq!(
+            left.members.keys().cloned().collect::<Vec<_>>(),
+            vec![
+                CharacterKey::Name("Main".into()),
+                CharacterKey::Name("Old".into())
+            ]
         );
     }
 }
