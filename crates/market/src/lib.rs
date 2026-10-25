@@ -7,3 +7,4 @@ pub mod cache;
 pub mod error;
 pub mod fuzzwork;
 pub mod http;
+pub mod plex;
