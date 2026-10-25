@@ -285,7 +285,7 @@ pub fn have(
                 .into_iter()
                 .try_fold(0_u64, u64::checked_add)
                 .ok_or(StockpileError::OutOfRange)?;
-            // The floor at 0 is the rule: nothing is short once the total reaches the target.
+            // A floor at 0 is meant here: a stockpile holding more than its target is short 0, never a negative count.
             let short = target.saturating_sub(total);
             let status = if total >= target {
                 Status::Ok

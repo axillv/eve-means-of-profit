@@ -279,7 +279,7 @@ pub fn claimed_lines(
                 .checked_sub(claimed_units)
                 .ok_or(StockpileError::OutOfRange)?;
             let (short, status) = match mode {
-                // The floor at 0 is the rule: nothing is short once free reaches the target.
+                // A floor at 0 is meant here: free stock above the target is short 0, never a negative count.
                 ShortMode::AfterPlans => (
                     line.target.saturating_sub(free),
                     status_of(free, line.target),
