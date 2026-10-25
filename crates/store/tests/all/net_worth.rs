@@ -282,6 +282,33 @@ mod tests {
     }
 
     #[test]
+    fn the_saved_day_is_the_latest_at_or_before_the_day() {
+        let (_dir, _path, mut store) = open_temp();
+        let older = ItemPrices {
+            lowest_sell: Some(money("4.00")),
+            highest_buy: None,
+            average: None,
+        };
+        let newer = ItemPrices {
+            lowest_sell: Some(money("5.00")),
+            highest_buy: None,
+            average: None,
+        };
+        store.save_prices(19_990, &[(34, older)]).expect("save");
+        store.save_prices(19_993, &[(34, newer)]).expect("save");
+
+        let history = store
+            .price_history(&BTreeSet::from([34, 35]), 19_991, 19_995)
+            .expect("history");
+
+        assert_eq!(history.saved_day(34, 19_995), Some(19_993));
+        assert_eq!(history.saved_day(34, 19_993), Some(19_993));
+        assert_eq!(history.saved_day(34, 19_992), Some(19_990));
+        assert_eq!(history.saved_day(34, 19_989), None);
+        assert_eq!(history.saved_day(35, 19_995), None);
+    }
+
+    #[test]
     fn settings_default_to_midpoint_and_every_part() {
         let (_dir, path, mut store) = open_temp();
         let defaults = NetWorthSettings {
