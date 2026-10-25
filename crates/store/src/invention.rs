@@ -11,6 +11,7 @@ use rusqlite::{Transaction, params};
 use crate::error::{Result, StoreError};
 use crate::from_stored;
 use crate::migrate::Store;
+use crate::settings::settings_with_prefix;
 
 /// Whether one T2 part is invented, and the decryptor it uses when it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,15 +149,9 @@ impl Store {
     /// The invention skill levels that were set, by T2 product id. A level of 0 that was typed
     /// is listed; a skill that was never set is not.
     pub fn invention_skills(&self) -> Result<BTreeMap<TypeId, u8>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT key, value FROM app_settings WHERE key LIKE 'invention.skill.%' ORDER BY key",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
+        let rows = settings_with_prefix(&self.conn, SKILL_PREFIX)?;
         let mut skills = BTreeMap::new();
-        for row in rows {
-            let (key, value) = row?;
+        for (key, value) in rows {
             let id_text = key.strip_prefix(SKILL_PREFIX).unwrap_or_default();
             let digits = !id_text.is_empty() && id_text.bytes().all(|b| b.is_ascii_digit());
             let type_id: TypeId = match digits.then(|| id_text.parse().ok()).flatten() {

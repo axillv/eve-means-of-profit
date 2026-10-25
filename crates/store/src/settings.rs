@@ -119,6 +119,20 @@ fn read_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
         .optional()?)
 }
 
+/// Every saved setting whose key starts with `prefix`, in key order. The match is exact: case
+/// counts, and `_` and `%` are plain characters.
+pub(crate) fn settings_with_prefix(
+    conn: &Connection,
+    prefix: &str,
+) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT key, value FROM app_settings \
+         WHERE substr(key, 1, length(?1)) = ?1 ORDER BY key",
+    )?;
+    let rows = stmt.query_map(params![prefix], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn write_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO app_settings (key, value) VALUES (?1, ?2) \
@@ -233,5 +247,33 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefix_match_is_exact_and_in_key_order() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO app_settings (key, value) VALUES
+                 ('invention.skill.2', '3'),
+                 ('invention.skill.10', '4'),
+                 ('invention.skillX3', '5'),
+                 ('INVENTION.SKILL.4', '1'),
+                 ('invention.attempts', '7');",
+        )
+        .unwrap();
+        let found = settings_with_prefix(&conn, "invention.skill.").unwrap();
+        assert_eq!(
+            found,
+            vec![
+                ("invention.skill.10".to_string(), "4".to_string()),
+                ("invention.skill.2".to_string(), "3".to_string()),
+            ]
+        );
     }
 }
