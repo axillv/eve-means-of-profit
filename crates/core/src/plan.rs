@@ -123,6 +123,7 @@ pub fn plan(input: &PlanInput, recipes: &RecipeBook) -> Result<Plan, PlanError> 
                 depth: d,
                 needed,
                 from_stock,
+                // Cannot saturate: from_stock is min(owned, needed), so it is never above needed.
                 to_buy: needed.saturating_sub(from_stock),
             });
         }
@@ -132,6 +133,7 @@ pub fn plan(input: &PlanInput, recipes: &RecipeBook) -> Result<Plan, PlanError> 
         .iter()
         .filter_map(|(t, owned)| {
             let used = used_from_stock.get(t).copied().unwrap_or(0);
+            // Cannot saturate: used is this type's from_stock, min(owned, needed), so used <= owned.
             let left = owned.saturating_sub(used);
             (left > 0).then_some((*t, left))
         })
@@ -208,6 +210,8 @@ fn depths(
             let reached = depth.entry(*material).or_insert(0);
             *reached = (*reached).max(next);
             if let Some(left) = pending.get_mut(material) {
+                // Cannot saturate: each built edge into this type is counted once in pending and
+                // decremented once, when its consumer is popped, so it never goes below 0.
                 *left = left.saturating_sub(1);
                 if *left == 0 {
                     ready.push(*material);
@@ -234,6 +238,7 @@ fn build_step(
         .get(&t)
         .copied()
         .ok_or(PlanError::NoModifier(t))?;
+    // Cannot saturate: from_stock is min(owned, needed) from the caller, so it is never above needed.
     let to_build = needed.saturating_sub(from_stock);
     let runs = to_build.div_ceil(recipe.output_per_run);
     let produced = runs
@@ -254,6 +259,7 @@ fn build_step(
         to_build,
         runs,
         jobs,
+        // Cannot saturate: runs is to_build rounded up to whole runs, so produced >= to_build.
         spare: produced.saturating_sub(to_build),
     })
 }

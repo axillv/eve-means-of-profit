@@ -82,6 +82,7 @@ impl Modifier {
         if me > 10 {
             return Err(IndustryError::MeOutOfRange(me));
         }
+        // Cannot saturate: me is checked to be at most 10 above, so 100 - me is at least 90.
         self.times(u128::from(100u8.saturating_sub(me)), 2)
     }
 
@@ -124,8 +125,10 @@ impl Modifier {
         if self.exp == 0 {
             return self.num.to_string();
         }
+        // Cannot saturate: exp is a u8 (at most 38 here), so exp + 1 fits in a usize.
         let width = usize::from(self.exp).saturating_add(1);
         let digits = format!("{:0>width$}", self.num);
+        // Cannot saturate: digits has at least width = exp + 1 characters, so len - exp >= 1.
         let point = digits.len().saturating_sub(usize::from(self.exp));
         let (whole, fraction) = digits.split_at(point);
         format!("{whole}.{fraction}")
@@ -154,6 +157,7 @@ fn normalized(mut num: u128, mut exp: u8) -> Modifier {
             break;
         };
         num = shorter;
+        // Cannot saturate: the loop condition is exp > 0, so exp - 1 does not go below 0.
         exp = exp.saturating_sub(1);
     }
     Modifier { num, exp }
@@ -201,6 +205,7 @@ pub struct JobSplit {
 
 impl JobSplit {
     pub fn job_count(&self) -> u64 {
+        // Cannot saturate: last_job_runs > 0 needs max_runs_per_job >= 2, so full_jobs <= u64::MAX / 2 and + 1 fits.
         self.full_jobs
             .saturating_add(u64::from(self.last_job_runs > 0))
     }
