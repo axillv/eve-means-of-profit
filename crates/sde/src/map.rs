@@ -166,6 +166,31 @@ impl Sde {
         )
     }
 
+    /// Regions whose name contains `query`, best match first, with their names, at most `limit`
+    /// of them. Ranked as [`Sde::search_systems`] ranks systems.
+    pub fn search_regions(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(u32, String)>, SdeError> {
+        let ids = self.ranked_ids(
+            "SELECT region_id, name, lower(name) FROM regions
+             WHERE instr(lower(name), ?1) > 0",
+            query,
+            limit,
+        )?;
+        ids.into_iter()
+            .map(|id| {
+                let name = self.conn.query_row(
+                    "SELECT name FROM regions WHERE region_id = ?1",
+                    params![id],
+                    |row| row.get::<_, String>(0),
+                )?;
+                Ok((id, name))
+            })
+            .collect()
+    }
+
     /// Loads the security of every system and every gate into memory.
     pub fn star_map(&self) -> Result<StarMap, SdeError> {
         let mut security = BTreeMap::new();

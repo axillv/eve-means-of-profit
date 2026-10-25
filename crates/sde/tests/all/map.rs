@@ -142,6 +142,45 @@ mod tests {
     }
 
     #[test]
+    fn search_regions_matches_names_case_free_and_by_later_word() {
+        let (_dir, sde) = imported();
+        assert_eq!(
+            sde.search_regions("for", 10).unwrap(),
+            vec![(10000002, "The Forge".to_string())]
+        );
+        assert_eq!(
+            sde.search_regions("FORGE", 10).unwrap(),
+            vec![(10000002, "The Forge".to_string())]
+        );
+    }
+
+    #[test]
+    fn search_regions_finds_a_region_by_its_whole_name() {
+        // The shared fixture holds only The Forge, so Domain is added to a copy of it.
+        let dir = TempDir::new().unwrap();
+        let source = fixture_copy(&dir);
+        let regions = source.join("mapRegions.jsonl");
+        let mut content = fs::read_to_string(&regions).unwrap();
+        content.push_str("\n{\"_key\": 10000043, \"name\": {\"en\": \"Domain\"}}\n");
+        fs::write(&regions, content).unwrap();
+        let db = dir.path().join("sde.db");
+        import(&source, &db).unwrap();
+        let sde = Sde::open(&db).unwrap();
+        assert_eq!(
+            sde.search_regions("domain", 10).unwrap(),
+            vec![(10000043, "Domain".to_string())]
+        );
+    }
+
+    #[test]
+    fn search_regions_finds_nothing_for_a_blank_or_zero_limit_query() {
+        let (_dir, sde) = imported();
+        assert!(sde.search_regions("", 10).unwrap().is_empty());
+        assert!(sde.search_regions("   ", 10).unwrap().is_empty());
+        assert!(sde.search_regions("for", 0).unwrap().is_empty());
+    }
+
+    #[test]
     fn search_systems_finds_nothing_for_an_empty_or_absent_query() {
         let (_dir, sde) = imported();
         assert!(sde.search_systems("", 10).unwrap().is_empty());
