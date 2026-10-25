@@ -235,7 +235,13 @@ fn group(character: u64, kind: Kind) -> String {
     format!("{character}/{}", kind.name())
 }
 
-fn fetched<T>(data: T, answer: &Answer, route: &str, now: i64) -> Result<Fetched<T>, EsiError> {
+/// Wraps `data` with the fetch time and expiry taken from the answer's headers.
+pub(crate) fn fetched<T>(
+    data: T,
+    answer: &Answer,
+    route: &str,
+    now: i64,
+) -> Result<Fetched<T>, EsiError> {
     Ok(Fetched {
         data,
         fetched_at: now,
@@ -398,7 +404,8 @@ fn rows_of<'a>(answer: &'a Answer, route: &str) -> Result<&'a [Value], EsiError>
     array(&answer.body, route).map(Vec::as_slice)
 }
 
-fn array<'a>(body: &'a Value, route: &str) -> Result<&'a Vec<Value>, EsiError> {
+/// The body as a JSON array. Any other body is `BadData`.
+pub(crate) fn array<'a>(body: &'a Value, route: &str) -> Result<&'a Vec<Value>, EsiError> {
     body.as_array()
         .ok_or_else(|| bad_data(route, "body", &body.to_string()))
 }
@@ -475,7 +482,11 @@ fn job_status(row: &Value, route: &str) -> Result<JobStatus, EsiError> {
 }
 
 /// The field `key` of an object. A missing field is `BadData`.
-fn field<'a>(object: &'a Value, key: &'static str, route: &str) -> Result<&'a Value, EsiError> {
+pub(crate) fn field<'a>(
+    object: &'a Value,
+    key: &'static str,
+    route: &str,
+) -> Result<&'a Value, EsiError> {
     object
         .get(key)
         .ok_or_else(|| bad_data(route, key, "missing"))

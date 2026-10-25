@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use mop_core::industry::TypeId;
 use serde_json::Value;
 
+use crate::character_data::{array, field};
 use crate::client::{Answer, Client, bad_data};
 use crate::error::EsiError;
 use crate::token::AccessToken;
@@ -131,19 +132,6 @@ fn narrow<T: TryFrom<u64>>(value: u64, key: &'static str, route: &str) -> Result
     T::try_from(value)
         .ok()
         .ok_or_else(|| bad_data(route, key, &value.to_string()))
-}
-
-fn array<'a>(value: &'a Value, route: &str) -> Result<&'a Vec<Value>, EsiError> {
-    value
-        .as_array()
-        .ok_or_else(|| bad_data(route, "body", &value.to_string()))
-}
-
-/// The field `key` of an object. A missing field is `BadData`.
-fn field<'a>(object: &'a Value, key: &'static str, route: &str) -> Result<&'a Value, EsiError> {
-    object
-        .get(key)
-        .ok_or_else(|| bad_data(route, key, "missing"))
 }
 
 fn unsigned(object: &Value, key: &'static str, route: &str) -> Result<u64, EsiError> {
