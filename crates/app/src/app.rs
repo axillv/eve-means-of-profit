@@ -7,6 +7,7 @@
 pub mod assets;
 pub mod build;
 pub mod characters;
+pub mod claims;
 pub mod dock;
 pub mod first_run;
 pub mod history;
@@ -47,6 +48,7 @@ use mop_store::{Density, Settings, Store};
 use assets::{AssetsPage, AssetsPanel};
 use build::{BuildPage, BuildPanel};
 use characters::{CharactersPage, CharactersPanel};
+use claims::ClaimsState;
 use first_run::{Reply, Startup};
 use jobs::{JobsPage, JobsPanel};
 use net_worth::{NetWorthPage, NetWorthPanel};
@@ -136,6 +138,8 @@ pub struct Shared {
     pub selection: Selection,
     /// The EVE industry data the Steps table reads: cost indices and adjusted prices.
     pub industry: IndustryData,
+    /// The live plan reservations and the running jobs, read by every page.
+    pub claims: ClaimsState,
 }
 
 impl Shared {
@@ -285,6 +289,7 @@ impl App {
                 session: Session::new(config.eve),
                 selection: Selection::default(),
                 industry: IndustryData::default(),
+                claims: ClaimsState::default(),
             },
             data_dir: config.data_dir,
             sde_path,
