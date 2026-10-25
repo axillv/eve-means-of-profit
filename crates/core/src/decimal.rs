@@ -302,6 +302,7 @@ pub(crate) fn fixed_2(units: i64) -> String {
         hundredths = hundredths.saturating_add(units.signum());
     }
     let sign = if hundredths.is_negative() { "-" } else { "" };
+    // Cannot saturate: hundredths is at most about i64::MAX ÷ 100 + 1 in size, so its absolute value fits.
     let whole = hundredths.saturating_div(100).saturating_abs();
     let cents = (hundredths % 100).unsigned_abs();
     format!("{sign}{}.{cents:02}", group_thousands(whole))

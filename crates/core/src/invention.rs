@@ -65,12 +65,14 @@ impl Chance {
     /// The chance in parts per million, rounded half up.
     pub fn ppm(self) -> u32 {
         // num <= den (capped in `chance`), so the result is at most 1,000,000 and the fallback never applies.
+        // Cannot saturate: num < den ≤ 1.2e11 (or 1 ÷ 1), so num × 1,000,000 stays below 1.2e17.
         u32::try_from(round_div(self.num.saturating_mul(FULL_PPM), self.den)).unwrap_or(1_000_000)
     }
 
     /// The chance as a percentage with two decimals, rounded half up: `"46.47"`.
     pub fn percent_string(self) -> String {
         // Hundredths of a percent: the value times 10,000.
+        // Cannot saturate: num < den ≤ 1.2e11 (or 1 ÷ 1), so num × 10,000 stays below 1.2e15.
         let hundredths = round_div(self.num.saturating_mul(10_000), self.den);
         let whole = hundredths.div_euclid(100);
         let frac = hundredths.rem_euclid(100);
@@ -340,6 +342,7 @@ fn narrow<T: TryFrom<U>, U>(value: U) -> Result<T, InventionError> {
 
 /// num ÷ den rounded half up. `den` is never zero: a `Chance` always has den ≥ 1.
 fn round_div(num: u128, den: u128) -> u128 {
+    // Cannot saturate for the callers: num is at most 1.2e17 and den at most 1.2e11, far below u128::MAX.
     num.saturating_mul(2)
         .saturating_add(den)
         .div_euclid(den.saturating_mul(2))
