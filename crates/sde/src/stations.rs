@@ -421,4 +421,56 @@ impl Sde {
         }
         Ok(names)
     }
+
+    /// The stations whose name contains the query, best match first, at most `limit` of them, as
+    /// `(id, name)`. The query is trimmed and ignores case; a blank query finds nothing. The rank
+    /// and the ties are the same as for the system search.
+    pub fn search_stations(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(i64, String)>, SdeError> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut statement = self
+            .conn
+            .prepare("SELECT id, name FROM stations WHERE instr(lower(name), ?1) > 0")?;
+        let mut ranked = statement
+            .query_map(params![needle], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .map(|row| {
+                row.map(|(id, name)| {
+                    let rank = station_rank(&name.to_lowercase(), &needle);
+                    (rank, name.chars().count(), name, id)
+                })
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ranked.sort();
+        Ok(ranked
+            .into_iter()
+            .take(limit)
+            .map(|(_, _, name, id)| (id, name))
+            .collect())
+    }
+}
+
+/// 0 for the whole name, 1 for a name that starts with the query, 2 for a later word (split at
+/// ' ' or '-') that starts with it, 3 for any other match.
+fn station_rank(lower: &str, needle: &str) -> u8 {
+    if lower == needle {
+        0
+    } else if lower.starts_with(needle) {
+        1
+    } else if lower
+        .split([' ', '-'])
+        .skip(1)
+        .any(|word| word.starts_with(needle))
+    {
+        2
+    } else {
+        3
+    }
 }

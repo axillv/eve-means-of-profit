@@ -263,4 +263,42 @@ mod tests {
         drop(conn);
         assert!(matches!(Sde::open(&db), Err(SdeError::NotImported)));
     }
+
+    #[test]
+    fn a_partial_station_name_finds_the_station_first() {
+        let dir = TempDir::new().unwrap();
+        let sde = import_and_open(&stations_source(&dir), &dir);
+        let found = sde.search_stations("jita iv - moon 4", 10).unwrap();
+        assert_eq!(
+            found[0],
+            (
+                60003760,
+                "Jita IV - Moon 4 - Caldari Navy Assembly Plant".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn a_whole_station_name_in_capitals_finds_that_station_first() {
+        let dir = TempDir::new().unwrap();
+        let sde = import_and_open(&stations_source(&dir), &dir);
+        let found = sde
+            .search_stations("JITA IV - MOON 4 - CALDARI NAVY ASSEMBLY PLANT", 10)
+            .unwrap();
+        assert_eq!(found[0].0, 60003760);
+        assert!(
+            sde.search_stations("no such station anywhere", 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_blank_query_or_a_zero_limit_finds_nothing() {
+        let dir = TempDir::new().unwrap();
+        let sde = import_and_open(&stations_source(&dir), &dir);
+        assert!(sde.search_stations("", 10).unwrap().is_empty());
+        assert!(sde.search_stations("   ", 10).unwrap().is_empty());
+        assert!(sde.search_stations("jita", 0).unwrap().is_empty());
+    }
 }
