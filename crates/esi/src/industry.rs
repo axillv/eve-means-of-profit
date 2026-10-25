@@ -93,6 +93,11 @@ impl IndustryData {
         }
     }
 
+    /// The invention cost index of a solar system; `None` when the systems are not fetched or the system or its invention index is not listed.
+    pub fn invention_index(&self, system: u32) -> Option<Rate> {
+        self.systems.as_ref()?.data.get(&system)?.invention
+    }
+
     /// The adjusted price of every item that has one.
     pub fn adjusted_prices(&self) -> BTreeMap<TypeId, Money> {
         self.prices

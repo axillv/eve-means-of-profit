@@ -151,6 +151,14 @@ mod tests {
             Some(Rate::from_ppm(1_400))
         );
         assert_eq!(data.cost_index(30_000_001, Activity::Manufacturing), None);
+
+        assert_eq!(data.invention_index(JITA), Some(Rate::from_ppm(1_400)));
+        assert_eq!(data.invention_index(30_000_001), None);
+    }
+
+    #[test]
+    fn the_invention_index_is_none_without_systems() {
+        assert_eq!(IndustryData::default().invention_index(JITA), None);
     }
 
     #[test]
