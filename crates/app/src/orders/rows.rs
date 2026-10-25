@@ -170,6 +170,7 @@ pub(crate) fn short(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_owned();
     }
+    // Cannot saturate: `max` is a column width (24 for locations), never 0, so `max - 1` cannot underflow.
     let mut cut: String = text.chars().take(max.saturating_sub(1)).collect();
     cut.push('…');
     cut
