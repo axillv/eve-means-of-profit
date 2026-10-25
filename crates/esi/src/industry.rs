@@ -12,10 +12,11 @@ use mop_core::money::{Money, Rate};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::character_data::{Fetched, Refreshed};
-use crate::client::{Answer, Client, bad_data};
+use crate::character_data::{Fetched, Refreshed, fetched};
+use crate::client::{Client, bad_data};
 use crate::error::EsiError;
 use crate::http::Http;
+use crate::saved::with_data;
 use crate::secrets::write_atomic;
 
 const VERSION: u32 = 1;
@@ -171,15 +172,6 @@ fn next_refresh_held(data: &IndustryData, kind: IndustryKind) -> Result<Option<i
             .map(|held| held.next_refresh(DEFAULT_AGE))
             .transpose(),
     }
-}
-
-fn fetched<T>(data: T, answer: &Answer, route: &str, now: i64) -> Result<Fetched<T>, EsiError> {
-    Ok(Fetched {
-        data,
-        fetched_at: now,
-        last_modified: answer.http_date("last-modified", route)?,
-        expires: answer.http_date("expires", route)?,
-    })
 }
 
 fn systems_of(body: &Value) -> Result<BTreeMap<u32, CostIndices>, EsiError> {
@@ -362,15 +354,6 @@ impl SavedSystem {
             research_me: self.research_me.map(Rate::from_ppm),
             research_te: self.research_te.map(Rate::from_ppm),
         }
-    }
-}
-
-fn with_data<T, U>(held: &Fetched<T>, data: U) -> Fetched<U> {
-    Fetched {
-        data,
-        fetched_at: held.fetched_at,
-        last_modified: held.last_modified,
-        expires: held.expires,
     }
 }
 

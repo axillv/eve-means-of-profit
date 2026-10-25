@@ -164,7 +164,8 @@ pub fn forget(dir: &Path, character_id: u64) -> Result<(), EsiError> {
     }
 }
 
-fn with_data<T, U>(held: &Fetched<T>, data: U) -> Fetched<U> {
+/// Keeps the fetch time and EVE's times of `held` and puts `data` in their place.
+pub(crate) fn with_data<T, U>(held: &Fetched<T>, data: U) -> Fetched<U> {
     Fetched {
         data,
         fetched_at: held.fetched_at,
