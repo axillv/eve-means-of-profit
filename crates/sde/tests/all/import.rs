@@ -249,6 +249,58 @@ mod tests {
         check_find_exact_needs_the_whole_name_and_a_non_empty_one(&sde);
     }
 
+    #[test]
+    fn group_and_category_names_are_found_by_id() {
+        let (_dir, sde) = imported();
+        assert_eq!(sde.group_name(18).unwrap(), Some("Mineral".to_owned()));
+        assert_eq!(sde.group_name(25).unwrap(), Some("Frigate".to_owned()));
+        assert_eq!(sde.category_name(4).unwrap(), Some("Material".to_owned()));
+        assert_eq!(sde.category_name(6).unwrap(), Some("Ship".to_owned()));
+        assert_eq!(sde.group_name(999_999).unwrap(), None);
+        assert_eq!(sde.category_name(999_999).unwrap(), None);
+    }
+
+    #[test]
+    fn groups_and_categories_are_found_by_name() {
+        let (_dir, sde) = imported();
+        assert_eq!(sde.find_group(" mineral ").unwrap(), Some(18));
+        assert_eq!(sde.find_group("Minerals").unwrap(), None);
+        assert_eq!(sde.find_group("").unwrap(), None);
+        assert_eq!(sde.find_category("MATERIAL").unwrap(), Some(4));
+        assert_eq!(sde.find_category("Mineral").unwrap(), None);
+    }
+
+    #[test]
+    fn groups_and_categories_with_non_ascii_capitals_are_found_by_name() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("sde.db");
+        let source = fixture_copy(&dir);
+        edit_line(&source.join("groups.jsonl"), 1, |value| {
+            value["name"]["en"] = Value::from("Ösmium");
+        });
+        edit_line(&source.join("categories.jsonl"), 2, |value| {
+            value["name"]["en"] = Value::from("Ärzte");
+        });
+        import(&source, &db).unwrap();
+        let sde = Sde::open(&db).unwrap();
+        assert_eq!(sde.find_group("ösmium").unwrap(), Some(18));
+        assert_eq!(sde.find_group("  ÖSMIUM ").unwrap(), Some(18));
+        assert_eq!(sde.find_category("ärzte").unwrap(), Some(4));
+        assert_eq!(sde.find_category("ÄRZTE").unwrap(), Some(4));
+    }
+
+    #[test]
+    fn open_refuses_a_version_6_database() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("sde.db");
+        import(&fixture(), &db).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        conn.pragma_update(None, "user_version", 6).unwrap();
+        drop(conn);
+        let error = expect_error_open(&db);
+        assert!(matches!(error, SdeError::NotImported));
+    }
+
     fn check_search_ranks_whole_names_then_prefixes_then_words(sde: &Sde) {
         assert_eq!(
             sde.search("hobgoblin", 10).unwrap(),

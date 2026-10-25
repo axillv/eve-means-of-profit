@@ -314,6 +314,8 @@ impl Download {
 struct CategoryRow {
     id: u32,
     published: bool,
+    /// The English name, if the category has one.
+    name: Option<String>,
 }
 
 struct GroupRow {
@@ -348,11 +350,12 @@ struct BuildRecord {
     release_date: Option<String>,
 }
 
-#[derive(Deserialize, Clone, Copy)]
+#[derive(Deserialize)]
 struct CategoryRecord {
     #[serde(rename = "_key")]
     key: Option<u32>,
     published: Option<bool>,
+    name: Option<LocalizedName>,
 }
 
 #[derive(Deserialize)]
@@ -459,6 +462,7 @@ impl CategoryRow {
         Ok(Self {
             id: required(record.key, CATEGORIES_FILE, line, "_key")?,
             published: required(record.published, CATEGORIES_FILE, line, "published")?,
+            name: record.name.and_then(|name| name.en),
         })
     }
 }

@@ -5,7 +5,7 @@
 use mop_core::industry::Activity;
 
 /// Written to `PRAGMA user_version`. A database with any other value is not read.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// The text stored for an activity in `recipes.activity`.
 pub(crate) fn activity_name(activity: Activity) -> &'static str {
@@ -34,12 +34,16 @@ pub(crate) const CREATE_TABLES: &str = "
     );
     CREATE TABLE categories (
         category_id INTEGER PRIMARY KEY,
-        published INTEGER NOT NULL
+        published INTEGER NOT NULL,
+        name TEXT,
+        name_lower TEXT
     );
     CREATE TABLE groups (
         group_id INTEGER PRIMARY KEY,
         category_id INTEGER NOT NULL,
-        published INTEGER NOT NULL
+        published INTEGER NOT NULL,
+        name TEXT,
+        name_lower TEXT
     );
     CREATE TABLE types (
         type_id INTEGER PRIMARY KEY,

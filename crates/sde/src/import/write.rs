@@ -79,6 +79,35 @@ pub(super) fn write_pending(path: &Path, download: &Download) -> Result<(), SdeE
     Ok(())
 }
 
+/// The categories and groups, each with its name lowercased for the case-ignoring lookups.
+fn write_categories_and_groups(tx: &Transaction<'_>, download: &Download) -> Result<(), SdeError> {
+    let mut categories = tx.prepare(
+        "INSERT INTO categories (category_id, published, name, name_lower) VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    for row in &download.categories {
+        categories.execute(params![
+            row.id,
+            row.published,
+            row.name,
+            row.name.as_ref().map(|name| name.to_lowercase())
+        ])?;
+    }
+    let mut groups = tx.prepare(
+        "INSERT INTO groups (group_id, category_id, published, name, name_lower)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )?;
+    for row in &download.groups {
+        groups.execute(params![
+            row.id,
+            row.category_id,
+            row.published,
+            row.name,
+            row.name.as_ref().map(|name| name.to_lowercase())
+        ])?;
+    }
+    Ok(())
+}
+
 fn write_rows(tx: &Transaction<'_>, download: &Download) -> Result<(), SdeError> {
     tx.execute(
         "INSERT INTO meta (id, schema_version, build_number, release_date, imported_at)
@@ -90,16 +119,7 @@ fn write_rows(tx: &Transaction<'_>, download: &Download) -> Result<(), SdeError>
             imported_at()
         ],
     )?;
-    let mut categories =
-        tx.prepare("INSERT INTO categories (category_id, published) VALUES (?1, ?2)")?;
-    for row in &download.categories {
-        categories.execute(params![row.id, row.published])?;
-    }
-    let mut groups =
-        tx.prepare("INSERT INTO groups (group_id, category_id, published) VALUES (?1, ?2, ?3)")?;
-    for row in &download.groups {
-        groups.execute(params![row.id, row.category_id, row.published])?;
-    }
+    write_categories_and_groups(tx, download)?;
     let mut types = tx.prepare(
         "INSERT INTO types (type_id, name, name_lower, group_id, published, volume,
                             packaged_volume, portion_size)

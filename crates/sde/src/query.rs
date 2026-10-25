@@ -102,6 +102,61 @@ impl Sde {
         Ok(id)
     }
 
+    /// The English name of the item group `id`, if the game data has one.
+    pub fn group_name(&self, id: u32) -> Result<Option<String>, SdeError> {
+        self.name_of("groups", "group_id", id)
+    }
+
+    /// The English name of the item category `id`, if the game data has one.
+    pub fn category_name(&self, id: u32) -> Result<Option<String>, SdeError> {
+        self.name_of("categories", "category_id", id)
+    }
+
+    /// The item group with exactly this name, ignoring case and surrounding spaces. A published
+    /// group wins over an unpublished one with the same name; then the lowest id.
+    pub fn find_group(&self, name: &str) -> Result<Option<u32>, SdeError> {
+        self.find_id_by_name("groups", "group_id", name)
+    }
+
+    /// The item category with exactly this name, ignoring case and surrounding spaces. A published
+    /// category wins over an unpublished one with the same name; then the lowest id.
+    pub fn find_category(&self, name: &str) -> Result<Option<u32>, SdeError> {
+        self.find_id_by_name("categories", "category_id", name)
+    }
+
+    /// The name stored for the row of `table` whose `key` column is `id`.
+    fn name_of(&self, table: &str, key: &str, id: u32) -> Result<Option<String>, SdeError> {
+        let name = self
+            .conn
+            .query_row(
+                &format!("SELECT name FROM {table} WHERE {key} = ?1"),
+                params![id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(name.flatten())
+    }
+
+    /// The id of the row of `table` whose name is `name`, ignoring case and surrounding spaces.
+    fn find_id_by_name(&self, table: &str, key: &str, name: &str) -> Result<Option<u32>, SdeError> {
+        let wanted = name.trim().to_lowercase();
+        if wanted.is_empty() {
+            return Ok(None);
+        }
+        let id = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {key} FROM {table} WHERE name_lower = ?1
+                     ORDER BY published DESC, {key} LIMIT 1"
+                ),
+                params![wanted],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(id)
+    }
+
     /// Published types whose name contains `query`, best match first, at most `limit` of them.
     ///
     /// Rank: the whole name, then a name that starts with the query, then a later word that does
