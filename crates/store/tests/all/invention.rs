@@ -236,6 +236,28 @@ mod tests {
     }
 
     #[test]
+    fn every_attempts_rule_reads_back() {
+        let (_dir, path, mut store) = fresh();
+        let cases = [
+            (AttemptRule::Expected, "expected"),
+            (AttemptRule::Confidence(Rate::from_ppm(900_000)), "90"),
+            (AttemptRule::Confidence(Rate::from_ppm(950_000)), "95"),
+            (AttemptRule::Confidence(Rate::from_ppm(990_000)), "99"),
+        ];
+        for (rule, text) in cases {
+            store.set_attempt_rule(rule).expect("rule");
+            assert_eq!(raw_setting(&path, "invention.attempts"), text);
+            assert_eq!(store.attempt_rule().expect("rule"), rule);
+        }
+
+        let sure99 = AttemptRule::Confidence(Rate::from_ppm(990_000));
+        store.set_attempt_rule(sure99).expect("rule");
+        drop(store);
+        let reopened = open(&path, 1_000);
+        assert_eq!(reopened.attempt_rule().expect("rule"), sure99);
+    }
+
+    #[test]
     fn a_stored_attempts_value_outside_the_rule_is_bad_data() {
         let (_dir, _path, mut store) = fresh();
         store.set_setting("invention.attempts", "80").expect("raw");
