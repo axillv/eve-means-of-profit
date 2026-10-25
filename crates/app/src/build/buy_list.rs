@@ -334,10 +334,12 @@ fn too_soon_notice(
     if !explicit {
         return None;
     }
+    // A floor at 0 is meant here: a publish time after `now` (clock skew) shows as an age of zero.
     let age = published.map_or(0, |at| now.saturating_sub(at));
     Some(format!(
         "Prices are {} old; next refresh in {}",
         age_text(age),
+        // A floor at 0 is meant here: a refresh time already past shows as zero seconds left.
         age_text(next_at.saturating_sub(now)),
     ))
 }
@@ -389,6 +391,7 @@ fn buy_inputs(
                 type_id: line.type_id,
                 fetched: held.published_at.is_some(),
                 live: live.map(|live| live.per_unit),
+                // A floor at 0 is meant here: a live publish time after `now` (clock skew) shows as age zero.
                 live_age: live.map(|live| now.saturating_sub(live.published_at)),
                 manual,
                 live_used: manual.is_none() && line.to_buy > 0 && live.is_some(),
@@ -672,6 +675,7 @@ fn table(
             }
             "age" => match (view.manual, view.live_age) {
                 (Some(manual), _) => {
+                    // A floor at 0 is meant here: a typed time after `now` (clock set back) shows as age zero.
                     let typed = age_text(now.saturating_sub(manual.set_at));
                     ui.label("manual").on_hover_text(format!(
                         "Typed {typed} ago. It does not change with the market."
@@ -870,6 +874,7 @@ fn footer_line(ui: &mut Ui, cx: &Shared, totals: &Totals, auto: bool, now: i64) 
         } else if let Some(at) = held.next_refresh_at {
             ui.label(format!(
                 "Next refresh in {}",
+                // A floor at 0 is meant here: a refresh time already past shows as zero seconds left.
                 age_text(at.saturating_sub(now))
             ));
         }

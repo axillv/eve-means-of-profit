@@ -226,6 +226,7 @@ fn table(ui: &mut Ui, cx: &Shared) {
         .iter()
         .enumerate()
         .map(|(position, held)| {
+            // A floor at 0 is meant here: an assets fetch time after `now` (clock set back) shows as age zero.
             let updated = held
                 .assets_updated
                 .map_or_else(|| "never".to_owned(), |at| age_text(now.saturating_sub(at)));
