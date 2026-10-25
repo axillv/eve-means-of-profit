@@ -53,7 +53,9 @@ pub(super) fn run(
             let mut login = lock_eve(eve);
             refresh_one(&mut **login, target, &names, now)
         };
+        // Cannot saturate: both counts are at most targets times four kinds, far below usize::MAX.
         all.asked = all.asked.saturating_add(tally.asked);
+        // Cannot saturate: not_yet is never more than asked, which is bounded as above.
         all.not_yet = all.not_yet.saturating_add(tally.not_yet);
         all.soonest = match (all.soonest, tally.soonest) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -66,6 +68,7 @@ pub(super) fn run(
     }
     let nothing = match all.soonest {
         Some(until) if all.asked > 0 && all.not_yet == all.asked => {
+            // A floor at 0 is meant here: EVE may already allow the refresh when `until` is not after `now`, and the notice then says zero time left.
             let wait = until.saturating_sub(now);
             Some(Notice::info(format!(
                 "Nothing to refresh yet: EVE allows it again in {}.",
@@ -100,10 +103,12 @@ fn refresh_one(
     let mut expired = false;
     let mut limited: Option<u64> = None;
     for (kind, result) in results {
+        // Cannot saturate: this adds one per kind, and there are only four kinds per target.
         tally.asked = tally.asked.saturating_add(1);
         match result {
             Ok(Refreshed::Fetched) => fetched = true,
             Ok(Refreshed::NotYet { until }) => {
+                // Cannot saturate: not_yet counts at most the same kinds that asked counts.
                 tally.not_yet = tally.not_yet.saturating_add(1);
                 tally.soonest = Some(tally.soonest.map_or(until, |soonest| soonest.min(until)));
             }

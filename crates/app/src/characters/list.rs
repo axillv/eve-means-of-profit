@@ -33,6 +33,7 @@ pub fn kind_view(held: Option<(i64, Result<i64, String>)>, now: i64, style: &Sty
             hover: "Can be refreshed now".to_owned(),
         };
     };
+    // A floor at 0 is meant here: a fetch time after `now` (clock skew) shows as age zero, not a negative age.
     let text = age_text(now.saturating_sub(fetched_at));
     match next_refresh {
         Err(error) => KindView {
@@ -45,6 +46,7 @@ pub fn kind_view(held: Option<(i64, Result<i64, String>)>, now: i64, style: &Sty
             color: style.text,
             hover: format!(
                 "Next refresh allowed in {}",
+                // Cannot saturate: the guard above makes now < next, and both are Unix seconds, so the gap is far below i64::MAX.
                 age_text(next.saturating_sub(now))
             ),
         },
