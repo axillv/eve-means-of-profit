@@ -628,6 +628,8 @@ mod tests {
         harness.snapshot("shell-build-empty");
         harness.get_by_label("Setup").click();
         until(&mut harness, "the setup panels", |h| shown(h, "Price rule"));
+        harness.remove_cursor();
+        harness.run();
         harness.snapshot("shell-setup-empty");
         harness.get_by_label("Build").click();
         until(&mut harness, "the build pages again", build_page_shown);
