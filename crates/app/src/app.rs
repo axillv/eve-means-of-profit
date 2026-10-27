@@ -43,7 +43,7 @@ use mop_sde::{
     Fetch, FetchError, ImportReport, Sde, SdeBuild, SdeError, download_and_import, latest_build,
     needs_update, update_due,
 };
-use mop_store::{Density, Settings, Store};
+use mop_store::{Density, InterfaceSize, Settings, Store};
 
 use assets::{AssetsPage, AssetsPanel};
 use build::{BuildPage, BuildPanel};
@@ -219,6 +219,8 @@ pub struct App {
     setup_page: SetupPage,
     setup_dock: DockState<SetupPanel>,
     settings_open: bool,
+    /// The saved interface size, shown as the zoom factor.
+    interface_size: InterfaceSize,
     /// Whether the saved industry data has been read.
     industry_loaded: bool,
     /// Per kind of industry data: whether a refresh is running and when it may run again.
@@ -271,6 +273,8 @@ impl App {
             .map(|build| build.number);
         let style = Style::eve_dense();
         style.apply(ctx);
+        ctx.options_mut(|options| options.zoom_with_keyboard = false);
+        ctx.set_zoom_factor(f32::from(settings.interface_size.percent()) / 100.0);
         let (events_tx, events) = mpsc::channel();
         let mut app = Self {
             ctx: ctx.clone(),
@@ -318,6 +322,7 @@ impl App {
             setup_page: SetupPage,
             setup_dock: dock::setup_layout(),
             settings_open: false,
+            interface_size: settings.interface_size,
             industry_loaded: false,
             industry_timing: IndustryTimings::default(),
         };
@@ -347,6 +352,7 @@ impl App {
         if ui.input_mut(|input| input.consume_key(Modifiers::CTRL, Key::Comma)) {
             self.settings_open = true;
         }
+        self.zoom_with_keys(ui);
         self.menu_bar(ui);
         let activity = self.activity();
         let idle = self.idle_text();
@@ -375,6 +381,31 @@ impl App {
             &mut self.shared,
             &self.data_dir,
         );
+    }
+
+    /// Steps the interface size with Ctrl +, Ctrl − and Ctrl 0, then saves it. At 200% Ctrl +
+    /// and at 100% Ctrl − and Ctrl 0 do nothing: no notice and no save.
+    fn zoom_with_keys(&mut self, ui: &mut Ui) {
+        let size = if ui.input_mut(|input| {
+            input.consume_key(Modifiers::CTRL, Key::Plus)
+                || input.consume_key(Modifiers::CTRL, Key::Equals)
+        }) {
+            stepped_size(self.interface_size, 1)
+        } else if ui.input_mut(|input| input.consume_key(Modifiers::CTRL, Key::Minus)) {
+            stepped_size(self.interface_size, -1)
+        } else if ui.input_mut(|input| input.consume_key(Modifiers::CTRL, Key::Num0)) {
+            (self.interface_size != InterfaceSize::P100).then_some(InterfaceSize::P100)
+        } else {
+            None
+        };
+        let Some(size) = size else {
+            return;
+        };
+        // The zoom stays for this run even when the save fails; the notice says it was not saved.
+        self.interface_size = size;
+        ui.ctx().set_zoom_factor(f32::from(size.percent()) / 100.0);
+        self.shared
+            .change_settings(|settings| settings.interface_size = size);
     }
 
     fn menu_bar(&mut self, ui: &mut Ui) {
@@ -867,6 +898,14 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
     }
+}
+
+/// The interface size `steps` places from `size` in [`InterfaceSize::ALL`], or `None` past either
+/// end.
+pub(crate) fn stepped_size(size: InterfaceSize, steps: isize) -> Option<InterfaceSize> {
+    let index = InterfaceSize::ALL.iter().position(|&each| each == size)?;
+    let index = index.checked_add_signed(steps)?;
+    InterfaceSize::ALL.get(index).copied()
 }
 
 /// The notice for saved data that an earlier test build left behind and that was set aside.
