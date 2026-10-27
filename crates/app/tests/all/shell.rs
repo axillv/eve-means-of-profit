@@ -13,8 +13,9 @@ mod tests {
 
     use egui::{Event, Key, Modifiers, PointerButton, Pos2, vec2};
     use egui_kittest::Harness;
-    use egui_kittest::kittest::Queryable;
+    use egui_kittest::kittest::{NodeT, Queryable};
     use eve_means_of_profit::build::prices::Prices;
+    use eve_means_of_profit::rail::Page;
     use eve_means_of_profit::session::NoEve;
     use eve_means_of_profit::theme::{Style, contrast};
     use eve_means_of_profit::{App, AppConfig};
@@ -309,6 +310,28 @@ mod tests {
         store.settings().unwrap().interface_size
     }
 
+    /// The top edge of the first node labelled `label`, to check what is above what.
+    fn top_of(harness: &Harness<'_, App>, label: &str) -> f32 {
+        harness
+            .query_all_by_label(label)
+            .next()
+            .unwrap_or_else(|| panic!("no node labelled {label}"))
+            .rect()
+            .min
+            .y
+    }
+
+    /// Whether the radio button labelled `label` is the selected one.
+    fn selected(harness: &Harness<'_, App>, label: &str) -> bool {
+        harness
+            .query_all_by_label(label)
+            .next()
+            .unwrap_or_else(|| panic!("no node labelled {label}"))
+            .accesskit_node()
+            .toggled()
+            == Some(egui::accesskit::Toggled::True)
+    }
+
     #[test]
     fn the_colour_tokens_meet_the_contrast_values_of_the_design_note() {
         let style = Style::eve_dense();
@@ -368,8 +391,8 @@ mod tests {
         let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
         until(&mut harness, "the build pages", build_page_shown);
         assert_eq!(harness.query_all_by_label("Build").count(), 1);
-        assert_eq!(harness.query_all_by_label("Setup").count(), 1);
-        harness.get_by_label("Setup").click();
+        assert_eq!(harness.query_all_by_label(Page::Setup.label()).count(), 1);
+        harness.get_by_label(Page::Setup.label()).click();
         until(&mut harness, "the setup panels", |h| shown(h, "Price rule"));
         harness.get_by_label("Build").click();
         until(&mut harness, "the build pages again", build_page_shown);
@@ -385,7 +408,7 @@ mod tests {
         for panel in ["Plans", "Pasted stock", "Plan", "Steps", "Buy list"] {
             assert_eq!(harness.query_all_by_label(panel).count(), 1, "{panel}");
         }
-        harness.get_by_label("Setup").click();
+        harness.get_by_label(Page::Setup.label()).click();
         until(&mut harness, "the setup panels", |h| shown(h, "Price rule"));
         for panel in ["Facilities", "Freight services", "Price rule"] {
             assert_eq!(harness.query_all_by_label(panel).count(), 1, "{panel}");
@@ -551,7 +574,7 @@ mod tests {
         settle(&mut harness);
         assert_eq!(harness.get_by_label("Plans").rect(), plans);
 
-        harness.get_by_label("Setup").click();
+        harness.get_by_label(Page::Setup.label()).click();
         until(&mut harness, "the setup panels", |h| {
             shown(h, "Facilities") && shown(h, "Freight services") && shown(h, "Price rule")
         });
@@ -596,13 +619,85 @@ mod tests {
 
         harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
         until(&mut harness, "the settings window", |h| {
-            shown(h, "Settings")
+            shown(h, "Interface size")
         });
         harness.get_by_label("Dense").click();
         settle(&mut harness);
 
         let mut store = Store::open(&folders.user_db(), NOW).unwrap().store;
         assert_eq!(store.settings().unwrap().density, Density::Dense);
+    }
+
+    #[test]
+    fn the_settings_window_shows_the_interface_sizes_and_the_density_names() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(990_000);
+        let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
+        until(&mut harness, "the build pages", build_page_shown);
+        harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
+        until(&mut harness, "the settings window", |h| {
+            shown(h, "Interface size")
+        });
+
+        for label in [
+            "100%", "125%", "150%", "175%", "200%", "Roomy", "Normal", "Dense",
+        ] {
+            assert!(shown(&harness, label), "{label} is listed");
+        }
+        assert_eq!(
+            harness.query_all_by_label("Sparse").count(),
+            0,
+            "Sparse is named Roomy"
+        );
+        assert!(
+            top_of(&harness, "Interface size") < top_of(&harness, "Density"),
+            "the interface size is above the density"
+        );
+        assert!(
+            top_of(&harness, "Roomy") < top_of(&harness, "Normal")
+                && top_of(&harness, "Normal") < top_of(&harness, "Dense"),
+            "the density choices read Roomy, Normal, Dense"
+        );
+    }
+
+    #[test]
+    fn a_settings_interface_size_click_is_saved_and_sets_the_zoom() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(990_000);
+        let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
+        until(&mut harness, "the build pages", build_page_shown);
+        harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
+        until(&mut harness, "the settings window", |h| {
+            shown(h, "Interface size")
+        });
+
+        harness.get_by_label("175%").click();
+        settle(&mut harness);
+        assert!(
+            (zoom(&harness) - 1.75).abs() < 0.001,
+            "the click zooms to 175%"
+        );
+        assert_eq!(saved_size(&folders), InterfaceSize::P175);
+        assert!(selected(&harness, "175%"), "175% is the selected one");
+    }
+
+    #[test]
+    fn a_saved_interface_size_is_the_selected_settings_choice() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(990_000);
+        folders.set_interface_size(InterfaceSize::P125);
+        let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
+        until(&mut harness, "the build pages", build_page_shown);
+        harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
+        until(&mut harness, "the settings window", |h| {
+            shown(h, "Interface size")
+        });
+
+        assert!(selected(&harness, "125%"), "125% is the selected one");
+        assert!(!selected(&harness, "100%"));
     }
 
     #[test]
@@ -726,7 +821,7 @@ mod tests {
             .expect("the download is waiting for the release");
         until(&mut harness, "the build pages", build_page_shown);
         harness.snapshot("shell-build-empty");
-        harness.get_by_label("Setup").click();
+        harness.get_by_label(Page::Setup.label()).click();
         until(&mut harness, "the setup panels", |h| shown(h, "Price rule"));
         harness.remove_cursor();
         harness.run();
