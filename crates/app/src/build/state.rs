@@ -9,12 +9,16 @@ use mop_core::freight::Packing;
 use mop_core::industry::{Activity, Modifier, RecipeBook, TypeId};
 use mop_core::paste::{Pasted, parse_stock};
 use mop_core::plan::{self, Plan, PlanError, PlanInput};
-use mop_core::stock::{StockError, resolve};
+use mop_core::reserve::{self, ReservingPlan, RunningJob};
+use mop_core::stock::resolve;
+use mop_esi::character_data::CharacterData;
 use mop_sde::{Facility, Sde, Security};
 use mop_store::reservations::PlanStock;
-use mop_store::{FacilityRow, PlanRecord};
+use mop_store::{FacilityRow, PlanRecord, Store};
 
 use crate::Shared;
+use crate::claims::running_jobs;
+use crate::session::Session;
 use crate::status::{Level, Notice};
 
 /// What a plan request does once the plan on screen can be left.
@@ -94,6 +98,7 @@ pub(crate) const NO_REACTIONS: &str = "Pick a reactions facility first";
 impl BuildPage {
     /// Works the plan on screen out again and reads the pasted text. Called after every change.
     pub fn recalc(&mut self, cx: &mut Shared) {
+        refresh_claims(cx);
         let text = self.record.as_ref().map_or("", |r| r.pasted_stock.as_str());
         let (pasted, failure) = read_paste(text, cx.sde.as_ref());
         self.pasted = pasted;
@@ -170,6 +175,8 @@ impl BuildPage {
         match cx.store.save_plan(record, now) {
             Ok(()) => {
                 self.dirty = false;
+                // The claims are worked out from the saved plans, so a save can change them.
+                cx.claims.mark_stale();
                 true
             }
             Err(error) => {
@@ -251,6 +258,134 @@ impl BuildPage {
             report(cx, format!("Could not copy the plan: {error}"));
         }
     }
+}
+
+/// Brings the live claims and running jobs up to date with the login, the stock, the reserving
+/// plans and the job assignments. A no-op while the key is unchanged and the claims are not stale.
+///
+/// Pages that read the shared claims must call this first. Without the game data nothing can be
+/// counted yet: the claims are left alone and the next call tries again.
+pub(crate) fn refresh_claims(cx: &mut Shared) {
+    let key = claims_key(&cx.session);
+    if !cx.claims.needs_refresh(&key) {
+        return;
+    }
+    let Some(sde) = cx.sde.as_ref() else {
+        return;
+    };
+    let recipes = match sde.recipe_book() {
+        Ok(recipes) => recipes,
+        Err(error) => return claims_failed(&mut cx.notices, error),
+    };
+    let assets = resolve(&cx.session.stock_characters()).assets;
+    let characters: Vec<&CharacterData> = cx
+        .session
+        .characters()
+        .iter()
+        .filter_map(|character| cx.session.character_data(character.id))
+        .collect();
+    let (running, messages) = running_jobs(&characters, &assets, &recipes);
+    for message in messages {
+        push_error(&mut cx.notices, message);
+    }
+    let assignments = match cx.store.job_assignments() {
+        Ok(assignments) => assignments,
+        Err(error) => return claims_failed(&mut cx.notices, error),
+    };
+    let facilities = match cx.store.facilities() {
+        Ok(facilities) => facilities,
+        Err(error) => return claims_failed(&mut cx.notices, error),
+    };
+    let ids = match cx.store.reserving_plans() {
+        Ok(ids) => ids,
+        Err(error) => return claims_failed(&mut cx.notices, error),
+    };
+    let mut plans = Vec::new();
+    for id in ids {
+        match reserving_plan(
+            &mut cx.store,
+            id,
+            sde,
+            &recipes,
+            &facilities,
+            &running,
+            &assignments,
+        ) {
+            Ok(plan) => plans.push(plan),
+            Err(text) => return claims_failed(&mut cx.notices, text),
+        }
+    }
+    let outcome = reserve::claims(&plans, &assets, &recipes);
+    cx.claims
+        .set(key, running, assignments, outcome, &mut cx.notices);
+}
+
+/// The claims' key: one row per character id in the stock or the login, ascending. A character's
+/// row is its id, how many times its data has been replaced, its asset count and its job count, so
+/// any new data changes the key.
+fn claims_key(session: &Session) -> Vec<[u64; 4]> {
+    let stock = session.stock_characters();
+    let mut rows: BTreeMap<i64, [u64; 4]> = BTreeMap::new();
+    for owned in &stock {
+        let assets = u64::try_from(owned.assets.len()).unwrap_or(u64::MAX);
+        rows.insert(owned.character_id, [0, 0, assets, 0]);
+    }
+    for character in session.characters() {
+        if let Ok(id) = i64::try_from(character.id) {
+            rows.entry(id).or_insert([0; 4]);
+        }
+    }
+    rows.into_iter()
+        .filter_map(|(id, [_, _, assets, _])| {
+            let id = u64::try_from(id).ok()?;
+            let jobs = session
+                .character_data(id)
+                .and_then(|data| data.jobs.as_ref())
+                .map_or(0, |jobs| u64::try_from(jobs.data.len()).unwrap_or(u64::MAX));
+            Some([id, session.revision(id), assets, jobs])
+        })
+        .collect()
+}
+
+/// One reserving plan as the claims need it: its saved record's input, with no stock of its own,
+/// its saved scope, and the units of running jobs assigned to it.
+fn reserving_plan(
+    store: &mut Store,
+    id: i64,
+    sde: &Sde,
+    recipes: &RecipeBook,
+    facilities: &[FacilityRow],
+    running: &[RunningJob],
+    assignments: &BTreeMap<i64, i64>,
+) -> Result<ReservingPlan, String> {
+    let record = store
+        .plan(id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("plan {id} is no longer saved"))?;
+    let scope = match store.plan_stock(id).map_err(|error| error.to_string())? {
+        PlanStock::Characters(scope) => scope,
+        PlanStock::Pasted => {
+            return Err(format!("plan {id} does not take its stock from characters"));
+        }
+    };
+    let input = plan_input(&record, sde, recipes, facilities, BTreeMap::new())?;
+    let assigned =
+        reserve::assigned_to(id, running, assignments).map_err(|error| error.to_string())?;
+    Ok(ReservingPlan {
+        plan_id: id,
+        input,
+        scope,
+        assigned,
+    })
+}
+
+/// The notice for claims that could not be worked out. Nothing is stored, so the next call tries
+/// again; the notice is shown once.
+fn claims_failed(notices: &mut Vec<Notice>, text: impl Display) {
+    push_error(
+        notices,
+        format!("Could not work out plan reservations: {text}"),
+    );
 }
 
 /// `New plan`, then `New plan 2`, `New plan 3`… the first one no saved plan has.
@@ -342,36 +477,41 @@ pub(crate) fn plan_for(
     plan::plan(&input, &recipes).map_err(|error| explain(&error, record, &recipes))
 }
 
-/// The stock the plan counts: the pasted text when it is pasted, else what the chosen characters
-/// own in the chosen places. The pasted text is not read when the characters are used.
+/// The plan error for a stock that cannot be counted.
+const STOCK_TOO_LARGE: &str = "the stock is too large to count";
+
+/// The stock the plan counts. From characters: the in-scope units left after the plans served
+/// before it claimed theirs; from a paste: the pasted units. Either way the units of the running
+/// jobs assigned to the plan are added, since the plan serves those jobs' output itself.
 fn counted_stock(
     record: &PlanRecord,
     stock: &PlanStock,
     cx: &Shared,
     sde: &Sde,
 ) -> Result<BTreeMap<TypeId, u64>, String> {
-    match stock {
+    let mut counted = match stock {
         PlanStock::Pasted => {
             let (pasted, failure) = read_paste(&record.pasted_stock, Some(sde));
             if let Some(error) = failure {
                 return Err(format!("the pasted stock could not be read: {error}"));
             }
-            Ok(pasted.stock)
+            pasted.stock
         }
-        PlanStock::Characters(scope) => resolve(&cx.session.stock_characters())
-            .owned(scope)
-            .map_err(|error| stock_error_text(error, sde)),
-    }
-}
-
-/// The plan error for a stock that cannot be counted, naming the type.
-fn stock_error_text(error: StockError, sde: &Sde) -> String {
-    let StockError::Overflow { type_id } = error;
-    let name = match sde.item(type_id) {
-        Ok(Some(item)) => item.name,
-        _ => format!("type {type_id}"),
+        PlanStock::Characters(scope) => {
+            let assets = resolve(&cx.session.stock_characters()).assets;
+            reserve::available(scope, &assets, &cx.claims.claims, Some(record.id))
+                .map_err(|_error| STOCK_TOO_LARGE.to_owned())?
+        }
     };
-    format!("the stock of {name} is too large to count")
+    let assigned = reserve::assigned_to(record.id, &cx.claims.running, &cx.claims.assignments)
+        .map_err(|_error| STOCK_TOO_LARGE.to_owned())?;
+    for (type_id, units) in assigned {
+        let total = counted.entry(type_id).or_insert(0);
+        *total = total
+            .checked_add(units)
+            .ok_or_else(|| STOCK_TOO_LARGE.to_owned())?;
+    }
+    Ok(counted)
 }
 
 /// The plan engine's input: the record's product, quantity and built types, a modifier for each

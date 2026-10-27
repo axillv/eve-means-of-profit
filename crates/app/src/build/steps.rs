@@ -317,9 +317,14 @@ struct Tree<'a> {
 }
 
 /// The consumer each material is shown under: the built type with the lowest (depth, type id).
+/// A built type that makes nothing consumes none of its materials, so its rows are not its own:
+/// a material another step makes is shown under that step.
 fn owners(steps: &[Step], recipes: &RecipeBook) -> BTreeMap<TypeId, TypeId> {
     let mut best: BTreeMap<TypeId, (u32, TypeId)> = BTreeMap::new();
     for step in steps {
+        if step.to_build == 0 {
+            continue;
+        }
         let Some(recipe) = recipes.get(step.type_id) else {
             continue;
         };
@@ -339,7 +344,8 @@ fn owners(steps: &[Step], recipes: &RecipeBook) -> BTreeMap<TypeId, TypeId> {
         .collect()
 }
 
-/// The materials each built type shows, in recipe order.
+/// The materials each built type shows, in recipe order. A built type that makes nothing shows
+/// none of its materials.
 fn children(
     steps: &[Step],
     recipes: &RecipeBook,
@@ -347,6 +353,9 @@ fn children(
 ) -> BTreeMap<TypeId, Vec<TypeId>> {
     let mut children: BTreeMap<TypeId, Vec<TypeId>> = BTreeMap::new();
     for step in steps {
+        if step.to_build == 0 {
+            continue;
+        }
         let Some(recipe) = recipes.get(step.type_id) else {
             continue;
         };

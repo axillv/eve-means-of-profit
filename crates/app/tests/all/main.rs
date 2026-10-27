@@ -11,6 +11,7 @@ mod layout_model;
 mod names;
 mod orders;
 mod pages;
+mod reserve;
 mod setup;
 mod setup_costs;
 mod setup_structures;
