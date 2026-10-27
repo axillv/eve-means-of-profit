@@ -40,15 +40,7 @@ pub(crate) struct Entry {
     pub finished: bool,
     pub ends: String,
     pub type_id: TypeId,
-    #[expect(
-        dead_code,
-        reason = "the Plan cell shows it; nothing in this module does yet"
-    )]
     pub job_id: i64,
-    #[expect(
-        dead_code,
-        reason = "the Plan cell shows it; nothing in this module does yet"
-    )]
     pub plan: PlanCell,
 }
 

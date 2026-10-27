@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests {
 
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::io::Write;
     use std::ops::ControlFlow;
@@ -15,20 +15,29 @@ mod tests {
     use egui_kittest::kittest::Queryable;
     use eve_means_of_profit::session::{EveAccess, PendingLogin};
     use eve_means_of_profit::{App, AppConfig};
+    use mop_core::freight::Packing;
+    use mop_core::stock::{Places, StockScope};
     use mop_esi::character_data::{CharacterData, Fetched, Job, JobStatus, Kind, Refreshed};
     use mop_esi::characters::{Character, Login};
     use mop_esi::error::EsiError;
     use mop_esi::places::{NamingReport, StructureNames};
     use mop_esi::saved;
+    use mop_market::book::PriceRule;
     use mop_sde::{Fetch, FetchError, import};
-    use mop_store::Store;
+    use mop_store::reservations::PlanStock;
+    use mop_store::{PlanRecord, Store};
     use tempfile::TempDir;
 
     const NOW: i64 = 1_000_000;
     const FIXTURE: &str = "../sde/tests/fixtures/sde-3607705";
     const MAIN: u64 = 2_112_000_001;
+    const MAIN_ID: i64 = 2_112_000_001;
     const HOME_FORT: i64 = 1_035_466_617_946;
     const PAU: u32 = 11_688;
+    const HOBGOBLIN_I: u32 = 2_454;
+    const HOBGOBLIN_I_BLUEPRINT: u32 = 2_455;
+    const HOBGOBLIN_II: u32 = 2_456;
+    const RIFTER: u32 = 587;
     const RIFTER_BLUEPRINT: u32 = 691;
     const HOBGOBLIN_II_BLUEPRINT: u32 = 2_457;
     const CRYSTALLINE_CARBONIDE: u32 = 16_670;
@@ -264,6 +273,125 @@ mod tests {
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"))
     }
 
+    fn store(env: &Env) -> Store {
+        Store::open(&env.data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store
+    }
+
+    /// A Hobgoblin II plan that builds Hobgoblin I, with stock from Main at every place.
+    fn make_plan(env: &Env, name: &str) -> i64 {
+        let record = PlanRecord {
+            id: 0,
+            name: name.to_owned(),
+            product: HOBGOBLIN_II,
+            quantity: 1,
+            build: BTreeSet::from([HOBGOBLIN_I]),
+            me: BTreeMap::new(),
+            manufacturing: None,
+            reactions: None,
+            price_rule: PriceRule::WalkSell,
+            route: None,
+            service: None,
+            packing: Packing::default(),
+            pasted_stock: String::new(),
+            created_at: NOW,
+            updated_at: NOW,
+        };
+        let id = store(env)
+            .create_plan(&record, NOW)
+            .expect("the plan is saved");
+        let scope = StockScope {
+            characters: BTreeSet::from([MAIN_ID]),
+            places: Places::All,
+        };
+        store(env)
+            .set_plan_stock(id, &PlanStock::Characters(scope))
+            .expect("the plan's stock is saved");
+        id
+    }
+
+    fn assign(env: &Env, job_id: i64, plan_id: i64) {
+        store(env)
+            .assign_job(job_id, plan_id, NOW)
+            .expect("the job is assigned");
+    }
+
+    fn assignments(env: &Env) -> BTreeMap<i64, i64> {
+        store(env)
+            .job_assignments()
+            .expect("the assignments are read")
+    }
+
+    /// Main's jobs, all still going: two manufacturing runs of a Hobgoblin I, an ME research job,
+    /// and a Rifter run.
+    fn assigning_jobs() -> Vec<Job> {
+        vec![
+            job(
+                501,
+                1,
+                Some(HOBGOBLIN_I),
+                HOBGOBLIN_I_BLUEPRINT,
+                1,
+                JobStatus::Active,
+                NOW + 3_600,
+            ),
+            job(
+                503,
+                1,
+                Some(HOBGOBLIN_I),
+                HOBGOBLIN_I_BLUEPRINT,
+                5,
+                JobStatus::Active,
+                NOW + 7_200,
+            ),
+            job(
+                502,
+                4,
+                None,
+                HOBGOBLIN_I_BLUEPRINT,
+                1,
+                JobStatus::Active,
+                NOW + 7_200,
+            ),
+            job(
+                504,
+                1,
+                Some(RIFTER),
+                RIFTER_BLUEPRINT,
+                1,
+                JobStatus::Active,
+                NOW + 7_200,
+            ),
+        ]
+    }
+
+    /// Whether a node showing `value` (a dropdown keeps its text as a value) sits on a row that
+    /// some node labelled `anchor` is on.
+    fn on_row_value(harness: &Harness<'_, App>, anchor: &str, value: &str) -> bool {
+        let rows: Vec<f32> = harness
+            .query_all_by_label(anchor)
+            .map(|node| node.rect().center().y)
+            .collect();
+        !rows.is_empty()
+            && harness.query_all_by_value(value).any(|node| {
+                let y = node.rect().center().y;
+                rows.iter().any(|row| (y - row).abs() <= 3.0)
+            })
+    }
+
+    /// The top of the first node showing `text`, as its label or as its value.
+    fn first_top(harness: &Harness<'_, App>, text: &str) -> f32 {
+        harness
+            .query_all_by_label(text)
+            .next()
+            .or_else(|| harness.query_all_by_value(text).next())
+            .unwrap_or_else(|| panic!("no node showing {text:?}"))
+            .rect()
+            .min
+            .y
+    }
+
     /// Runs frames until the start-up read has arrived: the page's loading line is gone.
     fn loaded(harness: &mut Harness<'_, App>) {
         until(harness, "the saved data", |h| {
@@ -369,6 +497,78 @@ mod tests {
     }
 
     #[test]
+    fn a_job_is_assigned_to_a_plan_and_taken_off_it_again() {
+        let env = env();
+        let a = make_plan(&env, "Hobgoblin A");
+        let b = make_plan(&env, "Hobgoblin B");
+        assign(&env, 501, b);
+        save_jobs(&env, assigning_jobs());
+        let mut harness = start(&env, vec![character(MAIN, "Main")]);
+        loaded(&mut harness);
+        click(&mut harness, "Industry jobs");
+
+        // 501 is assigned to B; 503 offers the plans, in list order.
+        assert!(on_row(&harness, "Hobgoblin B", &["×"]));
+        assert!(on_row_value(&harness, "5", "Assign…"));
+        click(&mut harness, "Assign…");
+        let a_top = first_top(&harness, "Hobgoblin A");
+        // The row of 501 also shows B, so look for the dropdown's B below A.
+        let b_below = harness
+            .query_all_by_label("Hobgoblin B")
+            .any(|node| node.rect().min.y > a_top)
+            || harness
+                .query_all_by_value("Hobgoblin B")
+                .any(|node| node.rect().min.y > a_top);
+        assert!(shown(&harness, "Hobgoblin A"));
+        assert!(b_below);
+
+        click(&mut harness, "Hobgoblin A");
+        assert_eq!(assignments(&env), BTreeMap::from([(501, b), (503, a)]));
+        assert!(on_row(&harness, "Hobgoblin A", &["×"]));
+
+        // The × on 501 takes it off B, and its cell offers the plans again.
+        click(&mut harness, "×");
+        assert_eq!(assignments(&env), BTreeMap::from([(503, a)]));
+        assert!(on_row_value(&harness, "in 1h", "Assign…"));
+        click(&mut harness, "Assign…");
+        assert!(shown(&harness, "Hobgoblin A"));
+        assert!(shown(&harness, "Hobgoblin B"));
+        assert!(first_top(&harness, "Hobgoblin A") < first_top(&harness, "Hobgoblin B"));
+    }
+
+    #[test]
+    fn a_plan_cell_is_empty_without_a_suggestion_and_mute_when_no_plan_builds_it() {
+        let env = env();
+        make_plan(&env, "Hobgoblin A");
+        save_jobs(&env, assigning_jobs());
+        let mut harness = start(&env, vec![character(MAIN, "Main")]);
+        loaded(&mut harness);
+        click(&mut harness, "Industry jobs");
+
+        // 502 is research: no plan applies to it, so its cell is empty.
+        assert!(shown(&harness, "ME research"));
+        assert!(!on_row_value(&harness, "ME research", "Assign…"));
+        assert!(!on_row(&harness, "ME research", &["no plan builds this"]));
+        // 504 builds a Rifter, which no plan builds.
+        assert!(on_row(&harness, "no plan builds this", &["Rifter"]));
+        assert!(!on_row_value(&harness, "Rifter", "Assign…"));
+    }
+
+    #[test]
+    fn the_standing_jobs_show_no_plan_builds_this_where_a_plan_could_take_them() {
+        let env = env();
+        save_jobs(&env, main_jobs());
+        let mut harness = start(&env, vec![character(MAIN, "Main")]);
+        loaded(&mut harness);
+        click(&mut harness, "Industry jobs");
+
+        assert!(on_row(&harness, "Manufacturing", &["no plan builds this"]));
+        assert!(on_row(&harness, "Reactions", &["no plan builds this"]));
+        assert!(!on_row(&harness, "Invention", &["no plan builds this"]));
+        assert!(!on_row(&harness, "Copying", &["no plan builds this"]));
+    }
+
+    #[test]
     fn the_jobs_page_matches_its_snapshot() {
         let env = env();
         save_jobs(&env, main_jobs());
@@ -377,5 +577,19 @@ mod tests {
         click(&mut harness, "Industry jobs");
         harness.run();
         snapshot(&mut harness, "jobs-page");
+    }
+
+    #[test]
+    fn the_assign_dropdown_matches_its_snapshot() {
+        let env = env();
+        make_plan(&env, "Hobgoblin A");
+        let b = make_plan(&env, "Hobgoblin B");
+        assign(&env, 501, b);
+        save_jobs(&env, assigning_jobs());
+        let mut harness = start(&env, vec![character(MAIN, "Main")]);
+        loaded(&mut harness);
+        click(&mut harness, "Industry jobs");
+        click(&mut harness, "Assign…");
+        snapshot(&mut harness, "jobs_assign");
     }
 }

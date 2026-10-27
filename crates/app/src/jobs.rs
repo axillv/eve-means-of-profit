@@ -3,14 +3,14 @@
 
 pub(crate) mod rows;
 
-use egui::{Id, RichText, Ui};
+use egui::{Button, ComboBox, Id, RichText, Ui};
 
 use crate::Shared;
 use crate::build::state::report;
 use crate::orders::rows::grouped;
 use crate::table::model::{Cell, Column, ColumnKind, Row};
 use crate::table::{Table, hidden_from_text};
-use rows::{Entry, footer, status_text};
+use rows::{Entry, PlanCell, footer, status_text};
 
 /// The table's name for its saved hidden columns: `columns.jobs`.
 const TABLE: &str = "jobs";
@@ -78,12 +78,24 @@ pub fn show(_page: &mut JobsPage, panel: JobsPanel, ui: &mut Ui, cx: &mut Shared
             cells: cells(entry),
         })
         .collect();
-    let response = Table::new(Id::new(panel.title()), &columns).show(
+    let style = cx.style;
+    let density = cx.density;
+    let mut draw = |ui: &mut Ui, key: u64, column: &'static str| -> bool {
+        if column != "plan" {
+            return false;
+        }
+        let Some(entry) = usize::try_from(key).ok().and_then(|key| shown.get(key)) else {
+            return false;
+        };
+        draw_plan(ui, entry, cx)
+    };
+    let response = Table::new(Id::new(panel.title()), &columns).show_with(
         ui,
-        &cx.style,
-        cx.density,
+        &style,
+        density,
         &table_rows,
         None,
+        &mut draw,
     );
     if let Some(key) = response.clicked {
         let picked = usize::try_from(key)
@@ -101,6 +113,7 @@ fn columns() -> Vec<Column> {
     vec![
         column("activity", "Activity", ColumnKind::Text, 150.0),
         column("product", "Product", ColumnKind::Text, 220.0),
+        column("plan", "Plan", ColumnKind::Text, 150.0),
         column("runs", "Runs", ColumnKind::Number, 70.0),
         column("character", "Character", ColumnKind::Text, 120.0),
         column("location", "Location", ColumnKind::Text, 200.0),
@@ -110,15 +123,75 @@ fn columns() -> Vec<Column> {
 }
 
 fn cells(entry: &Entry) -> Vec<Cell> {
+    let plan = match &entry.plan {
+        PlanCell::Assigned { name, .. } => name.clone(),
+        PlanCell::None | PlanCell::Suggest(_) => String::new(),
+    };
     vec![
         Cell::text(&entry.activity),
         Cell::text(&entry.product),
+        Cell::text(plan),
         Cell::int(i128::from(entry.runs), grouped(u64::from(entry.runs))),
         Cell::text(&entry.character),
         Cell::text(&entry.location),
         Cell::text(status_text(entry.status)),
         Cell::int(i128::from(entry.end), entry.ends.as_str()),
     ]
+}
+
+/// Draws the Plan cell of one row. Returns whether it drew the cell.
+fn draw_plan(ui: &mut Ui, entry: &Entry, cx: &mut Shared) -> bool {
+    match &entry.plan {
+        PlanCell::None => false,
+        PlanCell::Assigned { name, .. } => {
+            ui.label(name.as_str());
+            if ui
+                .add(Button::new("×").small())
+                .on_hover_text("Take the job off its plan")
+                .clicked()
+            {
+                unassign(entry.job_id, cx);
+            }
+            true
+        }
+        PlanCell::Suggest(plans) if plans.is_empty() => {
+            ui.label(RichText::new("no plan builds this").color(cx.style.mute));
+            true
+        }
+        PlanCell::Suggest(plans) => {
+            let mut picked = None;
+            ComboBox::from_id_salt(("jobs plan", entry.job_id))
+                .selected_text("Assign…")
+                .show_ui(ui, |ui| {
+                    for (plan_id, name) in plans {
+                        if ui.selectable_label(false, name.as_str()).clicked() {
+                            picked = Some(*plan_id);
+                        }
+                    }
+                });
+            if let Some(plan_id) = picked {
+                assign(entry.job_id, plan_id, cx);
+            }
+            true
+        }
+    }
+}
+
+/// Assigns a job to a plan, then asks for the claims to be worked out again.
+fn assign(job_id: i64, plan_id: i64, cx: &mut Shared) {
+    let now = (cx.clock)();
+    match cx.store.assign_job(job_id, plan_id, now) {
+        Ok(()) => cx.claims.mark_stale(),
+        Err(error) => report(cx, format!("Could not assign the job: {error}")),
+    }
+}
+
+/// Takes a job off its plan, then asks for the claims to be worked out again.
+fn unassign(job_id: i64, cx: &mut Shared) {
+    match cx.store.unassign_job(job_id) {
+        Ok(()) => cx.claims.mark_stale(),
+        Err(error) => report(cx, format!("Could not take the job off its plan: {error}")),
+    }
 }
 
 /// Whether the finished jobs are shown: the saved setting on the first frame, then the frame memory.
