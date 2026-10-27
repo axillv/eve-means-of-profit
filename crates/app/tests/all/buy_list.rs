@@ -599,6 +599,19 @@ mod tests {
         world.folders.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The Buy list once the prices are in, from a file made `seconds` before the clock's time. The
+    /// frame it returns waits for the age cells, which all read `age`.
+    fn aged_list(world: &World, seconds: i64, age: &str) -> Harness<'static, App> {
+        lock(&world.forge).published = NOW - seconds;
+        let env = make_env(&standard_services());
+        let mut harness = start(&env, world);
+        harness.run();
+        buy_list_for(&mut harness);
+        settle(&mut harness, age);
+        lock_folders(world).push(env);
+        harness
+    }
+
     /// Pastes `text` into the pasted stock box.
     fn paste(harness: &mut Harness<'_, App>, text: &str) {
         harness
@@ -735,6 +748,18 @@ mod tests {
             let [r, g, b, _] = pixel.0;
             area.contains(egui::pos2(x, y)) && r.max(g).max(b) - r.min(g).min(b) > 60
         })
+    }
+
+    /// The Age cell of the row labelled `row`, which reads `text`, with the table scrolled sideways
+    /// so the age column is in view.
+    fn age_cell(harness: &mut Harness<'_, App>, row: &str, text: &str) -> egui::Rect {
+        let (left, y) = row_anchor(harness, row);
+        scroll_table(harness, left, y, -700.0);
+        harness
+            .get_all_by_label(text)
+            .map(|node| node.rect())
+            .find(|rect| (rect.center().y - y).abs() < 4.0)
+            .expect("the age cell of the row")
     }
 
     /// The text put on the clipboard by the frame just drawn, if any.
@@ -941,6 +966,71 @@ mod tests {
         // Six hours is the limit itself, not past it: the age is in the text colour.
         let limit = harness.get_by_label("Oldest: 6h").rect();
         assert!(!coloured(&mut harness, limit));
+    }
+
+    #[test]
+    fn a_price_exactly_six_hours_old_keeps_the_age_cell_in_the_text_colour() {
+        let world = World::new();
+        let mut harness = aged_list(&world, 21_600, "6h");
+        assert_row(&harness, "Robotics", &["6h"]);
+        // Six hours is the limit itself, not past it: the cell is in the text colour.
+        let cell = age_cell(&mut harness, "Robotics", "6h");
+        assert!(!coloured(&mut harness, cell));
+    }
+
+    #[test]
+    fn an_age_past_a_day_says_old_and_warns_before_buying() {
+        // A second past six hours: the cell is amber.
+        let world = World::new();
+        let mut harness = aged_list(&world, 21_601, "6h");
+        let cell = age_cell(&mut harness, "Robotics", "6h");
+        assert!(coloured(&mut harness, cell));
+
+        // Exactly a day is still `1d`, in amber.
+        let world = World::new();
+        let mut harness = aged_list(&world, 86_400, "1d");
+        assert_row(&harness, "Robotics", &["1d"]);
+        let cell = age_cell(&mut harness, "Robotics", "1d");
+        assert!(coloured(&mut harness, cell));
+
+        // A second past a day: the cell says `old`, in amber, and warns on hover.
+        let world = World::new();
+        let mut harness = aged_list(&world, 86_401, "1d old");
+        assert_row(&harness, "Robotics", &["1d old"]);
+        let cell = age_cell(&mut harness, "Robotics", "1d old");
+        assert!(coloured(&mut harness, cell));
+        hover_at_point(&mut harness, cell.center());
+        assert!(shown(
+            &harness,
+            "Over a day old. Refresh before you rely on it."
+        ));
+        // The copied list says `old` too, not only the drawn cell.
+        harness
+            .ctx
+            .data_mut(|data| data.insert_temp(copy_request(Id::new("Buy list")), true));
+        harness.step();
+        let copied = copied_text(&harness).expect("the list is copied");
+        assert!(
+            copied.contains("\t1d old\t"),
+            "the copied age reads old: {copied}"
+        );
+    }
+
+    #[test]
+    fn the_oldest_line_asks_for_a_refresh_once_the_prices_are_over_a_day_old() {
+        let world = World::new();
+        let mut harness = aged_list(&world, 172_800, "2d old");
+        let text = "Oldest: 2d · Prices over a day old: refresh before you buy.";
+        settle(&mut harness, text);
+        let old = harness.get_by_label(text).rect();
+        assert!(coloured(&mut harness, old));
+
+        // An hour old is not stale: the line gives no refresh advice and is in the text colour.
+        let world = World::new();
+        let mut harness = aged_list(&world, 3_600, "1h");
+        settle(&mut harness, "Oldest: 1h");
+        let fresh = harness.get_by_label("Oldest: 1h").rect();
+        assert!(!coloured(&mut harness, fresh));
     }
 
     #[test]

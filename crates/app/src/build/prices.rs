@@ -27,10 +27,6 @@ pub const STALE_SECS: i64 = 21_600;
 pub const OLD_SECS: i64 = 86_400;
 
 /// The hover text for a price older than a day.
-#[expect(
-    dead_code,
-    reason = "the buy list and the Orders pages show it; nothing in this module does yet"
-)]
 pub(crate) const OLD_HOVER: &str = "Over a day old. Refresh before you rely on it.";
 
 /// The HTTP client the market reads through: the real one, or a fake in tests.

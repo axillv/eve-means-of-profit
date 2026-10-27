@@ -16,7 +16,10 @@ use mop_market::book::PriceRule;
 use mop_market::fuzzwork::{Refresh, Side, Stat};
 use mop_store::PlanRecord;
 
-use super::prices::{self, Held, Manual, OutOfRange, Outcome, STALE_SECS, age_text, failure_text};
+use super::prices::{
+    self, Held, Manual, OLD_HOVER, OLD_SECS, OutOfRange, Outcome, STALE_SECS, age_text, aged_text,
+    failure_text,
+};
 use super::state::{BuildPage, push_error, report, type_name};
 use crate::Shared;
 use crate::status::Notice;
@@ -527,7 +530,7 @@ fn table_cells(row: &BuyRow, view: &View) -> Vec<Cell> {
         Cell::text("manual")
     } else {
         view.live_age
-            .map_or_else(Cell::missing, |age| Cell::text(age_text(age)))
+            .map_or_else(Cell::missing, |age| Cell::text(aged_text(age)))
     };
     let value = match (&row.value, &row.price) {
         (Some(value), _) => Cell::money(*value),
@@ -680,6 +683,11 @@ fn table(
                     ui.label("manual").on_hover_text(format!(
                         "Typed {typed} ago. It does not change with the market."
                     ));
+                    true
+                }
+                (None, Some(age)) if age > OLD_SECS => {
+                    ui.colored_label(cx.style.stale, aged_text(age))
+                        .on_hover_text(OLD_HOVER);
                     true
                 }
                 (None, Some(age)) if age > STALE_SECS => {
@@ -857,7 +865,14 @@ fn footer_line(ui: &mut Ui, cx: &Shared, totals: &Totals, auto: bool, now: i64) 
             .filter_map(|view| view.live_age)
             .max();
         if let Some(age) = oldest {
-            let text = format!("Oldest: {}", age_text(age));
+            let text = if age > OLD_SECS {
+                format!(
+                    "Oldest: {} · Prices over a day old: refresh before you buy.",
+                    age_text(age)
+                )
+            } else {
+                format!("Oldest: {}", age_text(age))
+            };
             if age > STALE_SECS {
                 ui.colored_label(cx.style.stale, text);
             } else {
