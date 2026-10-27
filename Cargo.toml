@@ -17,7 +17,10 @@ unit_bindings = "warn"
 # Clippy defaults (correctness, suspicious, style, complexity, perf) stay on.
 # Additions are cherry-picked; whole pedantic/restriction groups are too noisy.
 [workspace.lints.clippy]
-# Silencing: #[allow] is not allowed; a needed exception uses #[expect(lint, reason = "...")].
+# Silencing: a task diff may not add #[allow]. A needed, reviewed exception is
+# #[expect(lint, reason = "...")]: the reason is checked, and an expect that does not
+# fire fails -D warnings. The diffcheck rejects #[allow] and cfg_attr(...allow/expect...)
+# wrappers that hide either attribute.
 allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
 # Swallowed errors.
