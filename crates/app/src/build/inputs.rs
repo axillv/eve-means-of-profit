@@ -1,11 +1,15 @@
 //! The Plan panel: the product and quantity of the plan on screen, where it is built, how it is
 //! priced and which route it is shipped by.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use egui::{Button, ComboBox, Grid, Key, RichText, TextEdit, Ui};
+use egui::{Button, Checkbox, ComboBox, Grid, Key, RichText, TextEdit, Ui};
+use mop_core::format::group_thousands;
 use mop_core::industry::{Activity, TypeId};
-use mop_core::stock::{CharacterId, LocationId, Places, StockScope, resolve};
+use mop_core::reserve::Claims;
+use mop_core::stock::{
+    CharacterId, ItemId, LocationId, Places, ResolvedAsset, StockScope, resolve,
+};
 use mop_market::book::PriceRule;
 use mop_sde::Sde;
 use mop_store::reservations::PlanStock;
@@ -306,6 +310,7 @@ fn stock_row(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
     ui.label("Stock");
     ui.vertical(|ui| {
         stock_choice(page, ui, cx);
+        reserve_tick(page, ui, cx);
         if let PlanStock::Characters(scope) = page.stock.clone() {
             character_ticks(page, ui, cx, &scope);
             place_ticks(page, ui, cx, &scope);
@@ -313,8 +318,50 @@ fn stock_row(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
         if let Some(text) = page.stock_error.clone() {
             ui.label(RichText::new(text).color(cx.style.neg));
         }
+        claimed_line(page, ui, cx);
     });
     ui.end_row();
+}
+
+const RESERVE_HOVER: &str =
+    "Plans that reserve take stock in list order; later plans only see what is left.";
+const RESERVE_NEEDS_STOCK: &str = "Reserve needs stock from characters.";
+
+/// The Reserve tick, on its own line under the Stock dropdown. Pasted stock cannot reserve: the
+/// tick is then disabled and unticked, whatever the store holds.
+fn reserve_tick(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
+    let Some(id) = page.selected else {
+        return;
+    };
+    let from_characters = matches!(page.stock, PlanStock::Characters(_));
+    let reserving = if from_characters {
+        match cx.store.reserving_plans() {
+            Ok(ids) => ids.contains(&id),
+            Err(error) => {
+                report(cx, format!("Could not read the reserving plans: {error}"));
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let mut ticked = reserving;
+    let response = ui.add_enabled(from_characters, Checkbox::new(&mut ticked, "Reserve"));
+    let response = if from_characters {
+        response.on_hover_text(RESERVE_HOVER)
+    } else {
+        response.on_disabled_hover_text(RESERVE_NEEDS_STOCK)
+    };
+    if response.changed() {
+        match cx.store.set_reserve(id, ticked) {
+            Ok(()) => {
+                // A plan that starts or stops reserving changes what every other plan gets.
+                cx.claims.mark_stale();
+                page.recalc(cx);
+            }
+            Err(error) => report(cx, format!("Could not save the plan's reserve: {error}")),
+        }
+    }
 }
 
 /// The dropdown: Pasted, or From characters (disabled when no character data is held).
@@ -507,6 +554,8 @@ fn save_stock(page: &mut BuildPage, cx: &mut Shared, stock: PlanStock) {
         Ok(()) => {
             page.stock = stock;
             page.stock_error = None;
+            // Another scope counts other entries, so the claims must be worked out again.
+            cx.claims.mark_stale();
             page.recalc(cx);
         }
         Err(StoreError::InvalidPlanStock(reason)) => {
@@ -514,6 +563,140 @@ fn save_stock(page: &mut BuildPage, cx: &mut Shared, stock: PlanStock) {
         }
         Err(error) => report(cx, format!("Could not save the plan's stock: {error}")),
     }
+}
+
+/// How many claimed entries the line shows before `and <n> more`.
+const CLAIMS_SHOWN: usize = 3;
+
+/// The line, last in the Stock row, saying what other plans claim from this plan's stock. Only a
+/// plan that takes its stock from characters and has a result shows it; nothing claimed shows
+/// nothing.
+fn claimed_line(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
+    let PlanStock::Characters(scope) = page.stock.clone() else {
+        return;
+    };
+    if page.result.is_err() {
+        return;
+    }
+    let Some(id) = page.selected else {
+        return;
+    };
+    let assets = resolve(&cx.session.stock_characters()).assets;
+    let listed = claimed_by_others(&scope, &assets, &cx.claims.claims, id);
+    if listed.is_empty() {
+        return;
+    }
+    let names: BTreeMap<i64, String> = match cx.store.plans() {
+        Ok(plans) => plans.into_iter().map(|plan| (plan.id, plan.name)).collect(),
+        Err(error) => return report(cx, format!("Could not read the plans: {error}")),
+    };
+    let mut entries: Vec<(String, u64, String)> = Vec::with_capacity(listed.len());
+    for (type_id, plan, units) in listed {
+        let item = type_name(type_id, cx.sde.as_ref(), &mut cx.notices);
+        let name = names
+            .get(&plan)
+            .cloned()
+            .unwrap_or_else(|| format!("plan {plan}"));
+        entries.push((item, units, name));
+    }
+    entries.sort_by_cached_key(|(item, _, _)| item.to_lowercase());
+    let (text, full) = claimed_text(&entries);
+    ui.label(RichText::new(text).color(cx.style.mute))
+        .on_hover_text(full);
+}
+
+/// The claimed line and its hover: `<item> <units> (<plan>)` entries joined with `, `; the line
+/// shows the first few and a count of the rest, the hover the whole list.
+fn claimed_text(entries: &[(String, u64, String)]) -> (String, String) {
+    let parts: Vec<String> = entries
+        .iter()
+        .map(|(item, units, plan)| {
+            let units = i64::try_from(*units).unwrap_or(i64::MAX);
+            format!("{item} {} ({plan})", group_thousands(units))
+        })
+        .collect();
+    let full = parts.join(", ");
+    let text = if parts.len() > CLAIMS_SHOWN {
+        let shown = parts
+            .iter()
+            .take(CLAIMS_SHOWN)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "Claimed by other plans: {shown} and {} more",
+            parts.len() - CLAIMS_SHOWN
+        )
+    } else {
+        format!("Claimed by other plans: {full}")
+    };
+    (text, full)
+}
+
+/// What the other plans claim from the stock this scope counts, per type and plan: the units of
+/// every claimed entry that counts and sits in the scope. A plan served after `plan_id` is left
+/// out; without `plan_id` in the serving order, every other plan counts. Sorted by item, then by
+/// the plan's place in the serving order.
+fn claimed_by_others(
+    scope: &StockScope,
+    assets: &[ResolvedAsset],
+    claims: &Claims,
+    plan_id: i64,
+) -> Vec<(TypeId, i64, u64)> {
+    let cut = claims.order.iter().position(|&served| served == plan_id);
+    let served_before = |plan: i64| match cut {
+        None => true,
+        Some(cut) => claims
+            .order
+            .iter()
+            .position(|&served| served == plan)
+            .is_some_and(|place| place < cut),
+    };
+
+    let mut scoped: BTreeMap<ItemId, TypeId> = BTreeMap::new();
+    for row in assets {
+        if row.counts_as_stock && in_scope(scope, row) {
+            scoped.insert(row.asset.item_id, row.asset.type_id);
+        }
+    }
+    let mut totals: BTreeMap<(TypeId, i64), u64> = BTreeMap::new();
+    let mut first_item: BTreeMap<(TypeId, i64), ItemId> = BTreeMap::new();
+    for (item_id, type_id) in scoped {
+        let Some(claimed) = claims.by_asset.get(&item_id) else {
+            continue;
+        };
+        for &(plan, units) in claimed {
+            if plan == plan_id || !served_before(plan) {
+                continue;
+            }
+            let key = (type_id, plan);
+            let total = totals.entry(key).or_insert(0);
+            *total = total.saturating_add(units);
+            first_item.entry(key).or_insert(item_id);
+        }
+    }
+    let mut listed: Vec<((TypeId, i64), u64)> = totals.into_iter().collect();
+    listed.sort_by_cached_key(|((type_id, plan), _)| {
+        let item = first_item
+            .get(&(*type_id, *plan))
+            .copied()
+            .unwrap_or(ItemId::MAX);
+        let place = claims.order.iter().position(|served| served == plan);
+        (item, place)
+    });
+    listed
+        .into_iter()
+        .map(|((type_id, plan), units)| (type_id, plan, units))
+        .collect()
+}
+
+/// Whether an asset sits in the characters and places the scope counts.
+fn in_scope(scope: &StockScope, row: &ResolvedAsset) -> bool {
+    let place_ok = match &scope.places {
+        Places::All => true,
+        Places::Only(places) => places.contains(&row.place),
+    };
+    scope.characters.contains(&row.character_id) && place_ok
 }
 
 /// A store reason as shown: capitalised, with a full stop.
@@ -569,7 +752,213 @@ fn edit(page: &mut BuildPage, cx: &mut Shared, change: impl FnOnce(&mut PlanReco
 
 #[cfg(test)]
 mod tests {
-    use super::sentence;
+    use std::collections::BTreeMap;
+
+    use mop_core::industry::TypeId;
+    use mop_core::reserve::Claims;
+    use mop_core::stock::{
+        Asset, CharacterId, ItemId, LocationId, Places, ResolvedAsset, StockScope,
+    };
+
+    use super::{claimed_by_others, claimed_text, sentence};
+
+    const MAIN: CharacterId = 2_112_000_001;
+    const ALT: CharacterId = 2_112_000_002;
+    const P1: LocationId = 60_003_760;
+    const P2: LocationId = 1_035_466_617_946;
+    const HOBGOBLIN_I: TypeId = 2_454;
+    const TRITANIUM: TypeId = 34;
+
+    fn asset(
+        item_id: ItemId,
+        type_id: TypeId,
+        character_id: CharacterId,
+        place: LocationId,
+        quantity: u64,
+    ) -> ResolvedAsset {
+        ResolvedAsset {
+            character_id,
+            asset: Asset {
+                item_id,
+                type_id,
+                location_id: place,
+                flag: Some("Hangar".to_owned()),
+                quantity,
+                singleton: false,
+            },
+            place,
+            counts_as_stock: true,
+        }
+    }
+
+    /// Main's Hobgoblin I × 4 and Tritanium × 1,500 at P1, Tritanium × 2,000 at P2; Alt's
+    /// Hobgoblin I × 3 at P1.
+    fn assets() -> Vec<ResolvedAsset> {
+        vec![
+            asset(1, HOBGOBLIN_I, MAIN, P1, 4),
+            asset(2, HOBGOBLIN_I, ALT, P1, 3),
+            asset(3, TRITANIUM, MAIN, P1, 1_500),
+            asset(4, TRITANIUM, MAIN, P2, 2_000),
+        ]
+    }
+
+    fn scope(characters: &[CharacterId], places: Places) -> StockScope {
+        StockScope {
+            characters: characters.iter().copied().collect(),
+            places,
+        }
+    }
+
+    fn claims(order: &[i64], by_asset: &[(ItemId, &[(i64, u64)])]) -> Claims {
+        Claims {
+            order: order.to_vec(),
+            by_asset: by_asset
+                .iter()
+                .map(|(item_id, served)| (*item_id, served.to_vec()))
+                .collect(),
+            by_plan: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn claims_from_later_plans_are_not_counted() {
+        let claims = claims(
+            &[11, 12],
+            &[
+                (1, &[(11, 4)]),
+                (2, &[(11, 3)]),
+                (3, &[(11, 1_500)]),
+                (4, &[(12, 509)]),
+            ],
+        );
+
+        assert_eq!(
+            claimed_by_others(&scope(&[MAIN], Places::All), &assets(), &claims, 12),
+            vec![(HOBGOBLIN_I, 11, 4), (TRITANIUM, 11, 1_500)]
+        );
+        assert_eq!(
+            claimed_by_others(
+                &scope(&[MAIN, ALT], Places::Only([P1].into())),
+                &assets(),
+                &claims,
+                11,
+            ),
+            Vec::new()
+        );
+        // A plan outside the order sees every claim, not only those of the plans before it.
+        assert_eq!(
+            claimed_by_others(
+                &scope(&[MAIN, ALT], Places::Only([P1].into())),
+                &assets(),
+                &claims,
+                99,
+            ),
+            vec![(HOBGOBLIN_I, 11, 7), (TRITANIUM, 11, 1_500)]
+        );
+    }
+
+    #[test]
+    fn entries_of_one_item_add_up_and_the_plan_order_breaks_ties() {
+        let claims = claims(
+            &[12, 11],
+            &[
+                (1, &[(12, 1), (11, 3)]),
+                (2, &[(11, 3)]),
+                (3, &[(11, 1_500)]),
+            ],
+        );
+
+        assert_eq!(
+            claimed_by_others(
+                &scope(&[MAIN, ALT], Places::Only([P1].into())),
+                &assets(),
+                &claims,
+                11,
+            ),
+            vec![(HOBGOBLIN_I, 12, 1)]
+        );
+        assert_eq!(
+            claimed_by_others(&scope(&[MAIN], Places::All), &assets(), &claims, 12),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn claims_outside_the_scope_or_that_do_not_count_are_left_out() {
+        let mut fitted = asset(5, HOBGOBLIN_I, MAIN, P1, 9);
+        fitted.counts_as_stock = false;
+        let assets = vec![
+            asset(2, HOBGOBLIN_I, ALT, P1, 3),
+            asset(3, TRITANIUM, MAIN, P1, 1_500),
+            asset(4, TRITANIUM, MAIN, P2, 2_000),
+            fitted,
+        ];
+        let claims = claims(
+            &[11, 12],
+            &[
+                (2, &[(11, 3)]),
+                (3, &[(11, 100)]),
+                (4, &[(11, 200)]),
+                (5, &[(11, 300)]),
+            ],
+        );
+
+        // Alt's Hobgoblin, the P2 Tritanium and the fitted Hobgoblin are all out of this scope.
+        assert_eq!(
+            claimed_by_others(
+                &scope(&[MAIN], Places::Only([P1].into())),
+                &assets,
+                &claims,
+                12,
+            ),
+            vec![(TRITANIUM, 11, 100)]
+        );
+    }
+
+    #[test]
+    fn entries_of_one_item_follow_the_serving_order() {
+        let claims = claims(&[12, 11, 13], &[(3, &[(11, 5), (12, 7)])]);
+        let assets = vec![asset(3, TRITANIUM, MAIN, P1, 1_500)];
+
+        // Map order is by plan id, so only the serving order puts 12 before 11 here.
+        assert_eq!(
+            claimed_by_others(&scope(&[MAIN], Places::All), &assets, &claims, 13),
+            vec![(TRITANIUM, 12, 7), (TRITANIUM, 11, 5)]
+        );
+    }
+
+    #[test]
+    fn the_claimed_line_shows_three_entries_and_hovers_all_of_them() {
+        let two = vec![
+            ("Hobgoblin I".to_owned(), 4, "Hobgoblin A".to_owned()),
+            ("Tritanium".to_owned(), 1_500, "Hobgoblin A".to_owned()),
+        ];
+        assert_eq!(
+            claimed_text(&two).0,
+            "Claimed by other plans: Hobgoblin I 4 (Hobgoblin A), Tritanium 1,500 (Hobgoblin A)"
+        );
+        assert_eq!(
+            claimed_text(&two).1,
+            "Hobgoblin I 4 (Hobgoblin A), Tritanium 1,500 (Hobgoblin A)"
+        );
+
+        let five = vec![
+            ("Hobgoblin I".to_owned(), 4, "Hobgoblin A".to_owned()),
+            ("Isogen".to_owned(), 12, "Hobgoblin A".to_owned()),
+            ("Nocxium".to_owned(), 6, "Hobgoblin A".to_owned()),
+            ("Pyerite".to_owned(), 21, "Hobgoblin A".to_owned()),
+            ("Tritanium".to_owned(), 1_500, "Hobgoblin A".to_owned()),
+        ];
+        let (text, full) = claimed_text(&five);
+        assert_eq!(
+            text,
+            "Claimed by other plans: Hobgoblin I 4 (Hobgoblin A), Isogen 12 (Hobgoblin A), Nocxium 6 (Hobgoblin A) and 2 more"
+        );
+        assert_eq!(
+            full,
+            "Hobgoblin I 4 (Hobgoblin A), Isogen 12 (Hobgoblin A), Nocxium 6 (Hobgoblin A), Pyerite 21 (Hobgoblin A), Tritanium 1,500 (Hobgoblin A)"
+        );
+    }
 
     #[test]
     fn a_reason_gets_a_capital_and_one_full_stop() {
