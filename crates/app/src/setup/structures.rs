@@ -114,7 +114,7 @@ fn draw(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
             };
             name_cell(ui, panel, &places, id, &mut action)
         };
-        Table::new(Id::new("setup structures"), &columns)
+        Table::new(Id::new(super::SetupPanel::Structures.title()), &columns)
             .selected(selected)
             .fit_rows(TABLE_ROWS)
             .show_with(ui, &cx.style, cx.density, &rows, None, &mut draw_cell)

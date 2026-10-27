@@ -18,6 +18,8 @@ use crate::table::{Table, hidden_from_text};
 
 /// The table's name for its saved hidden columns: `columns.item_owned`.
 const TABLE: &str = "item_owned";
+/// The Item panel's title, on both the Build and the Assets pages.
+const PANEL: &str = "Item";
 /// The column the player can hide.
 const COUNTED: &str = "counted";
 
@@ -112,13 +114,9 @@ fn owned(ui: &mut Ui, cx: &mut Shared, type_id: TypeId) {
     if counted_shown {
         footer.push(Cell::int(i128::from(counted), grouped(counted)));
     }
-    Table::new(Id::new("item panel owned"), &columns).show(
-        ui,
-        &cx.style,
-        cx.density,
-        &rows,
-        Some(&footer),
-    );
+    Table::new(Id::new("item panel owned"), &columns)
+        .panel(Id::new(PANEL))
+        .show(ui, &cx.style, cx.density, &rows, Some(&footer));
 }
 
 /// The units and the counted units over every holding, or `None` when the sum does not fit.
@@ -210,7 +208,9 @@ fn jobs(ui: &mut Ui, cx: &mut Shared, type_id: TypeId) {
             ],
         })
         .collect();
-    Table::new(Id::new("item panel jobs"), &columns).show(ui, &cx.style, cx.density, &rows, None);
+    Table::new(Id::new("item panel jobs"), &columns)
+        .panel(Id::new(PANEL))
+        .show(ui, &cx.style, cx.density, &rows, None);
 }
 
 /// When a job ends: `in <age>`, or `ready` once the end time has passed.

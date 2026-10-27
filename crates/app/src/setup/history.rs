@@ -124,7 +124,7 @@ fn draw(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
         .map(|market| row(market, usage_of(&snapshot, market.id)))
         .collect();
     let selected = panel.selected.and_then(|id| u64::try_from(id).ok());
-    let response = Table::new(Id::new("setup price history"), &columns())
+    let response = Table::new(Id::new(super::SetupPanel::PriceHistory.title()), &columns())
         .selected(selected)
         .fit_rows(TABLE_ROWS)
         .show_with(

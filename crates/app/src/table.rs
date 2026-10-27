@@ -18,8 +18,9 @@ use model::{
     Cell, Column, ColumnKind, Direction, Row, row_height, sort_order, span, to_tsv, visible,
 };
 
-/// The memory key that asks the table with this id to copy itself as TSV. The panel menu sets it;
-/// the table clears it when it copies. A panel's table takes the panel's id, so the menu finds it.
+/// The memory key that asks the table with this id to copy itself as TSV. The panel's `Copy table`
+/// button sets it; the table clears it when it copies. A panel's table takes the panel's id, so the
+/// button finds it.
 pub fn copy_request(table: Id) -> Id {
     table.with("copy as TSV")
 }
@@ -89,6 +90,7 @@ struct Look<'a> {
 /// A table of `rows` under `columns`. Pass the same `id` every frame: the sort and the folds are kept under it.
 pub struct Table<'a> {
     id: Id,
+    panel: Id,
     columns: &'a [Column],
     selected: Option<u64>,
     fit_rows: Option<usize>,
@@ -98,10 +100,19 @@ impl<'a> Table<'a> {
     pub fn new(id: Id, columns: &'a [Column]) -> Self {
         Self {
             id,
+            panel: id,
             columns,
             selected: None,
             fit_rows: None,
         }
+    }
+
+    /// Tells the table which panel it belongs to, when the panel draws more than one table: the
+    /// panel's header reads `has_table(panel)` and asks for a copy under `copy_request(panel)`.
+    /// Defaults to the table's own id.
+    pub fn panel(mut self, panel: Id) -> Self {
+        self.panel = panel;
+        self
     }
 
     /// Makes the table only as tall as its rows, up to `rows` of them, instead of taking all the
@@ -174,7 +185,7 @@ impl<'a> Table<'a> {
         draw: &mut dyn FnMut(&mut Ui, u64, &'static str) -> bool,
     ) -> TableResponse {
         // The panel header reads this to show its copy button, so it is set every frame the table draws.
-        ui.data_mut(|data| data.insert_temp(has_table(self.id), true));
+        ui.data_mut(|data| data.insert_temp(has_table(self.panel), true));
         let mut state: State =
             ui.data_mut(|data| data.get_temp_mut_or_default::<State>(self.id).clone());
         let sort_before = state.sort;
@@ -193,9 +204,9 @@ impl<'a> Table<'a> {
             });
         let order = sort_order(rows, column, direction);
         let shown = visible(rows, &order, &state.collapsed);
-        // The panel menu sets this flag to ask for a copy; the text is built only then.
+        // The panel's copy button sets this flag to ask for a copy; the text is built only then.
         if ui
-            .data_mut(|data| data.remove_temp::<bool>(copy_request(self.id)))
+            .data_mut(|data| data.remove_temp::<bool>(copy_request(self.panel)))
             .unwrap_or(false)
         {
             ui.ctx()

@@ -381,7 +381,7 @@ fn table(ui: &mut Ui, cx: &Shared, built: &Built, tree: &Tree) -> Outcome {
                 _ => false,
             }
         };
-        Table::new(Id::new("assets places"), &columns)
+        Table::new(Id::new(super::AssetsPanel::Places.title()), &columns)
             .selected(selected)
             .show_with(ui, &style, cx.density, &built.rows, None, &mut draw_cell)
     };

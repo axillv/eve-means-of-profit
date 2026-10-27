@@ -156,7 +156,7 @@ fn draw(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
         .map(|row| facility_row(row, &structures, sde, costs.get(&row.id).copied()))
         .collect();
     let columns = columns();
-    let response = Table::new(Id::new("setup facilities"), &columns)
+    let response = Table::new(Id::new(super::SetupPanel::Facilities.title()), &columns)
         .selected(panel.selected.and_then(|id| u64::try_from(id).ok()))
         .fit_rows(TABLE_ROWS)
         .show(ui, style, cx.density, &rows, None);

@@ -278,10 +278,13 @@ fn service_list(
         .map(|service| service_row(service, map, route))
         .collect();
     let columns = columns();
-    let response = Table::new(Id::new("setup services"), &columns)
-        .selected(panel.selected_service.and_then(|id| u64::try_from(id).ok()))
-        .fit_rows(TABLE_ROWS)
-        .show(ui, style, density, &rows, None);
+    let response = Table::new(
+        Id::new(super::SetupPanel::FreightServices.title()),
+        &columns,
+    )
+    .selected(panel.selected_service.and_then(|id| u64::try_from(id).ok()))
+    .fit_rows(TABLE_ROWS)
+    .show(ui, style, density, &rows, None);
     if let Some(key) = response.clicked
         && let Ok(id) = i64::try_from(key)
     {

@@ -141,7 +141,7 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
             _ => false,
         }
     };
-    let response = Table::new(Id::new("build_steps"), &columns)
+    let response = Table::new(Id::new(super::BuildPanel::Steps.title()), &columns)
         .show_with(ui, &cx.style, cx.density, &rows, None, &mut draw);
     if let Some(key) = response.clicked
         && let Ok(type_id) = TypeId::try_from(key)

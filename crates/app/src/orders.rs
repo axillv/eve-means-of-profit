@@ -61,7 +61,7 @@ impl Chips {
 }
 
 /// Draws the body of the panel of this page.
-pub fn show(_page: &mut OrdersPage, _panel: OrdersPanel, ui: &mut Ui, cx: &mut Shared) {
+pub fn show(_page: &mut OrdersPage, panel: OrdersPanel, ui: &mut Ui, cx: &mut Shared) {
     let now = (cx.clock)();
     let all = rows::entries(cx, now);
     if all.is_empty() {
@@ -119,7 +119,7 @@ pub fn show(_page: &mut OrdersPage, _panel: OrdersPanel, ui: &mut Ui, cx: &mut S
             _ => false,
         }
     };
-    let response = Table::new(Id::new("orders"), &columns).show_with(
+    let response = Table::new(Id::new(panel.title()), &columns).show_with(
         ui,
         &cx.style,
         cx.density,

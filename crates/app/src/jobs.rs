@@ -35,7 +35,7 @@ impl JobsPanel {
 }
 
 /// Draws the body of the panel of this page.
-pub fn show(_page: &mut JobsPage, _panel: JobsPanel, ui: &mut Ui, cx: &mut Shared) {
+pub fn show(_page: &mut JobsPage, panel: JobsPanel, ui: &mut Ui, cx: &mut Shared) {
     let now = (cx.clock)();
     let all = rows::entries(cx, now);
     if all.is_empty() {
@@ -78,8 +78,13 @@ pub fn show(_page: &mut JobsPage, _panel: JobsPanel, ui: &mut Ui, cx: &mut Share
             cells: cells(entry),
         })
         .collect();
-    let response =
-        Table::new(Id::new("jobs"), &columns).show(ui, &cx.style, cx.density, &table_rows, None);
+    let response = Table::new(Id::new(panel.title()), &columns).show(
+        ui,
+        &cx.style,
+        cx.density,
+        &table_rows,
+        None,
+    );
     if let Some(key) = response.clicked {
         let picked = usize::try_from(key)
             .ok()

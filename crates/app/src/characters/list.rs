@@ -326,8 +326,11 @@ fn table(ui: &mut Ui, cx: &Shared, lines: &[Line], gates: &Gates) -> Option<Clic
             _ => false,
         }
     };
-    Table::new(Id::new("characters-table"), &columns)
-        .show_with(ui, &style, cx.density, &rows, None, &mut draw);
+    Table::new(
+        Id::new(super::CharactersPanel::Characters.title()),
+        &columns,
+    )
+    .show_with(ui, &style, cx.density, &rows, None, &mut draw);
     click
 }
 

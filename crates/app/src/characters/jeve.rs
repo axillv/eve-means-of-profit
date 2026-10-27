@@ -253,7 +253,7 @@ fn table(ui: &mut Ui, cx: &Shared) {
             }
         })
         .collect();
-    Table::new(Id::new("jeve-table"), &columns)
+    Table::new(Id::new(super::CharactersPanel::JeveData.title()), &columns)
         .fit_rows(20)
         .show(ui, &style, cx.density, &rows, None);
     let left_out = jeve.skipped_corporations;
