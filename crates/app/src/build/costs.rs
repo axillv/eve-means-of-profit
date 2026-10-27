@@ -100,7 +100,7 @@ const FACILITIES_KEPT_SECS: f64 = 1.0;
 /// The saved facilities and each one's system and tax (or why they cannot be read), and when
 /// they were read.
 #[derive(Clone)]
-struct SavedFacilities {
+pub(super) struct SavedFacilities {
     read_at: f64,
     rows: Vec<FacilityRow>,
     costs: BTreeMap<i64, Result<FacilityCosts, String>>,
@@ -140,7 +140,7 @@ fn saved_facilities(ctx: &Context, cx: &mut Shared) -> Result<SavedFacilities, S
 }
 
 /// The job cost set-up of one activity, or the message that says why it cannot be made.
-fn setup(
+pub(super) fn setup(
     activity: Activity,
     record: &PlanRecord,
     saved_facilities: &SavedFacilities,

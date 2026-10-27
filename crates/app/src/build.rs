@@ -5,6 +5,7 @@
 pub mod buy_list;
 pub mod costs;
 pub mod inputs;
+pub mod invention;
 pub mod plans;
 pub mod prices;
 pub mod state;
