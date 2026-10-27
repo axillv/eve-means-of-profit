@@ -7,11 +7,18 @@ use mop_core::money::Money;
 use mop_market::fuzzwork::{Side, Stat};
 
 use crate::Shared;
-use crate::build::prices::age_text;
+use crate::build::prices::{age_text, aged_text};
 use crate::build::state::type_name;
 
-/// An order whose character's data is older than this many seconds shows its age amber.
-pub(crate) const STALE_SECS: i64 = 600;
+/// An order whose character's data is older than this many seconds (6 hours) shows its age amber.
+pub(crate) const STALE_SECS: i64 = 21_600;
+
+/// Past this age the order's data is called old in words.
+#[expect(
+    dead_code,
+    reason = "the Orders page's hover text reads it; nothing here does yet"
+)]
+pub(crate) const OLD_SECS: i64 = 86_400;
 
 /// One market order, as the table shows it.
 pub(crate) struct Entry {
@@ -185,7 +192,19 @@ pub(crate) fn expires_text(expires_in: Option<i64>) -> String {
     }
 }
 
-/// The text of a data age, such as `2m`.
+/// The text of a data age, such as `2m` or `2d old`.
 pub(crate) fn age_label(age: Option<i64>) -> String {
-    age.map_or_else(|| "—".to_owned(), age_text)
+    age.map_or_else(|| "—".to_owned(), aged_text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_age_reads_in_units_and_is_old_after_a_day() {
+        assert_eq!(age_label(None), "—");
+        assert_eq!(age_label(Some(7_200)), "2h");
+        assert_eq!(age_label(Some(90_000)), "1d old");
+    }
 }

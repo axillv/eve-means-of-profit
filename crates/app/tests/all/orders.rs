@@ -280,6 +280,30 @@ mod tests {
         }
     }
 
+    /// A character's single order for 100 of 200 PAU for sale, fetched at `fetched_at`.
+    fn data_fetched_at(character_id: u64, order_id: i64, fetched_at: i64) -> CharacterData {
+        CharacterData {
+            character_id,
+            assets: None,
+            orders: Some(Fetched {
+                data: vec![order(
+                    order_id,
+                    PAU,
+                    JITA_4_4,
+                    false,
+                    Money::from_ten_thousandths(615_000_000),
+                    (100, 200),
+                    NOW + 260_000,
+                )],
+                fetched_at,
+                last_modified: None,
+                expires: None,
+            }),
+            jobs: None,
+            wallet: None,
+        }
+    }
+
     fn start(
         env: &Env,
         characters: Vec<Character>,
@@ -345,6 +369,50 @@ mod tests {
         assert!(shown(&harness, "1970-01-11 10:00"));
         assert!(shown(&harness, "2m"));
         assert!(shown(&harness, "Main"));
+    }
+
+    #[test]
+    fn the_age_is_plain_until_six_hours_then_amber_and_old_past_a_day() {
+        const ALT: u64 = 2_112_000_002;
+        const THIRD: u64 = 2_112_000_003;
+        let env = env();
+        saved::save_character(&esi_dir(&env), &data_fetched_at(MAIN, 1, NOW - 7_200))
+            .expect("Main's order saved");
+        saved::save_character(&esi_dir(&env), &data_fetched_at(ALT, 2, NOW - 25_200))
+            .expect("Alt's order saved");
+        saved::save_character(&esi_dir(&env), &data_fetched_at(THIRD, 3, NOW - 90_000))
+            .expect("Third's order saved");
+        let requests = Arc::new(Mutex::new(0));
+        let mut harness = start(
+            &env,
+            vec![
+                character(MAIN, "Main"),
+                character(ALT, "Alt"),
+                character(THIRD, "Third"),
+            ],
+            requests,
+        );
+        loaded(&mut harness);
+        click(&mut harness, "Orders");
+
+        let two_hours = harness
+            .get_all_by_label("2h")
+            .next()
+            .expect("the 2h age")
+            .rect();
+        assert!(!coloured(&mut harness, two_hours));
+        let seven_hours = harness
+            .get_all_by_label("7h")
+            .next()
+            .expect("the 7h age")
+            .rect();
+        assert!(coloured(&mut harness, seven_hours));
+        let a_day = harness
+            .get_all_by_label("1d old")
+            .next()
+            .expect("the 1d old age")
+            .rect();
+        assert!(coloured(&mut harness, a_day));
     }
 
     #[test]
