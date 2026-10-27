@@ -15,11 +15,12 @@ mod tests {
     use std::time::Duration;
 
     use egui::accesskit::Role;
-    use egui::{Event, Key, Modifiers, MouseWheelUnit, OutputCommand, TouchPhase, vec2};
+    use egui::{Event, Id, Key, Modifiers, MouseWheelUnit, OutputCommand, TouchPhase, vec2};
     use egui_kittest::kittest::{NodeT, Queryable, by};
     use egui_kittest::{Harness, SnapshotResults};
     use eve_means_of_profit::build::prices::Prices;
     use eve_means_of_profit::session::NoEve;
+    use eve_means_of_profit::table::{copy_request, has_table};
     use eve_means_of_profit::{App, AppConfig};
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -1520,6 +1521,18 @@ mod tests {
     }
 
     #[test]
+    fn the_buy_list_says_it_has_a_table() {
+        let world = World::new();
+        let harness = complete_list(&world, &standard_services());
+        assert_eq!(
+            harness
+                .ctx
+                .data(|data| data.get_temp::<bool>(has_table(Id::new("Buy list")))),
+            Some(true)
+        );
+    }
+
+    #[test]
     fn copy_as_tsv_leaves_out_the_hidden_columns_and_keeps_the_footer() {
         let world = World::new();
         let env = make_env(&standard_services());
@@ -1533,13 +1546,11 @@ mod tests {
             harness.key_press(Key::Escape);
             harness.run();
         }
-        // The panel's menu asks its table to copy itself; the copy is made in the frame of the click.
-        click(&mut harness, "⋯");
+        // The copy is asked for in memory, as the panel's menu does, and the table makes it in the
+        // next frame it draws.
         harness
-            .get_all_by_label("Copy as TSV")
-            .last()
-            .expect("the copy item")
-            .click();
+            .ctx
+            .data_mut(|data| data.insert_temp(copy_request(Id::new("Buy list")), true));
         harness.step();
         assert_eq!(
             copied_text(&harness).as_deref(),

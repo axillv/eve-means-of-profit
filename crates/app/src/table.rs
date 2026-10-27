@@ -24,6 +24,13 @@ pub fn copy_request(table: Id) -> Id {
     table.with("copy as TSV")
 }
 
+/// The memory key that says the panel with this id has a table. The panel header reads it to show
+/// its copy button; a table sets it every frame it draws. A panel's table takes the panel's id, so
+/// the header finds it.
+pub fn has_table(panel: Id) -> Id {
+    panel.with("has a table")
+}
+
 /// The hidden column ids in `text`: the parts between commas, without empty parts.
 pub fn hidden_from_text(text: &str) -> Vec<String> {
     text.split(',')
@@ -166,6 +173,8 @@ impl<'a> Table<'a> {
         footer: Option<&[Cell]>,
         draw: &mut dyn FnMut(&mut Ui, u64, &'static str) -> bool,
     ) -> TableResponse {
+        // The panel header reads this to show its copy button, so it is set every frame the table draws.
+        ui.data_mut(|data| data.insert_temp(has_table(self.id), true));
         let mut state: State =
             ui.data_mut(|data| data.get_temp_mut_or_default::<State>(self.id).clone());
         let sort_before = state.sort;
