@@ -5,22 +5,153 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use egui::{Context, Id, Ui};
-use mop_core::industry::{Activity, Modifier, RecipeBook, TypeId};
-use mop_core::job_cost::{CostSetup, SCC_SURCHARGE, StepCost, step_cost};
+use mop_core::industry::{Activity, Modifier, Recipe, RecipeBook, TypeId};
+use mop_core::invention::{AttemptRule, Decryptor, Skills};
+use mop_core::job_cost::{CostSetup, SCC_SURCHARGE, StepCost, job_cost, step_cost};
 use mop_core::make_or_buy::{Decision, MakeOrBuyInput, make_or_buy};
 use mop_core::money::Money;
 use mop_core::plan::Plan;
 use mop_core::volume::Volume;
+use mop_sde::invention::{InventionActivity, InventionProduct, split_skills};
 use mop_sde::{Facility, Sde, Security};
-use mop_store::{FacilityCosts, FacilityRow, PlanRecord};
+use mop_store::{FacilityCosts, FacilityRow, InventionChoice, PlanRecord};
 
 use super::buy_list;
-use super::prices;
-use super::state::{BuildPage, NO_REACTIONS, me_of};
+use super::invention::{
+    InventionInput, InventionLine, Numbers, fee_per_attempt, invention_numbers, skills_for,
+};
+use super::prices::{self, Held};
+use super::state::{BuildPage, NO_REACTIONS, me_with, type_name};
 use crate::Shared;
 
 /// Shown while the industry data is still loading.
 pub const PENDING: &str = "…";
+
+/// The text for a part whose invention skills cannot be split into two sciences and an
+/// encryption skill.
+const SKILLS_UNUSABLE: &str = "Invention: this item needs skills the app cannot use yet.";
+
+/// What the Steps table shows of one T2 part's invention: its numbers, or why it has none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InventionShown {
+    /// The plan does not invent the part.
+    Not,
+    /// The numbers cannot be worked out; the text says why.
+    Unavailable(String),
+    /// The numbers the part is invented at.
+    Counted {
+        line: InventionLine,
+        numbers: Numbers,
+        fee: Money,
+        /// Why the fee is not in the numbers, when it could not be worked out.
+        fee_note: Option<String>,
+    },
+}
+
+/// The invention of every T2 part the plan builds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inventions {
+    /// The shown numbers of each part, or why it has none.
+    pub parts: BTreeMap<TypeId, InventionShown>,
+    /// A shown part has a skill with no saved level. A level of 0 that was typed is saved.
+    pub skills_unset: bool,
+    /// How many attempts the plan buys.
+    pub rule: AttemptRule,
+}
+
+impl Default for Inventions {
+    fn default() -> Self {
+        Self {
+            parts: BTreeMap::new(),
+            skills_unset: false,
+            rule: AttemptRule::Expected,
+        }
+    }
+}
+
+/// What one part's invention numbers are worked out from.
+pub struct CountInput<'a> {
+    /// The T2 part the plan builds. The line names it; the product names the blueprint invented.
+    pub type_id: TypeId,
+    pub activity: &'a InventionActivity,
+    pub product: &'a InventionProduct,
+    pub t2_runs: u64,
+    pub choice: InventionChoice,
+    pub skills: Option<Skills>,
+    pub rule: AttemptRule,
+    /// The datacores an attempt uses: quantity per attempt and unit price, in file order.
+    pub datacores: &'a [(u64, Money)],
+    pub decryptor: Option<&'a Decryptor>,
+    pub decryptor_price: Option<Money>,
+    /// The fee of one attempt, or why it could not be worked out.
+    pub fee: Result<Money, String>,
+}
+
+/// The invention numbers of one part, or why it has none.
+pub fn count_part(input: &CountInput<'_>) -> InventionShown {
+    if !input.choice.invent {
+        return InventionShown::Not;
+    }
+    let Some(skills) = input.skills else {
+        return InventionShown::Unavailable(SKILLS_UNUSABLE.to_owned());
+    };
+    if let Some(id) = input.choice.decryptor
+        && input.decryptor.is_none()
+    {
+        return InventionShown::Unavailable(format!("Invention: type {id} is not a decryptor."));
+    }
+    // A fee that cannot be worked out leaves the materials' cost alone and says so on the line.
+    let (fee, fee_note) = match &input.fee {
+        Ok(fee) => (*fee, None),
+        Err(text) => (Money::ZERO, Some(format!("fee not counted: {text}"))),
+    };
+    match invention_numbers(&InventionInput {
+        product: input.product,
+        t2_runs: input.t2_runs,
+        skills,
+        decryptor: input.decryptor,
+        rule: input.rule,
+        datacores: input.datacores,
+        decryptor_price: input.decryptor_price,
+        fee,
+    }) {
+        Ok(numbers) => InventionShown::Counted {
+            line: InventionLine {
+                type_id: input.type_id,
+                need: numbers.need,
+                attempt_cost: numbers.attempt_cost,
+                materials: input.activity.materials.clone(),
+                decryptor: input.decryptor.map(|decryptor| decryptor.type_id),
+            },
+            numbers,
+            fee,
+            fee_note,
+        },
+        Err(error) => InventionShown::Unavailable(format!("Invention: {error}")),
+    }
+}
+
+/// What every part of a plan is worked out from.
+struct PartSetup<'a> {
+    record: &'a PlanRecord,
+    saved_facilities: &'a SavedFacilities,
+    manufacturing: &'a Result<CostSetup, String>,
+    adjusted: &'a BTreeMap<TypeId, Money>,
+    prices: &'a BTreeMap<TypeId, Money>,
+    saved_skills: &'a BTreeMap<TypeId, u8>,
+    rule: AttemptRule,
+    recipes: &'a RecipeBook,
+}
+
+/// One T2 part the plan builds, with what its invention is worked out from.
+struct Part {
+    type_id: TypeId,
+    runs: u64,
+    activity: InventionActivity,
+    product: InventionProduct,
+    choice: InventionChoice,
+    decryptor: Option<Decryptor>,
+}
 
 /// What the cost code worked out for the Steps table this frame.
 #[derive(Debug, Default)]
@@ -33,6 +164,8 @@ pub struct Costs {
     pub reasons: BTreeMap<TypeId, String>,
     /// The set-up message of each part whose activity cannot be costed.
     pub messages: BTreeMap<TypeId, String>,
+    /// The invention numbers of each built T2 part.
+    pub inventions: Inventions,
     /// Seconds since the cost indices were fetched, `None` when not fetched.
     pub systems_age: Option<i64>,
     /// Seconds since the adjusted prices were fetched, `None` when not fetched.
@@ -220,6 +353,7 @@ fn modifiers(
     recipes: &RecipeBook,
     sde: &Sde,
     facilities: &[FacilityRow],
+    copy_mes: &BTreeMap<TypeId, u8>,
 ) -> BTreeMap<TypeId, Modifier> {
     let mut modifiers = BTreeMap::new();
     for &type_id in types {
@@ -229,7 +363,7 @@ fn modifiers(
         let (facility, me) = match recipe.activity {
             Activity::Manufacturing => (
                 facility_of(record, facilities, Activity::Manufacturing),
-                me_of(record, type_id, recipe.made_by_invention),
+                me_with(record, type_id, recipe.made_by_invention, copy_mes),
             ),
             Activity::Reaction => (facility_of(record, facilities, Activity::Reaction), 0),
         };
@@ -241,6 +375,234 @@ fn modifiers(
         }
     }
     modifiers
+}
+
+/// The invention numbers of every T2 part the plan builds, worked out from the saved facilities,
+/// the manufacturing set-up and the prices held. Empty while the industry data loads.
+///
+/// The buy list calls this too; it is not part of [`compute`], so that the two can share it
+/// without either working everything out.
+pub fn invention_lines(
+    ui: &Ui,
+    page: &BuildPage,
+    record: &PlanRecord,
+    plan: &Plan,
+    cx: &mut Shared,
+    held: &Held,
+) -> Result<Inventions, String> {
+    let rule = cx.store.attempt_rule().map_err(|error| error.to_string())?;
+    let mut inventions = Inventions {
+        rule,
+        ..Inventions::default()
+    };
+    if cx.industry.systems.is_none() || cx.industry.prices.is_none() || cx.sde.is_none() {
+        return Ok(inventions);
+    }
+    let saved_facilities = saved_facilities(ui.ctx(), cx)?;
+    let manufacturing = setup(Activity::Manufacturing, record, &saved_facilities, cx);
+    let adjusted = cx.industry.adjusted_prices();
+    let saved_skills = cx
+        .store
+        .invention_skills()
+        .map_err(|error| error.to_string())?;
+    let sde = cx.sde.as_ref().ok_or("the game data is not loaded yet")?;
+    let parts = part_sources(plan, page, sde);
+    inventions.skills_unset = parts
+        .iter()
+        .any(|part| skills_missing(&part.activity, &saved_skills));
+    let mut types = BTreeSet::new();
+    for part in &parts {
+        types.extend(part.activity.materials.iter().map(|(type_id, _)| *type_id));
+        if let Some(decryptor) = &part.decryptor {
+            types.insert(decryptor.type_id);
+        }
+    }
+    let prices = prices::decision_prices(
+        held,
+        record.price_rule,
+        types,
+        |_| 1,
+        |type_id| cx.market.manual(record.id, type_id),
+    );
+    let setup = PartSetup {
+        record,
+        saved_facilities: &saved_facilities,
+        manufacturing: &manufacturing,
+        adjusted: &adjusted,
+        prices: &prices,
+        saved_skills: &saved_skills,
+        rule,
+        recipes: &page.recipes,
+    };
+    for part in &parts {
+        let shown = shown_part(part, &setup, cx);
+        inventions.parts.insert(part.type_id, shown);
+    }
+    Ok(inventions)
+}
+
+/// The plan's T2 steps: made by invention and with at least one run, one entry per type. A type
+/// the game data has no invention for is left out here.
+fn t2_steps(plan: &Plan, recipes: &RecipeBook) -> Vec<(TypeId, u64)> {
+    plan.steps
+        .iter()
+        .filter(|step| step.runs >= 1)
+        .filter(|step| {
+            recipes
+                .get(step.type_id)
+                .is_some_and(|recipe| recipe.made_by_invention)
+        })
+        .map(|step| (step.type_id, step.runs))
+        .collect::<BTreeMap<_, _>>()
+        .into_iter()
+        .collect()
+}
+
+/// The plan's T2 parts, with their invention activities, products, choices and decryptors.
+fn part_sources(plan: &Plan, page: &BuildPage, sde: &Sde) -> Vec<Part> {
+    let mut parts = BTreeMap::new();
+    for (type_id, runs) in t2_steps(plan, &page.recipes) {
+        let Ok(Some((activity, product))) = sde.invention_for(type_id) else {
+            continue;
+        };
+        let choice = page.invention.get(&type_id).copied().unwrap_or_default();
+        let decryptor = match choice.decryptor {
+            Some(id) if choice.invent => sde.decryptor(id).unwrap_or_default(),
+            _ => None,
+        };
+        parts.insert(
+            type_id,
+            Part {
+                type_id,
+                runs,
+                activity,
+                product,
+                choice,
+                decryptor,
+            },
+        );
+    }
+    parts.into_values().collect()
+}
+
+/// Whether any of an activity's three skills has no saved level. A typed 0 is a saved level.
+fn skills_missing(activity: &InventionActivity, saved: &BTreeMap<TypeId, u8>) -> bool {
+    split_skills(activity).is_some_and(|(one, two, encryption)| {
+        [one, two, encryption]
+            .iter()
+            .any(|type_id| !saved.contains_key(type_id))
+    })
+}
+
+/// One part's shown invention, or why it has none.
+fn shown_part(part: &Part, setup: &PartSetup<'_>, cx: &mut Shared) -> InventionShown {
+    if !part.choice.invent {
+        return InventionShown::Not;
+    }
+    let skills = skills_for(&part.activity, setup.saved_skills);
+    if skills.is_none() {
+        return InventionShown::Unavailable(SKILLS_UNUSABLE.to_owned());
+    }
+    if let Some(id) = part.choice.decryptor
+        && part.decryptor.is_none()
+    {
+        return InventionShown::Unavailable(format!("Invention: type {id} is not a decryptor."));
+    }
+    let datacores = match priced_datacores(&part.activity.materials, setup.prices) {
+        Ok(datacores) => datacores,
+        Err(type_id) => {
+            let name = type_name(type_id, cx.sde.as_ref(), &mut cx.notices);
+            return InventionShown::Unavailable(no_price(&name));
+        }
+    };
+    let decryptor_price = match &part.decryptor {
+        Some(decryptor) => match setup.prices.get(&decryptor.type_id) {
+            Some(price) => Some(*price),
+            None => {
+                let name = type_name(decryptor.type_id, cx.sde.as_ref(), &mut cx.notices);
+                return InventionShown::Unavailable(no_price(&name));
+            }
+        },
+        None => None,
+    };
+    let fee = match setup.recipes.get(part.type_id) {
+        Some(recipe) => attempt_fee(setup, recipe, cx),
+        None => Err("the part has no recipe".to_owned()),
+    };
+    count_part(&CountInput {
+        type_id: part.type_id,
+        activity: &part.activity,
+        product: &part.product,
+        t2_runs: part.runs,
+        choice: part.choice,
+        skills,
+        rule: setup.rule,
+        datacores: &datacores,
+        decryptor: part.decryptor.as_ref(),
+        decryptor_price,
+        fee,
+    })
+}
+
+/// The unit prices of an activity's datacores, in file order, with the first type without one.
+fn priced_datacores(
+    materials: &[(TypeId, u64)],
+    prices: &BTreeMap<TypeId, Money>,
+) -> Result<Vec<(u64, Money)>, TypeId> {
+    let mut datacores = Vec::new();
+    for &(type_id, quantity) in materials {
+        let Some(price) = prices.get(&type_id) else {
+            return Err(type_id);
+        };
+        datacores.push((quantity, *price));
+    }
+    Ok(datacores)
+}
+
+/// The text for a price the plan has not got.
+fn no_price(name: &str) -> String {
+    format!("Invention: no price for {name}.")
+}
+
+/// The fee of one invention attempt of a part: a one-run T2 job's item value at the manufacturing
+/// set-up, charged at the invention cost index of the facility's system.
+fn attempt_fee(setup: &PartSetup<'_>, recipe: &Recipe, cx: &Shared) -> Result<Money, String> {
+    let manufacturing = setup.manufacturing.as_ref().map_err(|text| text.clone())?;
+    let item_value = job_cost(&recipe.materials, 1, setup.adjusted, manufacturing)
+        .map_err(|error| error.to_string())?
+        .cost
+        .item_value;
+    let system = manufacturing_system(setup.record, setup.saved_facilities)?;
+    let index = cx.industry.invention_index(system).ok_or_else(|| {
+        format!(
+            "no invention cost index for {}",
+            system_name(cx.sde.as_ref(), system)
+        )
+    })?;
+    fee_per_attempt(item_value, manufacturing, index)
+}
+
+/// The system of the plan's saved manufacturing facility, or why it has none.
+fn manufacturing_system(record: &PlanRecord, saved: &SavedFacilities) -> Result<u32, String> {
+    let Some(id) = record.manufacturing else {
+        return Err("pick a saved facility for job costs".to_owned());
+    };
+    let gone = || "the facility is no longer saved".to_owned();
+    let row = saved
+        .rows
+        .iter()
+        .find(|row| row.id == id)
+        .ok_or_else(gone)?;
+    let costs = saved.costs.get(&id).ok_or_else(gone)?.clone()?;
+    costs
+        .system
+        .ok_or_else(|| format!("no system on {}", row.name))
+}
+
+/// The name of a system in the game data, or its id when the data has no such system.
+fn system_name(sde: Option<&Sde>, system: u32) -> String {
+    sde.and_then(|sde| sde.system(system).ok().flatten())
+        .map_or_else(|| system.to_string(), |found| found.name)
 }
 
 /// Works out the costs and decisions of the plan shown. Nothing is requested here: the industry
@@ -319,6 +681,7 @@ fn compute_inner(
         costs.jobs.insert(step.type_id, outcome);
     }
     let held = cx.market.held();
+    costs.inventions = invention_lines(ui, page, record, plan, cx, &held)?;
     // A buy list that cannot be worked out has no chosen freight: the decision would then leave
     // freight out silently, so it is the costs' error line instead.
     let card = buy_list::chosen_card(ui, record, plan, cx, &held, now)?;
@@ -329,6 +692,7 @@ fn compute_inner(
         recipes,
         cx.sde.as_ref().ok_or("the game data is not loaded yet")?,
         facilities,
+        &page.copy_mes,
     );
     let sde = cx.sde.as_ref().ok_or("the game data is not loaded yet")?;
     let volumes: BTreeMap<TypeId, Volume> = types
@@ -392,4 +756,354 @@ fn planned_quantity(plan: &Plan, type_id: TypeId) -> u64 {
                 .map(|line| line.needed)
         })
         .unwrap_or(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use mop_core::industry::{JobSplit, Recipe};
+    use mop_core::invention::InventedCopy;
+    use mop_core::money::Rate;
+    use mop_core::plan::Step;
+    use mop_sde::invention::SkillRequirement;
+
+    use super::*;
+
+    const HOBGOBLIN_II: TypeId = 2456;
+    const HOBGOBLIN_I: TypeId = 2454;
+    /// The blueprint the invention makes for Hobgoblin II, as the game data's product line gives it.
+    const HOBGOBLIN_II_BLUEPRINT: TypeId = 2457;
+
+    const ATTAINMENT: Decryptor = Decryptor {
+        type_id: 34202,
+        chance_hundredths: 180,
+        me: -1,
+        te: 4,
+        runs: 4,
+    };
+
+    const SKILLS_444: Skills = Skills {
+        science1: 4,
+        science2: 4,
+        encryption: 4,
+    };
+
+    fn isk(text: &str) -> Money {
+        Money::parse_isk(text).expect("valid ISK amount")
+    }
+
+    /// The invention product line of Hobgoblin II: the blueprint it makes, not the part.
+    fn product() -> InventionProduct {
+        InventionProduct {
+            type_id: HOBGOBLIN_II_BLUEPRINT,
+            probability: Rate::from_ppm(340_000),
+            quantity: 10,
+        }
+    }
+
+    /// Hobgoblin II's invention activity, with the two sciences before the encryption skill.
+    fn activity() -> InventionActivity {
+        InventionActivity {
+            blueprint: 0,
+            products: vec![product()],
+            materials: vec![(20418, 1), (20419, 1)],
+            skills: vec![
+                SkillRequirement {
+                    type_id: 11453,
+                    name: "Gallente Starship Engineering".to_owned(),
+                    level: 1,
+                },
+                SkillRequirement {
+                    type_id: 11446,
+                    name: "Mechanical Engineering".to_owned(),
+                    level: 1,
+                },
+                SkillRequirement {
+                    type_id: 23121,
+                    name: "Gallente Encryption Methods".to_owned(),
+                    level: 1,
+                },
+            ],
+        }
+    }
+
+    fn datacores() -> Vec<(u64, Money)> {
+        vec![(1, isk("50,000.00")), (1, isk("43,750.00"))]
+    }
+
+    /// The acceptance's inputs with the default choice and a fee of 89.00; a test overrides what
+    /// it changes.
+    fn input<'a>(
+        activity: &'a InventionActivity,
+        product: &'a InventionProduct,
+        datacores: &'a [(u64, Money)],
+    ) -> CountInput<'a> {
+        CountInput {
+            type_id: HOBGOBLIN_II,
+            activity,
+            product,
+            t2_runs: 8,
+            choice: InventionChoice::default(),
+            skills: Some(SKILLS_444),
+            rule: AttemptRule::Expected,
+            datacores,
+            decryptor: None,
+            decryptor_price: None,
+            fee: Ok(isk("89.00")),
+        }
+    }
+
+    /// The parts of a counted line, or a panic naming what was shown instead.
+    fn counted(shown: &InventionShown) -> (&InventionLine, &Numbers, Money, Option<&str>) {
+        match shown {
+            InventionShown::Counted {
+                line,
+                numbers,
+                fee,
+                fee_note,
+            } => (line, numbers, *fee, fee_note.as_deref()),
+            other @ InventionShown::Not | other @ InventionShown::Unavailable(_) => {
+                panic!("expected counted numbers, got {other:?}")
+            }
+        }
+    }
+
+    fn recipe(made_by_invention: bool) -> Recipe {
+        Recipe {
+            activity: Activity::Manufacturing,
+            output_per_run: 1,
+            max_runs_per_job: 10,
+            materials: Vec::new(),
+            made_by_invention,
+        }
+    }
+
+    fn step(type_id: TypeId, runs: u64) -> Step {
+        Step {
+            type_id,
+            activity: Activity::Manufacturing,
+            depth: 0,
+            needed: runs,
+            from_stock: 0,
+            to_build: runs,
+            runs,
+            jobs: JobSplit {
+                full_jobs: 0,
+                runs_per_full_job: 1,
+                last_job_runs: runs,
+            },
+            spare: 0,
+        }
+    }
+
+    #[test]
+    fn the_default_choice_gives_the_expected_numbers() {
+        let activity = activity();
+        let product = product();
+        let datacores = datacores();
+        let shown = count_part(&input(&activity, &product, &datacores));
+        let (line, numbers, fee, fee_note) = counted(&shown);
+        assert_eq!(numbers.chance.percent_string(), "46.47");
+        assert_eq!(numbers.chance.ppm(), 464_667);
+        assert_eq!(
+            numbers.copy,
+            InventedCopy {
+                runs: 10,
+                me: 2,
+                te: 4,
+            }
+        );
+        assert_eq!(numbers.need.copies, 1);
+        assert_eq!(numbers.need.attempts, 3);
+        assert_eq!(numbers.attempt_cost.format_isk(), "93,839.00");
+        assert_eq!(numbers.need.cost_per_copy.format_isk(), "201,949.07");
+        assert_eq!(numbers.need.carried.format_isk(), "161,559.25");
+        assert_eq!(numbers.need.spare_runs, 2);
+        assert_eq!(line.type_id, HOBGOBLIN_II);
+        assert_eq!(line.materials, vec![(20418, 1), (20419, 1)]);
+        assert_eq!(line.decryptor, None);
+        assert_eq!(line.need, numbers.need);
+        assert_eq!(line.attempt_cost, numbers.attempt_cost);
+        assert_eq!(fee, isk("89.00"));
+        assert_eq!(fee_note, None);
+    }
+
+    #[test]
+    fn the_attainment_decryptor_changes_the_numbers() {
+        let activity = activity();
+        let product = product();
+        let datacores = datacores();
+        let shown = count_part(&CountInput {
+            choice: InventionChoice {
+                invent: true,
+                decryptor: Some(34202),
+            },
+            decryptor: Some(&ATTAINMENT),
+            decryptor_price: Some(isk("1,200,000.00")),
+            ..input(&activity, &product, &datacores)
+        });
+        let (line, numbers, _, fee_note) = counted(&shown);
+        assert_eq!(numbers.chance.percent_string(), "83.64");
+        assert_eq!(
+            numbers.copy,
+            InventedCopy {
+                runs: 14,
+                me: 1,
+                te: 8,
+            }
+        );
+        assert_eq!(numbers.need.copies, 1);
+        assert_eq!(numbers.need.attempts, 2);
+        assert_eq!(numbers.attempt_cost.format_isk(), "1,293,839.00");
+        assert_eq!(numbers.need.cost_per_copy.format_isk(), "1,546,914.16");
+        assert_eq!(numbers.need.carried.format_isk(), "883,950.95");
+        assert_eq!(numbers.need.spare_runs, 6);
+        assert_eq!(line.decryptor, Some(34202));
+        assert_eq!(fee_note, None);
+    }
+
+    #[test]
+    fn an_unticked_part_is_not_invented() {
+        let activity = activity();
+        let product = product();
+        let datacores = datacores();
+        let shown = count_part(&CountInput {
+            choice: InventionChoice {
+                invent: false,
+                decryptor: None,
+            },
+            ..input(&activity, &product, &datacores)
+        });
+        assert_eq!(shown, InventionShown::Not);
+    }
+
+    #[test]
+    fn skills_that_do_not_split_say_so() {
+        let activity = activity();
+        let product = product();
+        let datacores = datacores();
+        let shown = count_part(&CountInput {
+            skills: None,
+            ..input(&activity, &product, &datacores)
+        });
+        assert_eq!(
+            shown,
+            InventionShown::Unavailable(
+                "Invention: this item needs skills the app cannot use yet.".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn a_decryptor_that_is_not_one_says_so() {
+        let activity = activity();
+        let product = product();
+        let datacores = datacores();
+        let shown = count_part(&CountInput {
+            choice: InventionChoice {
+                invent: true,
+                decryptor: Some(999_999),
+            },
+            ..input(&activity, &product, &datacores)
+        });
+        assert_eq!(
+            shown,
+            InventionShown::Unavailable("Invention: type 999999 is not a decryptor.".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_fee_that_cannot_be_worked_out_is_noted() {
+        let activity = activity();
+        let product = product();
+        let datacores = datacores();
+        let shown = count_part(&CountInput {
+            fee: Err("no system on NPC Jita".to_owned()),
+            ..input(&activity, &product, &datacores)
+        });
+        let (_, numbers, fee, fee_note) = counted(&shown);
+        assert_eq!(fee, Money::ZERO);
+        assert_eq!(fee_note, Some("fee not counted: no system on NPC Jita"));
+        assert_eq!(numbers.attempt_cost.format_isk(), "93,750.00");
+        assert_eq!(numbers.need.cost_per_copy.format_isk(), "201,757.53");
+    }
+
+    #[test]
+    fn an_error_from_the_numbers_is_unavailable() {
+        let activity = activity();
+        let impossible = InventionProduct {
+            probability: Rate::from_ppm(0),
+            ..product()
+        };
+        let datacores = datacores();
+        let shown = count_part(&input(&activity, &impossible, &datacores));
+        assert_eq!(
+            shown,
+            InventionShown::Unavailable("Invention: the invention chance is zero".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_first_datacore_without_a_price_is_the_missing_one() {
+        let materials = [(20418, 1), (20419, 1)];
+        let one = BTreeMap::from([(20418, isk("50,000.00"))]);
+        assert_eq!(priced_datacores(&materials, &one), Err(20419));
+        let both = BTreeMap::from([(20418, isk("50,000.00")), (20419, isk("43,750.00"))]);
+        assert_eq!(
+            priced_datacores(&materials, &both),
+            Ok(vec![(1, isk("50,000.00")), (1, isk("43,750.00"))])
+        );
+        assert_eq!(
+            no_price("Datacore - Graviton Physics"),
+            "Invention: no price for Datacore - Graviton Physics."
+        );
+    }
+
+    #[test]
+    fn missing_skill_levels_are_told_apart_from_typed_zeros() {
+        let activity = activity();
+        let partial = BTreeMap::from([(11453, 4), (11446, 4)]);
+        assert!(skills_missing(&activity, &partial));
+        let typed_zero = BTreeMap::from([(11453, 4), (11446, 4), (23121, 0)]);
+        assert!(!skills_missing(&activity, &typed_zero));
+        let mut unsplittable = activity;
+        unsplittable.skills.pop();
+        assert!(!skills_missing(&unsplittable, &BTreeMap::new()));
+    }
+
+    #[test]
+    fn only_t2_steps_with_runs_are_parts() {
+        let mut recipes = RecipeBook::new();
+        recipes.insert(HOBGOBLIN_II, recipe(true));
+        recipes.insert(HOBGOBLIN_I, recipe(false));
+        let plan = Plan {
+            steps: vec![
+                step(HOBGOBLIN_II, 8),
+                step(HOBGOBLIN_I, 5),
+                step(HOBGOBLIN_II, 0),
+            ],
+            buy: Vec::new(),
+            unused_stock: Vec::new(),
+        };
+        assert_eq!(t2_steps(&plan, &recipes), vec![(HOBGOBLIN_II, 8)]);
+    }
+
+    #[test]
+    fn a_plan_with_no_invented_step_has_no_parts() {
+        let mut recipes = RecipeBook::new();
+        recipes.insert(HOBGOBLIN_I, recipe(false));
+        let plan = Plan {
+            steps: vec![step(HOBGOBLIN_I, 5)],
+            buy: Vec::new(),
+            unused_stock: Vec::new(),
+        };
+        assert_eq!(t2_steps(&plan, &recipes), Vec::new());
+    }
+
+    #[test]
+    fn inventions_default_to_no_parts_and_the_expected_rule() {
+        let inventions = Inventions::default();
+        assert!(inventions.parts.is_empty());
+        assert!(!inventions.skills_unset);
+        assert_eq!(inventions.rule, AttemptRule::Expected);
+    }
 }
