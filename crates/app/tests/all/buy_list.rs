@@ -908,15 +908,15 @@ mod tests {
     #[test]
     fn old_prices_show_their_age_and_the_status_line_names_the_oldest() {
         let world = World::new();
-        lock(&world.forge).published = NOW - 700;
+        lock(&world.forge).published = NOW - 21_601;
         let env = make_env(&standard_services());
         let mut harness = start(&env, &world);
         harness.run();
         buy_list_for(&mut harness);
-        settle(&mut harness, "Oldest: 11m");
-        assert!(shown(&harness, "Market data: oldest 11m"));
+        settle(&mut harness, "Oldest: 6h");
+        assert!(shown(&harness, "Market data: oldest 6h"));
         // The age of the oldest price is in the stale colour.
-        let old = harness.get_by_label("Oldest: 11m").rect();
+        let old = harness.get_by_label("Oldest: 6h").rect();
         assert!(coloured(&mut harness, old));
 
         // A file made 4 minutes ago is not stale: its age is in the text colour.
@@ -926,6 +926,21 @@ mod tests {
         settle(&mut harness, "Oldest: 4m");
         let fresh = harness.get_by_label("Oldest: 4m").rect();
         assert!(!coloured(&mut harness, fresh));
+    }
+
+    #[test]
+    fn a_price_exactly_six_hours_old_keeps_the_text_colour() {
+        let world = World::new();
+        lock(&world.forge).published = NOW - 21_600;
+        let env = make_env(&standard_services());
+        let mut harness = start(&env, &world);
+        harness.run();
+        buy_list_for(&mut harness);
+        settle(&mut harness, "Oldest: 6h");
+        assert!(shown(&harness, "Market data: oldest 6h"));
+        // Six hours is the limit itself, not past it: the age is in the text colour.
+        let limit = harness.get_by_label("Oldest: 6h").rect();
+        assert!(!coloured(&mut harness, limit));
     }
 
     #[test]

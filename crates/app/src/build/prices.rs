@@ -20,8 +20,18 @@ use mop_market::fuzzwork::{
 use crate::history::Recorder;
 use crate::worker::Worker;
 
-/// A price older than this, in seconds, is shown in the stale colour.
-pub const STALE_SECS: i64 = 600;
+/// A price older than this, in seconds (6 hours), is shown in the stale colour.
+pub const STALE_SECS: i64 = 21_600;
+
+/// Past this age a price is called old in words, not only by colour.
+pub const OLD_SECS: i64 = 86_400;
+
+/// The hover text for a price older than a day.
+#[expect(
+    dead_code,
+    reason = "the buy list and the Orders pages show it; nothing in this module does yet"
+)]
+pub(crate) const OLD_HOVER: &str = "Over a day old. Refresh before you rely on it.";
 
 /// The HTTP client the market reads through: the real one, or a fake in tests.
 pub struct Feed(Box<dyn BytesHttp + Send>);
@@ -365,6 +375,17 @@ pub(crate) fn age_text(seconds: i64) -> String {
     }
 }
 
+/// [`age_text`], with `" old"` added once the age passes a day. The buy list and the Orders
+/// pages show it; nothing in this module calls it yet.
+pub fn aged_text(seconds: i64) -> String {
+    let text = age_text(seconds);
+    if seconds > OLD_SECS {
+        format!("{text} old")
+    } else {
+        text
+    }
+}
+
 /// Locks a mutex. A lock poisoned by a panicked job is still used.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -390,7 +411,8 @@ mod tests {
     use mop_sde::{Fetch, FetchError};
 
     use super::{
-        BytesHttp, Live, Manual, OutOfRange, Prices, Queued, age_text, line_price, rule_source,
+        BytesHttp, Live, Manual, OutOfRange, Prices, Queued, age_text, aged_text, line_price,
+        rule_source,
     };
     use crate::worker::Worker;
 
@@ -403,6 +425,16 @@ mod tests {
         assert_eq!(age_text(3_600), "1h");
         assert_eq!(age_text(86_399), "23h");
         assert_eq!(age_text(86_400), "1d");
+    }
+
+    #[test]
+    fn an_age_past_a_day_is_called_old_in_words() {
+        assert_eq!(aged_text(0), "0s");
+        assert_eq!(aged_text(-5), "0s");
+        assert_eq!(aged_text(21_600), "6h");
+        assert_eq!(aged_text(86_400), "1d");
+        assert_eq!(aged_text(86_401), "1d old");
+        assert_eq!(aged_text(172_800), "2d old");
     }
 
     #[test]
