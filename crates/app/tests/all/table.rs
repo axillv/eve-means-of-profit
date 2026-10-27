@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod tests {
 
+    use std::rc::Rc;
     use std::sync::{Arc, Mutex};
 
     use egui::{
@@ -518,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn the_panel_menu_copies_its_table_as_tsv() {
+    fn the_copy_table_button_copies_its_table_as_tsv() {
         let columns = columns();
         let rows = test_rows();
         let style = Style::eve_dense();
@@ -536,10 +537,11 @@ mod tests {
                     );
                 });
             });
+        // The body's table sets the flag on the first frame, so the button shows from the second.
         harness.run();
-        harness.get_by_label("⋯").click();
         harness.run();
-        harness.get_by_label("Copy as TSV").click();
+        assert_eq!(harness.query_all_by_label("Copy table").count(), 1);
+        harness.get_by_label("Copy table").click();
         // The copy happens in the frame of the click, so collect the copies from each frame.
         let mut copied = Vec::new();
         for _ in 0..5 {
@@ -553,6 +555,58 @@ mod tests {
         assert_eq!(copied.len(), 1);
         assert!(copied[0].starts_with("Item\tNeed\tValue\nHobgoblin II\t10\t1000\n"));
         assert!(copied[0].ends_with("Rifter\t31\t2.125"));
+    }
+
+    #[test]
+    fn a_panel_without_a_table_has_no_copy_button_and_no_menu() {
+        let style = Style::eve_dense();
+        let mut state = egui_dock::DockState::new(vec![OnlyPanel::Panel]);
+        let mut harness = Harness::builder()
+            .with_size(vec2(800.0, 400.0))
+            .build_ui(move |ui| {
+                show_locked(ui, &style, &mut state, only_title, |ui, _| {
+                    ui.label("Nothing to copy");
+                });
+            });
+        harness.run_steps(3);
+        assert_eq!(harness.query_all_by_label("Copy table").count(), 0);
+        assert_eq!(harness.query_all_by_label("⋯").count(), 0);
+    }
+
+    #[test]
+    fn a_panel_that_stops_showing_its_table_loses_the_copy_button() {
+        let columns = columns();
+        let rows = test_rows();
+        let style = Style::eve_dense();
+        let mut state = egui_dock::DockState::new(vec![OnlyPanel::Panel]);
+        let show_table = Rc::new(std::cell::Cell::new(true));
+        let shown = Rc::clone(&show_table);
+        let mut harness = Harness::builder()
+            .with_size(vec2(800.0, 400.0))
+            .build_ui(move |ui| {
+                show_locked(ui, &style, &mut state, only_title, |ui, _| {
+                    if shown.get() {
+                        Table::new(Id::new("Only panel"), &columns).show(
+                            ui,
+                            &style,
+                            Density::Normal,
+                            &rows,
+                            None,
+                        );
+                    } else {
+                        ui.label("No table");
+                    }
+                });
+            });
+        harness.run();
+        harness.run();
+        assert_eq!(harness.query_all_by_label("Copy table").count(), 1);
+        // With the table gone, the next frame clears the flag (the button still shows for that
+        // frame) and the frame after that has no button.
+        show_table.set(false);
+        harness.run();
+        harness.run();
+        assert_eq!(harness.query_all_by_label("Copy table").count(), 0);
     }
 
     #[test]

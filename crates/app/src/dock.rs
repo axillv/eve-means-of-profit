@@ -1,6 +1,7 @@
 //! Pages as locked egui_dock layouts. The lock recipe is in the design note (section 5.1): tab
 //! bars hidden, tabs not draggable, no close buttons, no tab menus, and the show-tab-bar button
-//! kept at size 0. Each panel draws its own header with its name and a menu button.
+//! kept at size 0. Each panel draws its own header with its name and, when its body has a table, a
+//! button that copies the table.
 
 use egui::{CornerRadius, Id, RichText, Ui, WidgetText};
 use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
@@ -13,7 +14,7 @@ use crate::jobs::JobsPanel;
 use crate::net_worth::NetWorthPanel;
 use crate::orders::OrdersPanel;
 use crate::setup::SetupPanel;
-use crate::table::copy_request;
+use crate::table::{copy_request, has_table};
 use crate::theme::Style;
 
 /// The Build page: Plans over Pasted stock on the left; Plan on top, then Steps and Buy list, with
@@ -140,15 +141,25 @@ impl<T: Copy, B: FnMut(&mut Ui, T)> TabViewer for Locked<T, B> {
     fn ui(&mut self, ui: &mut Ui, tab: &mut T) {
         let id = self.id(tab);
         let title = (self.title)(*tab);
+        // The flag was set by the body on the previous frame, so it says whether the panel had a
+        // table then.
+        let table_shown = ui
+            .data(|data| data.get_temp::<bool>(has_table(id)))
+            .unwrap_or(false);
         ui.horizontal(|ui| {
             ui.strong(title);
-            ui.menu_button("⋯", |ui| {
-                if ui.button("Copy as TSV").clicked() {
-                    ui.data_mut(|data| data.insert_temp(copy_request(id), true));
-                    ui.close();
-                }
-            });
+            if table_shown
+                && ui
+                    .button("Copy table")
+                    .on_hover_text("Copies this table for a spreadsheet (tab-separated).")
+                    .clicked()
+            {
+                ui.data_mut(|data| data.insert_temp(copy_request(id), true));
+            }
         });
+        // Cleared before the body draws, so a panel whose table stops showing loses the button on
+        // the next frame.
+        ui.data_mut(|data| data.remove_temp::<bool>(has_table(id)));
         (self.body)(ui, *tab);
         // A copy asked for on a panel with no table is dropped, not kept for a table shown later.
         ui.data_mut(|data| data.remove_temp::<bool>(copy_request(id)));
