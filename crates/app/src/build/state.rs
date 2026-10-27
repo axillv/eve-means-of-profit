@@ -7,6 +7,7 @@ use std::fmt::Display;
 
 use mop_core::freight::Packing;
 use mop_core::industry::{Activity, Modifier, RecipeBook, TypeId};
+use mop_core::invention::{Decryptor, invented_copy};
 use mop_core::paste::{Pasted, parse_stock};
 use mop_core::plan::{self, Plan, PlanError, PlanInput};
 use mop_core::reserve::{self, ReservingPlan, RunningJob};
@@ -14,7 +15,7 @@ use mop_core::stock::resolve;
 use mop_esi::character_data::CharacterData;
 use mop_sde::{Facility, Sde, Security};
 use mop_store::reservations::PlanStock;
-use mop_store::{FacilityRow, PlanRecord, Store};
+use mop_store::{FacilityRow, InventionChoice, PlanRecord, Store};
 
 use crate::Shared;
 use crate::claims::running_jobs;
@@ -60,6 +61,10 @@ pub struct BuildPage {
     pub stock: PlanStock,
     /// Why the last stock choice was refused, shown under the Stock row.
     pub stock_error: Option<String>,
+    /// The stored invention choices that differ from the default, by T2 part.
+    pub invention: BTreeMap<TypeId, InventionChoice>,
+    /// The ME of the invented copy of each part whose stored choice names a decryptor.
+    pub copy_mes: BTreeMap<TypeId, u8>,
     /// The recipes of the game data, for the product search and the steps.
     pub recipes: RecipeBook,
     /// The quantity as typed, and whether it reads as a whole number of 1 or more.
@@ -83,6 +88,8 @@ impl Default for BuildPage {
             },
             stock: PlanStock::Pasted,
             stock_error: None,
+            invention: BTreeMap::new(),
+            copy_mes: BTreeMap::new(),
             recipes: RecipeBook::new(),
             quantity_text: String::new(),
             quantity_ok: true,
@@ -99,6 +106,10 @@ impl BuildPage {
     /// Works the plan on screen out again and reads the pasted text. Called after every change.
     pub fn recalc(&mut self, cx: &mut Shared) {
         refresh_claims(cx);
+        self.copy_mes = match cx.sde.as_ref() {
+            Some(sde) => copy_mes(&self.invention, sde),
+            None => BTreeMap::new(),
+        };
         let text = self.record.as_ref().map_or("", |r| r.pasted_stock.as_str());
         let (pasted, failure) = read_paste(text, cx.sde.as_ref());
         self.pasted = pasted;
@@ -113,7 +124,7 @@ impl BuildPage {
         self.result = match self.record.as_ref() {
             None => Err(NO_PRODUCT.to_owned()),
             Some(record) => match cx.store.facilities() {
-                Ok(facilities) => plan_for(record, &self.stock, cx, &facilities),
+                Ok(facilities) => plan_with(record, &self.stock, cx, &facilities, &self.copy_mes),
                 Err(error) => Err(error.to_string()),
             },
         };
@@ -135,6 +146,16 @@ impl BuildPage {
                     Err(error) => {
                         self.stock = PlanStock::Pasted;
                         report(cx, format!("Could not read the plan's stock: {error}"));
+                    }
+                }
+                match cx.store.plan_invention(id) {
+                    Ok(choices) => self.invention = choices,
+                    Err(error) => {
+                        self.invention.clear();
+                        report(
+                            cx,
+                            format!("Could not read the plan's invention choices: {error}"),
+                        );
                     }
                 }
                 self.stock_error = None;
@@ -161,6 +182,8 @@ impl BuildPage {
         self.dirty = false;
         self.stock = PlanStock::Pasted;
         self.stock_error = None;
+        self.invention.clear();
+        self.copy_mes.clear();
         self.quantity_text.clear();
         self.product_query.clear();
         self.result = Err(NO_PRODUCT.to_owned());
@@ -191,6 +214,31 @@ impl BuildPage {
         if let Some(id) = self.selected {
             self.load(id, cx);
         }
+    }
+
+    /// Saves the invention choice of one T2 part of the plan on screen at once and works the plan
+    /// out again. The choice is not an unsaved edit, so `dirty` stays as it is. Returns whether the
+    /// choice was saved; a choice the store refuses is not kept.
+    pub fn set_invention(
+        &mut self,
+        cx: &mut Shared,
+        part: TypeId,
+        choice: InventionChoice,
+    ) -> bool {
+        let Some(id) = self.selected else {
+            return false;
+        };
+        if let Err(error) = cx.store.set_plan_invention(id, part, choice) {
+            report(cx, format!("Could not save the invention choice: {error}"));
+            return false;
+        }
+        if choice == InventionChoice::default() {
+            self.invention.remove(&part);
+        } else {
+            self.invention.insert(part, choice);
+        }
+        self.recalc(cx);
+        true
     }
 
     /// Asks a question of the plan list: goes ahead now, or first asks about unsaved edits.
@@ -368,7 +416,14 @@ fn reserving_plan(
             return Err(format!("plan {id} does not take its stock from characters"));
         }
     };
-    let input = plan_input(&record, sde, recipes, facilities, BTreeMap::new())?;
+    let input = plan_input(
+        &record,
+        sde,
+        recipes,
+        facilities,
+        BTreeMap::new(),
+        &BTreeMap::new(),
+    )?;
     let assigned =
         reserve::assigned_to(id, running, assignments).map_err(|error| error.to_string())?;
     Ok(ReservingPlan {
@@ -456,8 +511,8 @@ fn read_paste(text: &str, sde: Option<&Sde>) -> (Pasted, Option<String>) {
     (pasted, failure.into_inner())
 }
 
-/// The plan for `record`, worked out from the game data and the given saved facilities. The error
-/// text is shown after `Could not work out the plan:`.
+/// The plan for `record`, worked out from the game data and the given saved facilities, with the
+/// default ME for every invented part. The error text is shown after `Could not work out the plan:`.
 ///
 /// `facilities` is `Store::facilities()`, read by the caller: that read takes `&mut Store`, which
 /// a `&Shared` cannot give. The recipe book is read here, so this reads it once per call.
@@ -467,13 +522,24 @@ pub(crate) fn plan_for(
     cx: &Shared,
     facilities: &[FacilityRow],
 ) -> Result<Plan, String> {
+    plan_with(record, stock, cx, facilities, &BTreeMap::new())
+}
+
+/// The plan for `record`, worked out with the ME of the invented copy of each part in `copy_mes`.
+pub(crate) fn plan_with(
+    record: &PlanRecord,
+    stock: &PlanStock,
+    cx: &Shared,
+    facilities: &[FacilityRow],
+    copy_mes: &BTreeMap<TypeId, u8>,
+) -> Result<Plan, String> {
     if record.product == 0 {
         return Err(NO_PRODUCT.to_owned());
     }
     let sde = cx.sde.as_ref().ok_or("the game data is not loaded yet")?;
     let recipes = sde.recipe_book().map_err(|error| error.to_string())?;
     let counted = counted_stock(record, stock, cx, sde)?;
-    let input = plan_input(record, sde, &recipes, facilities, counted)?;
+    let input = plan_input(record, sde, &recipes, facilities, counted, copy_mes)?;
     plan::plan(&input, &recipes).map_err(|error| explain(&error, record, &recipes))
 }
 
@@ -522,6 +588,7 @@ fn plan_input(
     recipes: &RecipeBook,
     facilities: &[FacilityRow],
     stock: BTreeMap<TypeId, u64>,
+    copy_mes: &BTreeMap<TypeId, u8>,
 ) -> Result<PlanInput, String> {
     let manufacturing = saved_facility(record.manufacturing, facilities)?.unwrap_or(NPC_STATION);
     let reactions = saved_facility(record.reactions, facilities)?;
@@ -531,7 +598,14 @@ fn plan_input(
         sde.check_facility(facility, Activity::Reaction)
             .map_err(|error| error.to_string())?;
     }
-    let modifiers = modifiers(record, sde, recipes, &manufacturing, reactions.as_ref())?;
+    let modifiers = modifiers(
+        record,
+        sde,
+        recipes,
+        &manufacturing,
+        reactions.as_ref(),
+        copy_mes,
+    )?;
     Ok(PlanInput {
         product: record.product,
         quantity: record.quantity,
@@ -560,13 +634,67 @@ fn saved_facility(id: Option<i64>, facilities: &[FacilityRow]) -> Result<Option<
         .ok_or_else(|| "the facility is no longer saved".to_owned())
 }
 
-/// The ME a built type is made at: the record's value, else 2 for an invented blueprint, else 0.
+/// The ME a built type is made at: the record's value, else the invented copy's ME, else 2 for an
+/// invented blueprint, else 0. `me_of` keeps the default copy: no stored decryptor.
 pub fn me_of(record: &PlanRecord, id: TypeId, made_by_invention: bool) -> u8 {
-    record
-        .me
-        .get(&id)
-        .copied()
-        .unwrap_or(if made_by_invention { 2 } else { 0 })
+    me_with(record, id, made_by_invention, &BTreeMap::new())
+}
+
+/// The ME a built type is made at: the record's value, else the invented copy's ME from
+/// `copy_mes`, else 2 for an invented blueprint, else 0.
+pub fn me_with(
+    record: &PlanRecord,
+    id: TypeId,
+    made_by_invention: bool,
+    copy_mes: &BTreeMap<TypeId, u8>,
+) -> u8 {
+    if let Some(me) = record.me.get(&id) {
+        return *me;
+    }
+    if let Some(me) = copy_mes.get(&id) {
+        return *me;
+    }
+    if made_by_invention { 2 } else { 0 }
+}
+
+/// The ME of the invented copy of a part under `choice`: `None` unless the part is invented with a
+/// decryptor and the copy works out.
+pub fn copy_me(
+    choice: InventionChoice,
+    decryptor: Option<&Decryptor>,
+    base_runs: u32,
+) -> Option<u8> {
+    if !choice.invent {
+        return None;
+    }
+    let decryptor = decryptor?;
+    invented_copy(base_runs, Some(decryptor))
+        .ok()
+        .map(|copy| copy.me)
+}
+
+/// The ME of the invented copy of each chosen part that names a decryptor, from the game data. A
+/// lookup that fails or finds nothing gives no entry, so the default ME applies.
+pub fn copy_mes(choices: &BTreeMap<TypeId, InventionChoice>, sde: &Sde) -> BTreeMap<TypeId, u8> {
+    let mut copy_mes = BTreeMap::new();
+    for (&part, &choice) in choices {
+        if !choice.invent {
+            continue;
+        }
+        let Some(decryptor_id) = choice.decryptor else {
+            continue;
+        };
+        let Ok(Some(decryptor)) = sde.decryptor(decryptor_id) else {
+            continue;
+        };
+        let Ok(Some((_activity, product))) = sde.invention_for(part) else {
+            continue;
+        };
+        if let Some(me) = copy_me(choice, Some(&decryptor), product.quantity) {
+            copy_mes.insert(part, me);
+        }
+    }
+    copy_mes
 }
 
 /// The modifier of every built type that has a recipe. A reaction gets none while no reactions
@@ -577,6 +705,7 @@ fn modifiers(
     recipes: &RecipeBook,
     manufacturing: &Facility,
     reactions: Option<&Facility>,
+    copy_mes: &BTreeMap<TypeId, u8>,
 ) -> Result<BTreeMap<TypeId, Modifier>, String> {
     let mut modifiers = BTreeMap::new();
     for built in record.build.iter().copied().chain([record.product]) {
@@ -586,7 +715,7 @@ fn modifiers(
         let (facility, me) = match recipe.activity {
             Activity::Manufacturing => (
                 manufacturing,
-                me_of(record, built, recipe.made_by_invention),
+                me_with(record, built, recipe.made_by_invention, copy_mes),
             ),
             Activity::Reaction => match reactions {
                 Some(facility) => (facility, 0),
@@ -613,4 +742,137 @@ fn explain(error: &PlanError, record: &PlanRecord, recipes: &RecipeBook) -> Stri
         return NO_REACTIONS.to_owned();
     }
     error.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use mop_sde::{Sde, import};
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// Hobgoblin II, the T2 part the acceptance numbers are for.
+    const HOBGOBLIN_II: TypeId = 2456;
+
+    const ATTAINMENT: Decryptor = Decryptor {
+        type_id: 34202,
+        chance_hundredths: 180,
+        me: -1,
+        te: 4,
+        runs: 4,
+    };
+
+    fn invented(decryptor: Option<TypeId>) -> InventionChoice {
+        InventionChoice {
+            invent: true,
+            decryptor,
+        }
+    }
+
+    fn not_invented(decryptor: Option<TypeId>) -> InventionChoice {
+        InventionChoice {
+            invent: false,
+            decryptor,
+        }
+    }
+
+    /// A plan whose product is Hobgoblin II, with only the typed ME values given.
+    fn record(me: BTreeMap<TypeId, u8>) -> PlanRecord {
+        PlanRecord {
+            id: 1,
+            name: "Test plan".to_owned(),
+            product: HOBGOBLIN_II,
+            quantity: 1,
+            build: BTreeSet::new(),
+            me,
+            manufacturing: None,
+            reactions: None,
+            price_rule: Default::default(),
+            route: None,
+            service: None,
+            packing: Packing::default(),
+            pasted_stock: String::new(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// The build 3607705 fixture imported into `dir`, so the decryptors and invention activities
+    /// are the game's.
+    fn fixture_sde(dir: &TempDir) -> Sde {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../sde/tests/fixtures/sde-3607705");
+        let db = dir.path().join("sde.sqlite");
+        import(&source, &db).expect("the fixture imports");
+        Sde::open(&db).expect("the fixture opens")
+    }
+
+    #[test]
+    fn copy_me_needs_an_invented_part_and_a_decryptor() {
+        assert_eq!(
+            copy_me(invented(Some(34202)), Some(&ATTAINMENT), 10),
+            Some(1)
+        );
+        assert_eq!(copy_me(invented(None), None, 10), None);
+        assert_eq!(
+            copy_me(not_invented(Some(34202)), Some(&ATTAINMENT), 10),
+            None
+        );
+        // A copy that does not work out has no ME either.
+        assert_eq!(copy_me(invented(Some(34202)), Some(&ATTAINMENT), 0), None);
+    }
+
+    #[test]
+    fn the_typed_me_comes_first_then_the_copy_then_the_default() {
+        let typed = record(BTreeMap::from([(HOBGOBLIN_II, 5)]));
+        let copy = BTreeMap::from([(HOBGOBLIN_II, 1)]);
+        assert_eq!(me_with(&typed, HOBGOBLIN_II, true, &copy), 5);
+
+        let untyped = record(BTreeMap::new());
+        assert_eq!(me_with(&untyped, HOBGOBLIN_II, true, &copy), 1);
+        assert_eq!(me_with(&untyped, HOBGOBLIN_II, true, &BTreeMap::new()), 2);
+        // A part not made by invention has no invented copy.
+        assert_eq!(me_with(&untyped, 2454, false, &BTreeMap::new()), 0);
+    }
+
+    #[test]
+    fn me_of_is_me_with_no_copy_me() {
+        let typed = record(BTreeMap::from([(HOBGOBLIN_II, 5)]));
+        assert_eq!(
+            me_of(&typed, HOBGOBLIN_II, true),
+            me_with(&typed, HOBGOBLIN_II, true, &BTreeMap::new())
+        );
+        assert_eq!(me_of(&typed, HOBGOBLIN_II, true), 5);
+
+        let untyped = record(BTreeMap::new());
+        assert_eq!(me_of(&untyped, HOBGOBLIN_II, true), 2);
+        assert_eq!(me_of(&untyped, 2454, false), 0);
+    }
+
+    #[test]
+    fn copy_mes_reads_the_decryptor_and_the_parts_copy() {
+        let dir = TempDir::new().expect("a temp folder");
+        let sde = fixture_sde(&dir);
+
+        let chosen = BTreeMap::from([
+            (HOBGOBLIN_II, invented(Some(34202))),
+            // A part whose blueprint no invention makes has no copy ME.
+            (2454, invented(Some(34202))),
+        ]);
+        assert_eq!(copy_mes(&chosen, &sde), BTreeMap::from([(HOBGOBLIN_II, 1)]));
+
+        let no_decryptor = BTreeMap::from([(HOBGOBLIN_II, invented(None))]);
+        assert_eq!(copy_mes(&no_decryptor, &sde), BTreeMap::new());
+
+        let not_invented = BTreeMap::from([(HOBGOBLIN_II, not_invented(Some(34202)))]);
+        assert_eq!(copy_mes(&not_invented, &sde), BTreeMap::new());
+
+        // A decryptor type the game data does not have gives no entry.
+        let unknown_decryptor = BTreeMap::from([(HOBGOBLIN_II, invented(Some(999_999)))]);
+        assert_eq!(copy_mes(&unknown_decryptor, &sde), BTreeMap::new());
+
+        assert_eq!(copy_mes(&BTreeMap::new(), &sde), BTreeMap::new());
+    }
 }
