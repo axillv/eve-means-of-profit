@@ -14,6 +14,7 @@ use egui::Ui;
 use mop_store::StoreError;
 
 use crate::Shared;
+use crate::settings_window;
 
 #[derive(Debug, Default)]
 pub struct SetupPage;
@@ -26,6 +27,7 @@ pub enum SetupPanel {
     PriceRule,
     Structures,
     Fees,
+    Display,
 }
 
 impl SetupPanel {
@@ -37,6 +39,7 @@ impl SetupPanel {
             Self::PriceRule => "Price rule",
             Self::Structures => "Structures",
             Self::Fees => "Fees and skills",
+            Self::Display => "Display",
         }
     }
 }
@@ -61,5 +64,11 @@ pub fn show(_page: &mut SetupPage, panel: SetupPanel, ui: &mut Ui, cx: &mut Shar
         SetupPanel::PriceRule => price_rule::show(ui, cx),
         SetupPanel::Structures => structures::show(ui, cx),
         SetupPanel::Fees => fees::show(ui, cx),
+        SetupPanel::Display => {
+            let data_dir = cx.data_dir.clone();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                settings_window::show_body(ui, cx, &data_dir);
+            });
+        }
     }
 }

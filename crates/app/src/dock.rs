@@ -67,13 +67,16 @@ pub fn characters_layout() -> DockState<CharactersPanel> {
     dock
 }
 
-/// The Setup page: Facilities over Price history on the left; Freight services over Price rule over Structures on the right.
+/// The Setup page: Facilities, Price history and Display stacked on the left; Freight services over
+/// Price rule over Structures and Fees on the right.
 pub fn setup_layout() -> DockState<SetupPanel> {
     let mut dock = DockState::new(vec![SetupPanel::Facilities]);
     let surface = dock.main_surface_mut();
     let [facilities, freight] =
         surface.split_right(NodeIndex::root(), 0.5, vec![SetupPanel::FreightServices]);
-    surface.split_below(facilities, 0.5, vec![SetupPanel::PriceHistory]);
+    let [_facilities, history] =
+        surface.split_below(facilities, 0.4, vec![SetupPanel::PriceHistory]);
+    surface.split_below(history, 0.5, vec![SetupPanel::Display]);
     let [_freight, price] = surface.split_below(freight, 0.5, vec![SetupPanel::PriceRule]);
     surface.split_below(price, 0.5, vec![SetupPanel::Structures, SetupPanel::Fees]);
     dock
@@ -163,5 +166,42 @@ impl<T: Copy, B: FnMut(&mut Ui, T)> TabViewer for Locked<T, B> {
         (self.body)(ui, *tab);
         // A copy asked for on a panel with no table is dropped, not kept for a table shown later.
         ui.data_mut(|data| data.remove_temp::<bool>(copy_request(id)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SETUP_PANELS: [SetupPanel; 7] = [
+        SetupPanel::Facilities,
+        SetupPanel::FreightServices,
+        SetupPanel::PriceHistory,
+        SetupPanel::PriceRule,
+        SetupPanel::Structures,
+        SetupPanel::Fees,
+        SetupPanel::Display,
+    ];
+
+    #[test]
+    fn the_setup_layout_holds_each_panel_exactly_once_including_display() {
+        let dock = setup_layout();
+        let panels: Vec<SetupPanel> = dock.iter_all_tabs().map(|(_, panel)| *panel).collect();
+        assert_eq!(panels.len(), SETUP_PANELS.len());
+        for panel in SETUP_PANELS {
+            let count = panels.iter().filter(|shown| **shown == panel).count();
+            assert_eq!(count, 1, "{} appears {count} times", panel.title());
+        }
+    }
+
+    #[test]
+    fn the_setup_panel_titles_are_unchanged_and_display_has_its_own() {
+        assert_eq!(SetupPanel::Facilities.title(), "Facilities");
+        assert_eq!(SetupPanel::FreightServices.title(), "Freight services");
+        assert_eq!(SetupPanel::PriceHistory.title(), "Price history");
+        assert_eq!(SetupPanel::PriceRule.title(), "Price rule");
+        assert_eq!(SetupPanel::Structures.title(), "Structures");
+        assert_eq!(SetupPanel::Fees.title(), "Fees and skills");
+        assert_eq!(SetupPanel::Display.title(), "Display");
     }
 }

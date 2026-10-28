@@ -51,7 +51,7 @@ mod tests {
 
     /// A data folder with the fixture imported as the installed game data, and an empty store.
     struct Folders {
-        _dir: TempDir,
+        _dir: Option<TempDir>,
         data: PathBuf,
         cache: PathBuf,
     }
@@ -59,8 +59,21 @@ mod tests {
     impl Folders {
         fn new() -> Self {
             let dir = TempDir::new().unwrap();
-            let data = dir.path().join("data");
-            let cache = dir.path().join("cache");
+            let root = dir.path().to_path_buf();
+            Self::at(&root, Some(dir))
+        }
+
+        /// A folder with a path that does not change between runs, for the pictures: the page shows
+        /// the data folder, and a temp name would make the picture differ every time.
+        fn fixed() -> Self {
+            let root = std::env::temp_dir().join("eve-means-of-profit-structures-snapshots");
+            drop(fs::remove_dir_all(&root));
+            Self::at(&root, None)
+        }
+
+        fn at(root: &Path, dir: Option<TempDir>) -> Self {
+            let data = root.join("data");
+            let cache = root.join("cache");
             fs::create_dir_all(&data).unwrap();
             import(&fixture(), &data.join("sde.sqlite")).unwrap();
             let folders = Self {
@@ -362,7 +375,7 @@ mod tests {
 
     #[test]
     fn the_panel_is_taken_for_the_owner() {
-        let folders = Folders::new();
+        let folders = Folders::fixed();
         folders.write_places();
         folders.type_names();
         let mut harness = start(&folders);
