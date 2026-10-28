@@ -36,6 +36,30 @@ pub struct PlanRecord {
     pub updated_at: i64,
 }
 
+/// How far a plan has got, in the order it advances: automatically from game data, or by hand.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PlanStage {
+    #[default]
+    Planned,
+    Buying,
+    Building,
+    Done,
+    Sold,
+}
+
+impl PlanStage {
+    /// The word the row shows for this stage.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Planned => "Planned",
+            Self::Buying => "Buying",
+            Self::Building => "Building",
+            Self::Done => "Done",
+            Self::Sold => "Sold",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanSummary {
     pub id: i64,
@@ -43,6 +67,17 @@ pub struct PlanSummary {
     pub product: TypeId,
     pub quantity: u64,
     pub updated_at: i64,
+    /// The furthest stage the game data has shown.
+    pub stage: PlanStage,
+    /// A stage the user picked by hand, which the row shows instead.
+    pub stage_override: Option<PlanStage>,
+}
+
+impl PlanSummary {
+    /// The stage the row shows: the user's choice when there is one, else the automatic stage.
+    pub fn effective_stage(&self) -> PlanStage {
+        self.stage_override.unwrap_or(self.stage)
+    }
 }
 
 /// How a plan sells its product: a sell order at the Jita lowest sell, or into Jita buy orders.
@@ -66,6 +101,27 @@ fn sell_mode_from_code(code: i64) -> Option<SellMode> {
     match code {
         0 => Some(SellMode::SellOrder),
         1 => Some(SellMode::BuyOrders),
+        _ => None,
+    }
+}
+
+fn stage_code(stage: PlanStage) -> i64 {
+    match stage {
+        PlanStage::Planned => 0,
+        PlanStage::Buying => 1,
+        PlanStage::Building => 2,
+        PlanStage::Done => 3,
+        PlanStage::Sold => 4,
+    }
+}
+
+fn stage_from_code(code: i64) -> Option<PlanStage> {
+    match code {
+        0 => Some(PlanStage::Planned),
+        1 => Some(PlanStage::Buying),
+        2 => Some(PlanStage::Building),
+        3 => Some(PlanStage::Done),
+        4 => Some(PlanStage::Sold),
         _ => None,
     }
 }
@@ -334,7 +390,8 @@ impl Store {
         let tx = self.conn.transaction()?;
         let raw = {
             let mut stmt = tx.prepare(
-                "SELECT id, name, product, quantity, updated_at FROM plans ORDER BY position, id",
+                "SELECT id, name, product, quantity, updated_at, stage, stage_override \
+                 FROM plans ORDER BY position, id",
             )?;
             let rows = stmt.query_map([], |row| {
                 Ok((
@@ -343,24 +400,78 @@ impl Store {
                     row.get::<_, i64>(2)?,
                     row.get::<_, i64>(3)?,
                     row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
                 ))
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         let plans = raw
             .into_iter()
-            .map(|(id, name, product, quantity, updated_at)| {
-                Ok(PlanSummary {
-                    id,
-                    name,
-                    product: from_stored(product, TABLE, id, "product")?,
-                    quantity: from_stored(quantity, TABLE, id, "quantity")?,
-                    updated_at,
-                })
-            })
+            .map(
+                |(id, name, product, quantity, updated_at, stage, stage_override)| {
+                    let stage = stage_from_code(stage)
+                        .ok_or_else(|| bad_code(TABLE, id, "stage", stage))?;
+                    let stage_override = stage_override
+                        .map(|code| {
+                            stage_from_code(code)
+                                .ok_or_else(|| bad_code(TABLE, id, "stage_override", code))
+                        })
+                        .transpose()?;
+                    Ok(PlanSummary {
+                        id,
+                        name,
+                        product: from_stored(product, TABLE, id, "product")?,
+                        quantity: from_stored(quantity, TABLE, id, "quantity")?,
+                        updated_at,
+                        stage,
+                        stage_override,
+                    })
+                },
+            )
             .collect::<Result<Vec<_>>>()?;
         tx.commit()?;
         Ok(plans)
+    }
+
+    /// Raises a plan's automatic stage to `to`. A stage below the stored one writes nothing, so the
+    /// automatic stage never goes backwards. An unknown plan is `NotFound`.
+    pub fn advance_plan_stage(&mut self, id: i64, to: PlanStage) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let stored: Option<i64> = tx
+            .query_row(
+                "SELECT stage FROM plans WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(stored) = stored else {
+            return Err(StoreError::NotFound);
+        };
+        let stage = stage_from_code(stored).ok_or_else(|| bad_code(TABLE, id, "stage", stored))?;
+        if to > stage {
+            tx.execute(
+                "UPDATE plans SET stage = ?2 WHERE id = ?1",
+                params![id, stage_code(to)],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Sets the stage the row shows, or clears it with `None` so the automatic stage shows again. An
+    /// unknown plan is `NotFound`.
+    pub fn set_plan_stage_override(&mut self, id: i64, stage: Option<PlanStage>) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE plans SET stage_override = ?2 WHERE id = ?1",
+            params![id, stage.map(stage_code)],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound);
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Puts the plans in the given order. The list must hold every plan exactly once; otherwise
@@ -469,5 +580,144 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PRODUCT: TypeId = 2456;
+
+    fn open_temp() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eve.db");
+        let store = Store::open(&path, 1_000).expect("open").store;
+        (dir, store)
+    }
+
+    fn record() -> PlanRecord {
+        PlanRecord {
+            id: 0,
+            name: "Test plan".to_owned(),
+            product: PRODUCT,
+            quantity: 10,
+            build: BTreeSet::new(),
+            me: BTreeMap::new(),
+            manufacturing: None,
+            reactions: None,
+            price_rule: PriceRule::default(),
+            route: None,
+            service: None,
+            packing: Packing::default(),
+            pasted_stock: String::new(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn summary(store: &mut Store, id: i64) -> PlanSummary {
+        store
+            .plans()
+            .expect("read the plans")
+            .into_iter()
+            .find(|plan| plan.id == id)
+            .expect("the plan")
+    }
+
+    #[test]
+    fn a_new_plan_starts_planned_and_advances_only_forwards() {
+        let (_dir, mut store) = open_temp();
+        let id = store.create_plan(&record(), 1_000).expect("create");
+
+        let plan = summary(&mut store, id);
+        assert_eq!(plan.stage, PlanStage::Planned);
+        assert_eq!(plan.stage_override, None);
+        assert_eq!(plan.effective_stage(), PlanStage::Planned);
+
+        store
+            .advance_plan_stage(id, PlanStage::Building)
+            .expect("advance to Building");
+        assert_eq!(summary(&mut store, id).stage, PlanStage::Building);
+
+        store
+            .advance_plan_stage(id, PlanStage::Planned)
+            .expect("advance to Planned writes nothing");
+        assert_eq!(summary(&mut store, id).stage, PlanStage::Building);
+
+        store
+            .advance_plan_stage(id, PlanStage::Done)
+            .expect("advance to Done");
+        assert_eq!(summary(&mut store, id).stage, PlanStage::Done);
+    }
+
+    #[test]
+    fn an_override_shows_over_the_automatic_stage_until_cleared() {
+        let (_dir, mut store) = open_temp();
+        let id = store.create_plan(&record(), 1_000).expect("create");
+        store
+            .advance_plan_stage(id, PlanStage::Done)
+            .expect("advance to Done");
+
+        store
+            .set_plan_stage_override(id, Some(PlanStage::Sold))
+            .expect("set the override");
+        let plan = summary(&mut store, id);
+        assert_eq!(plan.stage, PlanStage::Done);
+        assert_eq!(plan.stage_override, Some(PlanStage::Sold));
+        assert_eq!(plan.effective_stage(), PlanStage::Sold);
+
+        store
+            .set_plan_stage_override(id, None)
+            .expect("clear the override");
+        let plan = summary(&mut store, id);
+        assert_eq!(plan.stage, PlanStage::Done);
+        assert_eq!(plan.stage_override, None);
+        assert_eq!(plan.effective_stage(), PlanStage::Done);
+    }
+
+    #[test]
+    fn an_unknown_plan_is_not_found_and_changes_nothing() {
+        let (_dir, mut store) = open_temp();
+        let id = store.create_plan(&record(), 1_000).expect("create");
+        store
+            .advance_plan_stage(id, PlanStage::Done)
+            .expect("advance to Done");
+        store
+            .set_plan_stage_override(id, Some(PlanStage::Sold))
+            .expect("set the override");
+        let before = summary(&mut store, id);
+
+        assert!(matches!(
+            store.advance_plan_stage(999, PlanStage::Sold),
+            Err(StoreError::NotFound)
+        ));
+        assert!(matches!(
+            store.set_plan_stage_override(999, Some(PlanStage::Planned)),
+            Err(StoreError::NotFound)
+        ));
+        assert!(matches!(
+            store.set_plan_stage_override(999, None),
+            Err(StoreError::NotFound)
+        ));
+        assert_eq!(summary(&mut store, id), before);
+    }
+
+    #[test]
+    fn a_copy_starts_planned_without_an_override() {
+        let (_dir, mut store) = open_temp();
+        let id = store.create_plan(&record(), 1_000).expect("create");
+        store
+            .advance_plan_stage(id, PlanStage::Sold)
+            .expect("advance to Sold");
+        store
+            .set_plan_stage_override(id, Some(PlanStage::Building))
+            .expect("set the override");
+
+        let copy = store.duplicate_plan(id, 2_000).expect("duplicate");
+        let copied = summary(&mut store, copy);
+        assert_eq!(copied.stage, PlanStage::Planned);
+        assert_eq!(copied.stage_override, None);
+        assert_eq!(copied.effective_stage(), PlanStage::Planned);
     }
 }

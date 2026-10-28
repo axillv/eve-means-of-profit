@@ -69,7 +69,9 @@ CREATE TABLE plans (
     position INTEGER NOT NULL DEFAULT 0,
     reserve INTEGER NOT NULL DEFAULT 0 CHECK (reserve IN (0, 1)),
     stock_source INTEGER NOT NULL DEFAULT 0 CHECK (stock_source IN (0, 1)),
-    sell_mode INTEGER NOT NULL DEFAULT 0 CHECK (sell_mode IN (0, 1))
+    sell_mode INTEGER NOT NULL DEFAULT 0 CHECK (sell_mode IN (0, 1)),
+    stage INTEGER NOT NULL DEFAULT 0 CHECK (stage BETWEEN 0 AND 4),
+    stage_override INTEGER CHECK (stage_override IS NULL OR stage_override BETWEEN 0 AND 4)
 );
 CREATE TABLE plan_build (
     plan_id INTEGER NOT NULL REFERENCES plans (id) ON DELETE CASCADE,
