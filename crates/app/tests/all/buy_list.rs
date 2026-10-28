@@ -28,11 +28,14 @@ mod tests {
     use mop_core::freight::RateCard;
     use mop_core::money::{Money, Rate};
     use mop_core::volume::Volume;
+    use mop_esi::character_data::Fetched;
+    use mop_esi::industry::{CostIndices, IndustryData, MarketPrice, save_industry};
     use mop_market::book::PriceRule;
     use mop_market::error::MarketError;
     use mop_market::fuzzwork::{BytesHttp, BytesResponse};
     use mop_sde::{Fetch, FetchError, RouteKind, import};
     use mop_store::Store;
+    use std::collections::BTreeMap;
     use tempfile::TempDir;
 
     const NOW: i64 = 2_000_000;
@@ -115,6 +118,8 @@ mod tests {
             Line::sell(11399, "2100.00", "2200.00", "2180.00", "2150.00"),
             Line::sell(11481, "470.00", "480.00", "479.00", "478.60"),
             Line::sell(11688, "30500.00", "31500.00", "31000.00", "30900.00"),
+            Line::sell(20418, "50000.00", "50000.00", "50000.00", "50000.00"),
+            Line::sell(20419, "43750.00", "43750.00", "43750.00", "43750.00"),
             Line {
                 type_id: 11481,
                 buy: true,
@@ -360,12 +365,41 @@ mod tests {
         ]
     }
 
+    /// Industry data fetched at the test clock and good for an hour: Jita's indices and no adjusted
+    /// prices. The Buy list needs it for the invention's attempts; the fee is left out.
+    fn industry() -> IndustryData {
+        let mut systems = BTreeMap::new();
+        systems.insert(
+            JITA_SYSTEM,
+            CostIndices {
+                manufacturing: Some(Rate::from_ppm(50_000)),
+                reaction: Some(Rate::from_ppm(1_400)),
+                ..CostIndices::default()
+            },
+        );
+        IndustryData {
+            systems: Some(Fetched {
+                data: systems,
+                fetched_at: NOW,
+                last_modified: None,
+                expires: Some(NOW + 3_600),
+            }),
+            prices: Some(Fetched {
+                data: BTreeMap::<u32, MarketPrice>::new(),
+                fetched_at: NOW,
+                last_modified: None,
+                expires: Some(NOW + 3_600),
+            }),
+        }
+    }
+
     fn make_env(services: &[(&'static str, RateCard, RouteKind, Option<u32>)]) -> Env {
         let dir = TempDir::new().expect("a temp folder");
         let data = dir.path().join("data");
         let cache = dir.path().join("cache");
         fs::create_dir_all(&data).expect("the data folder");
         import(&fixture(), &data.join("sde.sqlite")).expect("the fixture imports");
+        save_industry(&data.join("esi"), &industry()).expect("industry data saved");
         let mut store = Store::open(&data.join("user.sqlite"), NOW)
             .expect("the store opens")
             .store;
@@ -553,9 +587,11 @@ mod tests {
         }
     }
 
-    /// Points at a label and runs enough frames for its tooltip to appear.
+    /// Scrolls a label into view, points at it and runs enough frames for its tooltip to appear.
+    /// The datacore lines make the list taller, so the freight amount sits at the window's lower
+    /// edge, where a tooltip opened without scrolling never appears.
     fn hover(harness: &mut Harness<'_, App>, label: &str) {
-        harness.get_by_label(label).hover();
+        crate::ui::hover(harness, label);
         for _ in 0..60 {
             harness.run();
         }
@@ -711,6 +747,36 @@ mod tests {
         );
     }
 
+    /// The two datacores the invention buys for the whole attempts of Hobgoblin II.
+    fn assert_datacore_rows(harness: &Harness<'_, App>) {
+        assert_row(
+            harness,
+            "Datacore - Electronic Engineering",
+            &[
+                "Datacore - Electronic Engineering",
+                "3",
+                "0.30",
+                "50,000.00",
+                "50,000.00",
+                "4m",
+                "150,000.00",
+            ],
+        );
+        assert_row(
+            harness,
+            "Datacore - Graviton Physics",
+            &[
+                "Datacore - Graviton Physics",
+                "3",
+                "0.30",
+                "43,750.00",
+                "43,750.00",
+                "4m",
+                "131,250.00",
+            ],
+        );
+    }
+
     /// The price boxes of the Buy list rows labelled `rows`, with what each holds. The table is
     /// scrolled sideways so the prices are in view. The rows are found before the scroll, since the
     /// scroll moves their names out of view.
@@ -792,10 +858,11 @@ mod tests {
         let harness = complete_list(&world, &standard_services());
         assert!(shown(&harness, "Price rule: Forge sell, 5% price"));
         assert_complete_rows(&harness);
-        assert!(shown(&harness, "m³ 120.50 · value 1,114,686.00 · freight "));
+        assert_datacore_rows(&harness);
+        assert!(shown(&harness, "m³ 121.10 · value 1,395,936.00 · freight "));
         assert!(shown(
             &harness,
-            " · collateral 1,114,686.00 · delivered 1,222,684.43"
+            " · collateral 1,395,936.00 · delivered 1,505,850.68"
         ));
         assert!(!shown(&harness, " incomplete"));
         assert!(shown(&harness, "Oldest: 4m"));
@@ -808,9 +875,9 @@ mod tests {
     fn the_freight_hover_lists_every_service() {
         let world = World::new();
         let mut harness = complete_list_sized(&world, &standard_services(), 1600.0);
-        hover(&mut harness, "107,998.43");
-        assert!(shown(&harness, "Alliance 107,998.43"));
-        assert!(shown(&harness, "Haulers 3,011,146.86"));
+        hover(&mut harness, "109,914.68");
+        assert!(shown(&harness, "Alliance 109,914.68"));
+        assert!(shown(&harness, "Haulers 3,013,959.36"));
     }
 
     #[test]
@@ -818,10 +885,10 @@ mod tests {
         let world = World::new();
         let mut harness = complete_list(&world, &standard_services());
         pick(&mut harness, "Cheapest (Alliance)", "Haulers");
-        settle(&mut harness, "3,011,146.86");
+        settle(&mut harness, "3,013,959.36");
         assert!(shown(
             &harness,
-            " · collateral 1,114,686.00 · delivered 4,125,832.86"
+            " · collateral 1,395,936.00 · delivered 4,409,895.36"
         ));
         assert!(has_value(&harness, "Haulers"));
     }
@@ -917,7 +984,7 @@ mod tests {
         );
         assert_row(&harness, "Robotics", &["—"]);
         assert!(shown(&harness, " incomplete"));
-        assert!(shown(&harness, "m³ 120.50 · value 405,786.00 · freight "));
+        assert!(shown(&harness, "m³ 121.10 · value 687,036.00 · freight "));
         hover(&mut harness, " incomplete");
         assert!(shown(&harness, "Robotics\nParticle Accelerator Unit"));
     }
@@ -1081,12 +1148,12 @@ mod tests {
         let mut harness = complete_list(&world, &standard_services());
         pick(&mut harness, "Jita → Kiainti", "No freight");
         settle(&mut harness, "No freight");
-        assert!(shown(&harness, "m³ 120.50 · value 1,114,686.00 · freight "));
+        assert!(shown(&harness, "m³ 121.10 · value 1,395,936.00 · freight "));
         // The freight amount itself is 0.00, as is the collateral.
         assert!(shown(&harness, "0.00"));
         assert!(shown(
             &harness,
-            " · collateral 0.00 · delivered 1,114,686.00"
+            " · collateral 0.00 · delivered 1,395,936.00"
         ));
         assert!(!shown(&harness, " incomplete"));
     }
@@ -1154,9 +1221,9 @@ mod tests {
         let mut services = standard_services();
         services.push(tiny);
         let mut harness = complete_list_sized(&world, &services, 1600.0);
-        hover(&mut harness, "107,998.43");
+        hover(&mut harness, "109,914.68");
         assert!(shown(&harness, "Tiny: cannot carry Hobgoblin I"));
-        assert!(shown(&harness, "Alliance 107,998.43"));
+        assert!(shown(&harness, "Alliance 109,914.68"));
     }
 
     #[test]
@@ -1204,12 +1271,12 @@ mod tests {
         assert_eq!(
             copied.as_deref(),
             Some(
-                "Hobgoblin I\t10\nGuidance Systems\t10\nRobotics\t10\nMorphite\t10\nR.A.M.- Robotics\t10\nParticle Accelerator Unit\t10"
+                "Hobgoblin I\t10\nGuidance Systems\t10\nRobotics\t10\nMorphite\t10\nR.A.M.- Robotics\t10\nParticle Accelerator Unit\t10\nDatacore - Electronic Engineering\t3\nDatacore - Graviton Physics\t3"
             )
         );
         // The notice shows in the frame after the click: the status line is drawn before the page.
         harness.run();
-        assert!(shown(&harness, "Copied 6 lines for multibuy."));
+        assert!(shown(&harness, "Copied 8 lines for multibuy."));
     }
 
     #[test]
@@ -1238,7 +1305,7 @@ mod tests {
         buy_list_for(&mut harness);
         settle(&mut harness, "Oldest: 4m");
         pick(&mut harness, "Cheapest (Alliance)", "Haulers");
-        settle(&mut harness, "3,011,146.86");
+        settle(&mut harness, "3,013,959.36");
         click(&mut harness, "Save");
 
         let mut store = Store::open(&env.data.join("user.sqlite"), NOW)
@@ -1262,9 +1329,9 @@ mod tests {
         harness.run();
         click(&mut harness, "New plan");
         // The new app downloads the file at its start, so the price can arrive after the label.
-        settle(&mut harness, "107,998.43");
+        settle(&mut harness, "109,914.68");
         settle(&mut harness, "Cheapest (Alliance)");
-        assert!(shown(&harness, "107,998.43"));
+        assert!(shown(&harness, "109,914.68"));
     }
 
     #[test]
@@ -1273,7 +1340,7 @@ mod tests {
         let mut harness = complete_list(&world, &standard_services());
         paste(
             &mut harness,
-            "Morphite\t10\nParticle Accelerator Unit\t10\nGuidance Systems\t10\nHobgoblin I\t10\nRobotics\t10\nR.A.M.- Robotics\t10",
+            "Morphite\t10\nParticle Accelerator Unit\t10\nGuidance Systems\t10\nHobgoblin I\t10\nRobotics\t10\nR.A.M.- Robotics\t10\nDatacore - Electronic Engineering\t3\nDatacore - Graviton Physics\t3",
         );
         harness.run();
         let copy = harness
@@ -1299,7 +1366,7 @@ mod tests {
         services.push(cheap);
         let mut harness = complete_list(&world, &services);
         settle(&mut harness, "Cheapest (Cheap)");
-        settle(&mut harness, "12,050.00");
+        settle(&mut harness, "12,110.00");
     }
 
     #[test]
@@ -1411,7 +1478,7 @@ mod tests {
         assert!(!shown(&harness, "Live"));
         assert!(!shown(&harness, "Diff"));
         assert!(!shown(&harness, "Age"));
-        assert!(shown(&harness, "m³ 120.50 · value 1,114,686.00 · freight "));
+        assert!(shown(&harness, "m³ 121.10 · value 1,395,936.00 · freight "));
     }
 
     /// Ticks or unticks the column labelled `label` through the Columns menu.
@@ -1626,6 +1693,8 @@ mod tests {
             "Morphite",
             "R.A.M.- Robotics",
             "Particle Accelerator Unit",
+            "Datacore - Electronic Engineering",
+            "Datacore - Graviton Physics",
         ];
         let tops: Vec<f32> = names
             .iter()
@@ -1679,7 +1748,9 @@ mod tests {
                  Morphite\t10\t0\t10\t0.1\t2150\t21500\n\
                  R.A.M.- Robotics\t10\t0\t10\t0.4\t478.6\t4786\n\
                  Particle Accelerator Unit\t10\t0\t10\t10\t30900\t309000\n\
-                 Total\t\t\t\t120.5\t\t1114686"
+                 Datacore - Electronic Engineering\t3\t0\t3\t0.3\t50000\t150000\n\
+                 Datacore - Graviton Physics\t3\t0\t3\t0.3\t43750\t131250\n\
+                 Total\t\t\t\t121.1\t\t1395936"
             )
         );
     }
@@ -1887,13 +1958,13 @@ mod tests {
         let mut harness = start(&env, &world);
         harness.run();
         buy_list_for(&mut harness);
-        settle(&mut harness, "only 4 on market");
+        settle(&mut harness, "m³ 121.10 · value 687,036.00 · freight ");
         harness.snapshot("buylist-incomplete");
         results.extend_harness(&mut harness);
 
         let world = World::new();
         let mut harness = complete_list_sized(&world, &standard_services(), 1600.0);
-        hover(&mut harness, "107,998.43");
+        hover(&mut harness, "109,914.68");
         harness.snapshot("buylist-freight-hover");
         results.extend_harness(&mut harness);
 

@@ -273,7 +273,12 @@ pub(crate) fn chosen_card(
     if record.route.is_none() {
         return Ok(None);
     }
-    let (inputs, _) = buy_inputs(plan, record, cx, held, now);
+    let Some((inputs, _)) = buy_inputs(plan, record, cx, held, now, &[]) else {
+        return Err(
+            "the buy list does not add up: a volume or value does not fit the supported range"
+                .to_owned(),
+        );
+    };
     let buy = buy_list(inputs).map_err(|BuyListError::Overflow| {
         "the buy list does not add up: a volume or value does not fit the supported range"
             .to_owned()

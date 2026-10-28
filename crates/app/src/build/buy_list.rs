@@ -10,12 +10,14 @@ use mop_core::format::group_thousands;
 use mop_core::freight::{CargoLine, Contract, FreightQuote, Packing, RateCard};
 use mop_core::industry::TypeId;
 use mop_core::money::Money;
-use mop_core::plan::Plan;
+use mop_core::plan::{BuyLine, Plan};
 use mop_core::volume::Volume;
 use mop_market::book::PriceRule;
 use mop_market::fuzzwork::{Refresh, Side, Stat};
 use mop_store::PlanRecord;
 
+use super::costs::{InventionShown, invention_lines};
+use super::invention::InventionLine;
 use super::prices::{
     self, Held, Manual, OLD_HOVER, OLD_SECS, OutOfRange, Outcome, STALE_SECS, age_text, aged_text,
     failure_text,
@@ -154,7 +156,24 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Option<Edit> {
     ask_when_due(cx, &held, auto, now);
 
     load_typed(ui, cx, page.selected);
-    let (inputs, views) = buy_inputs(plan, record, cx, &held, now);
+    let invention = match invention_lines(ui, page, record, plan, cx, &held) {
+        Ok(inventions) => inventions
+            .parts
+            .into_values()
+            .filter_map(|shown| match shown {
+                InventionShown::Counted { line, .. } => Some(line),
+                InventionShown::Not | InventionShown::Unavailable(_) => None,
+            })
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            report(cx, format!("Could not work out the invention: {error}"));
+            Vec::new()
+        }
+    };
+    let Some((inputs, views)) = buy_inputs(plan, record, cx, &held, now, &invention) else {
+        report(cx, "Could not add up the buy list.");
+        return None;
+    };
     let Ok(buy) = buy_list(inputs) else {
         report(cx, "Could not add up the buy list.");
         return None;
@@ -347,71 +366,128 @@ fn too_soon_notice(
     ))
 }
 
-/// The buy inputs of the plan's buy lines, in their order, and what the table shows for each.
+/// Adds the datacores and decryptors of the whole attempts of every invented part to the plan's
+/// buy lines. Equal types from several parts share one line. Stock the plan did not use covers the
+/// added amount. `None` when the amounts do not fit the supported range.
+fn with_invention(
+    lines: &[BuyLine],
+    invention: &[InventionLine],
+    unused_stock: &[(TypeId, u64)],
+) -> Option<Vec<BuyLine>> {
+    let mut added: BTreeMap<TypeId, u64> = BTreeMap::new();
+    for line in invention {
+        for (type_id, quantity) in &line.materials {
+            let amount = quantity.checked_mul(line.need.attempts)?;
+            let total = added.entry(*type_id).or_insert(0);
+            *total = total.checked_add(amount)?;
+        }
+        if let Some(decryptor) = line.decryptor {
+            let total = added.entry(decryptor).or_insert(0);
+            *total = total.checked_add(line.need.attempts)?;
+        }
+    }
+    let mut result = lines.to_vec();
+    for (type_id, amount) in added {
+        let stock = unused_stock
+            .iter()
+            .find(|(id, _)| *id == type_id)
+            .map_or(0, |(_, stock)| *stock);
+        let from_stock = amount.min(stock);
+        if let Some(line) = result.iter_mut().find(|line| line.type_id == type_id) {
+            line.needed = line.needed.checked_add(amount)?;
+            line.from_stock = line.from_stock.checked_add(from_stock)?;
+            line.to_buy = line.needed.checked_sub(line.from_stock)?;
+        } else {
+            result.push(BuyLine {
+                type_id,
+                depth: 0,
+                needed: amount,
+                from_stock,
+                to_buy: amount.checked_sub(from_stock)?,
+            });
+        }
+    }
+    Some(result)
+}
+
+/// The buy inputs of the plan's buy lines and the invention's datacores and decryptors, and what
+/// the table shows for each.
 fn buy_inputs(
     plan: &Plan,
     record: &PlanRecord,
     cx: &mut Shared,
     held: &Held,
     now: i64,
-) -> (Vec<BuyInput>, BTreeMap<u64, View>) {
+    invention: &[InventionLine],
+) -> Option<(Vec<BuyInput>, BTreeMap<u64, View>)> {
+    let lines = with_invention(&plan.buy, invention, &plan.unused_stock)?;
     let (side, _) = prices::rule_source(record.price_rule);
-    let mut inputs = Vec::with_capacity(plan.buy.len());
+    let mut inputs = Vec::with_capacity(lines.len());
     let mut views = BTreeMap::new();
-    for line in &plan.buy {
-        let name = type_name(line.type_id, cx.sde.as_ref(), &mut cx.notices);
-        let unit_volume = cx
-            .sde
-            .as_ref()
-            .and_then(|sde| sde.item(line.type_id).ok().flatten())
-            .and_then(|item| item.haul_volume());
-        let live = prices::live(held, line.type_id, record.price_rule);
-        let manual = cx.market.manual(record.id, line.type_id);
-        let (price, overflow) = if line.to_buy == 0 {
-            (LinePrice::Missing, false)
-        } else {
-            match prices::line_price(live.as_ref(), manual, line.to_buy) {
-                Ok(price) => (price, false),
-                Err(OutOfRange) => (LinePrice::Missing, true),
-            }
-        };
-        let missing_hover = if overflow {
-            Some("price out of range")
-        } else if line.to_buy > 0
-            && matches!(price, LinePrice::Missing)
-            && held.published_at.is_some()
-        {
-            Some(match side {
-                Side::Sell => "no Forge sell orders",
-                Side::Buy => "no Forge buy orders",
-            })
-        } else {
-            None
-        };
-        views.insert(
-            u64::from(line.type_id),
-            View {
-                type_id: line.type_id,
-                fetched: held.published_at.is_some(),
-                live: live.map(|live| live.per_unit),
-                // A floor at 0 is meant here: a live publish time after `now` (clock skew) shows as age zero.
-                live_age: live.map(|live| now.saturating_sub(live.published_at)),
-                manual,
-                live_used: manual.is_none() && line.to_buy > 0 && live.is_some(),
-                missing_hover,
-            },
-        );
-        inputs.push(BuyInput {
-            type_id: line.type_id,
-            name,
-            needed: line.needed,
-            from_stock: line.from_stock,
-            to_buy: line.to_buy,
-            unit_volume,
-            price,
-        });
+    for line in &lines {
+        let (input, view) = buy_input(line, side, record, cx, held, now);
+        views.insert(u64::from(line.type_id), view);
+        inputs.push(input);
     }
-    (inputs, views)
+    Some((inputs, views))
+}
+
+/// What one buy line asks for, what it costs and what the table shows of it.
+fn buy_input(
+    line: &BuyLine,
+    side: Side,
+    record: &PlanRecord,
+    cx: &mut Shared,
+    held: &Held,
+    now: i64,
+) -> (BuyInput, View) {
+    let name = type_name(line.type_id, cx.sde.as_ref(), &mut cx.notices);
+    let unit_volume = cx
+        .sde
+        .as_ref()
+        .and_then(|sde| sde.item(line.type_id).ok().flatten())
+        .and_then(|item| item.haul_volume());
+    let live = prices::live(held, line.type_id, record.price_rule);
+    let manual = cx.market.manual(record.id, line.type_id);
+    let (price, overflow) = if line.to_buy == 0 {
+        (LinePrice::Missing, false)
+    } else {
+        match prices::line_price(live.as_ref(), manual, line.to_buy) {
+            Ok(price) => (price, false),
+            Err(OutOfRange) => (LinePrice::Missing, true),
+        }
+    };
+    let missing_hover = if overflow {
+        Some("price out of range")
+    } else if line.to_buy > 0 && matches!(price, LinePrice::Missing) && held.published_at.is_some()
+    {
+        Some(match side {
+            Side::Sell => "no Forge sell orders",
+            Side::Buy => "no Forge buy orders",
+        })
+    } else {
+        None
+    };
+    let view = View {
+        type_id: line.type_id,
+        fetched: held.published_at.is_some(),
+        live: live.map(|live| live.per_unit),
+        // A floor at 0 is meant here: a live publish time after `now` (clock skew) shows as age zero.
+        live_age: live.map(|live| now.saturating_sub(live.published_at)),
+        manual,
+        live_used: manual.is_none() && line.to_buy > 0 && live.is_some(),
+        missing_hover,
+    };
+    let input = BuyInput {
+        type_id: line.type_id,
+        name,
+        needed: line.needed,
+        from_stock: line.from_stock,
+        to_buy: line.to_buy,
+        unit_volume,
+        price,
+    };
+    (input, view)
 }
 
 /// One freight offer per service on the plan's route, in the order they were saved.
@@ -919,12 +995,93 @@ mod tests {
     use mop_market::fuzzwork::Refresh;
 
     use mop_core::freight::Contract;
+    use mop_core::invention_cost::InventionNeed;
+    use mop_core::plan::BuyLine;
     use mop_core::volume::Volume;
 
-    use super::{Manual, contract_line, diff_text, too_soon_notice};
+    use super::{InventionLine, Manual, contract_line, diff_text, too_soon_notice, with_invention};
 
     fn isk(text: &str) -> Money {
         Money::parse_isk(text).expect("a price")
+    }
+
+    fn need(attempts: u64) -> InventionNeed {
+        InventionNeed {
+            copies: 1,
+            attempts,
+            cost_per_copy: Money::ZERO,
+            carried: Money::ZERO,
+            spare_runs: 0,
+        }
+    }
+
+    fn invention(
+        materials: Vec<(u32, u64)>,
+        decryptor: Option<u32>,
+        attempts: u64,
+    ) -> InventionLine {
+        InventionLine {
+            type_id: 2456,
+            need: need(attempts),
+            attempt_cost: Money::ZERO,
+            materials,
+            decryptor,
+        }
+    }
+
+    fn plan_line(type_id: u32, depth: u32, needed: u64, from_stock: u64) -> BuyLine {
+        BuyLine {
+            type_id,
+            depth,
+            needed,
+            from_stock,
+            to_buy: needed - from_stock,
+        }
+    }
+
+    #[test]
+    fn every_whole_attempt_buys_its_materials_and_decryptor() {
+        let parts = [invention(vec![(20418, 1), (20419, 1)], Some(34202), 3)];
+        let lines = with_invention(&[], &parts, &[]).expect("the lines add up");
+        assert_eq!(
+            lines,
+            [
+                plan_line(20418, 0, 3, 0),
+                plan_line(20419, 0, 3, 0),
+                plan_line(34202, 0, 3, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn equal_types_from_several_parts_share_a_line_the_plan_already_has() {
+        let parts = [
+            invention(vec![(20418, 2)], None, 2),
+            invention(vec![(20418, 3)], None, 2),
+        ];
+        let plan = [plan_line(20418, 1, 5, 1)];
+        // The parts need 4 + 6 = 10, and the unused stock of 4 covers part of it.
+        let lines = with_invention(&plan, &parts, &[(20418, 4)]).expect("the lines add up");
+        assert_eq!(lines, [plan_line(20418, 1, 15, 5)]);
+    }
+
+    #[test]
+    fn unused_stock_covers_no_more_than_the_added_amount() {
+        let parts = [invention(vec![(20418, 1)], None, 3)];
+        let lines = with_invention(&[], &parts, &[(20418, 5)]).expect("the lines add up");
+        assert_eq!(lines, [plan_line(20418, 0, 3, 3)]);
+    }
+
+    #[test]
+    fn amounts_that_do_not_fit_the_supported_range_give_no_lines() {
+        let parts = [invention(vec![(20418, 2)], None, u64::MAX)];
+        assert_eq!(with_invention(&[], &parts, &[]), None);
+
+        let parts = [
+            invention(vec![(20418, u64::MAX)], None, 1),
+            invention(vec![(20418, 1)], None, 1),
+        ];
+        assert_eq!(with_invention(&[], &parts, &[]), None);
     }
 
     fn typed(text: &str) -> Manual {
