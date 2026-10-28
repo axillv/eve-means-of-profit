@@ -1,53 +1,66 @@
-//! The Settings window: the interface size and the market density (both saved at once), and the
-//! data folder.
+//! The Settings controls: the interface size, the market density and the rail's look (all saved at
+//! once), and the data folder.
 
 use std::path::Path;
 
-use egui::{Context, Window};
+use egui::{Context, Ui, Window};
 use mop_store::{Density, InterfaceSize};
 
 use crate::Shared;
 
-/// Shows the window while `open` is set. Choosing an interface size or a density saves it at once.
+/// Shows the window while `open` is set.
 pub fn show(ctx: &Context, open: &mut bool, shared: &mut Shared, data_dir: &Path) {
     Window::new("Settings")
         .open(open)
         .collapsible(false)
         .resizable(false)
-        .show(ctx, |ui| {
-            ui.label("Interface size");
-            let mut size = zoomed_size(ctx.zoom_factor());
-            ui.horizontal(|ui| {
-                for choice in InterfaceSize::ALL {
-                    let picked = ui
-                        .radio_value(&mut size, choice, size_label(choice))
-                        .changed();
-                    if picked {
-                        ui.ctx()
-                            .set_zoom_factor(f32::from(choice.percent()) / 100.0);
-                        shared.change_settings(|settings| settings.interface_size = choice);
-                    }
-                }
-            });
-            ui.add_space(8.0);
-            ui.label("Density");
-            let mut density = shared.density;
-            for choice in [Density::Sparse, Density::Normal, Density::Dense] {
-                let picked = ui
-                    .radio_value(&mut density, choice, density_label(choice))
-                    .changed();
-                if picked && shared.change_settings(|settings| settings.density = choice) {
-                    shared.density = choice;
-                }
+        .show(ctx, |ui| show_body(ui, shared, data_dir));
+}
+
+/// Draws every Settings control. Choosing an interface size, a density or a rail look saves it at
+/// once. The Settings page panel (M1-117) draws this too.
+pub fn show_body(ui: &mut Ui, shared: &mut Shared, data_dir: &Path) {
+    ui.label("Interface size");
+    let mut size = zoomed_size(ui.ctx().zoom_factor());
+    ui.horizontal(|ui| {
+        for choice in InterfaceSize::ALL {
+            let picked = ui
+                .radio_value(&mut size, choice, size_label(choice))
+                .changed();
+            if picked {
+                ui.ctx()
+                    .set_zoom_factor(f32::from(choice.percent()) / 100.0);
+                shared.change_settings(|settings| settings.interface_size = choice);
             }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.label(format!("Data folder: {}", data_dir.display()));
-                if ui.button("Copy path").clicked() {
-                    ui.ctx().copy_text(data_dir.display().to_string());
-                }
-            });
-        });
+        }
+    });
+    ui.add_space(8.0);
+    ui.label("Density");
+    let mut density = shared.density;
+    for choice in [Density::Sparse, Density::Normal, Density::Dense] {
+        let picked = ui
+            .radio_value(&mut density, choice, density_label(choice))
+            .changed();
+        if picked && shared.change_settings(|settings| settings.density = choice) {
+            shared.density = choice;
+        }
+    }
+    ui.add_space(8.0);
+    ui.label("Rail");
+    let mut icons_only = shared.rail_icons_only;
+    for (choice, label) in [(false, "Icons and labels"), (true, "Icons only")] {
+        let picked = ui.radio_value(&mut icons_only, choice, label).changed();
+        if picked && shared.change_settings(|settings| settings.rail_icons_only = choice) {
+            shared.rail_icons_only = choice;
+        }
+    }
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label(format!("Data folder: {}", data_dir.display()));
+        if ui.button("Copy path").clicked() {
+            ui.ctx().copy_text(data_dir.display().to_string());
+        }
+    });
 }
 
 /// The interface size whose zoom is `zoom`: the saved size, which the app starts with and Ctrl +

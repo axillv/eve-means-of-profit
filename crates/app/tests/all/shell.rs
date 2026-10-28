@@ -304,6 +304,12 @@ mod tests {
         store.settings().unwrap().interface_size
     }
 
+    /// Whether the rail shows icons alone in the test's data folder.
+    fn saved_rail_icons_only(folders: &Folders) -> bool {
+        let mut store = Store::open(&folders.user_db(), NOW).unwrap().store;
+        store.settings().unwrap().rail_icons_only
+    }
+
     /// The top edge of the first node labelled `label`, to check what is above what.
     fn top_of(harness: &Harness<'_, App>, label: &str) -> f32 {
         harness
@@ -719,6 +725,76 @@ mod tests {
 
         assert!(selected(&harness, "125%"), "125% is the selected one");
         assert!(!selected(&harness, "100%"));
+    }
+
+    #[test]
+    fn the_settings_window_shows_the_rail_choices_below_the_density() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(990_000);
+        let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
+        until(&mut harness, "the build pages", build_page_shown);
+        harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
+        until(&mut harness, "the settings window", |h| {
+            shown(h, "Interface size")
+        });
+
+        assert!(shown(&harness, "Rail"), "Rail is listed");
+        assert!(
+            shown(&harness, "Icons and labels"),
+            "the labelled choice is listed"
+        );
+        assert!(
+            shown(&harness, "Icons only"),
+            "the icons-only choice is listed"
+        );
+        assert!(
+            selected(&harness, "Icons and labels"),
+            "a new data folder shows icons and labels"
+        );
+        assert!(!selected(&harness, "Icons only"));
+        assert!(
+            top_of(&harness, "Density") < top_of(&harness, "Rail"),
+            "the rail choice is below the density"
+        );
+    }
+
+    #[test]
+    fn a_rail_choice_is_saved_at_once_and_resizes_the_build_entry() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(990_000);
+        let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
+        until(&mut harness, "the build pages", build_page_shown);
+        harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
+        until(&mut harness, "the settings window", |h| {
+            shown(h, "Interface size")
+        });
+        assert!(harness.get_by_label("Build").rect().width() > 48.0);
+
+        harness.get_by_label("Icons only").click();
+        settle(&mut harness);
+        assert!(
+            saved_rail_icons_only(&folders),
+            "the choice is saved at once"
+        );
+        assert!(harness.state_mut().shared_mut().rail_icons_only);
+        assert!(
+            harness.get_by_label("Build").rect().width() <= 48.0,
+            "the icons-only Build entry is at most 48 px wide"
+        );
+
+        harness.get_by_label("Icons and labels").click();
+        settle(&mut harness);
+        assert!(
+            !saved_rail_icons_only(&folders),
+            "the other choice is saved at once"
+        );
+        assert!(!harness.state_mut().shared_mut().rail_icons_only);
+        assert!(
+            harness.get_by_label("Build").rect().width() > 48.0,
+            "the labelled Build entry is wider again"
+        );
     }
 
     #[test]
