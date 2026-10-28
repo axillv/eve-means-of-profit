@@ -4,7 +4,8 @@
 //! of one table row. [`contrast`] is the WCAG ratio the design note's tests check.
 
 use egui::{
-    Color32, Context, CornerRadius, FontFamily, FontId, Stroke, TextStyle, Theme, Visuals, vec2,
+    Color32, Context, CornerRadius, FontDefinitions, FontFamily, FontId, Stroke, TextStyle, Theme,
+    Visuals, vec2,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -27,6 +28,23 @@ pub struct Style {
     pub control_radius: u8,
     /// Width of the page rail, in points.
     pub rail_width: f32,
+    /// Width of the rail in icons-only mode, in points.
+    pub rail_narrow: f32,
+}
+
+/// The default fonts plus Phosphor Regular as a fallback for icons.
+pub fn fonts() -> FontDefinitions {
+    let mut fonts = FontDefinitions::default();
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+    // egui-phosphor inserts the icons second, ahead of the emoji fallbacks; as a fallback they
+    // belong last, so the text and emoji fonts win for anything they cover.
+    if let Some(proportional) = fonts.families.get_mut(&FontFamily::Proportional)
+        && let Some(at) = proportional.iter().position(|name| name == "phosphor")
+    {
+        let icons = proportional.remove(at);
+        proportional.push(icons);
+    }
+    fonts
 }
 
 impl Style {
@@ -48,11 +66,13 @@ impl Style {
             radius: 12,
             control_radius: 8,
             rail_width: 80.0,
+            rail_narrow: 48.0,
         }
     }
 
     /// Maps the tokens onto egui's dark visuals. Called once, when the app starts.
     pub fn apply(&self, ctx: &Context) {
+        ctx.set_fonts(fonts());
         let mut style = (*ctx.global_style()).clone();
         style.visuals = Visuals::dark();
         let visuals = &mut style.visuals;
@@ -147,5 +167,29 @@ fn linear(channel: u8) -> f64 {
         value / 12.92
     } else {
         ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_icons_are_one_extra_fallback_font() {
+        let fonts = fonts();
+        let default = FontDefinitions::default();
+        assert_eq!(fonts.font_data.len(), default.font_data.len() + 1);
+        let icon = fonts
+            .font_data
+            .keys()
+            .find(|name| !default.font_data.contains_key(*name))
+            .expect("the icon font is the one new entry");
+        let proportional = &fonts.families[&FontFamily::Proportional];
+        assert_eq!(proportional.last(), Some(icon));
+    }
+
+    #[test]
+    fn the_rail_has_an_icons_only_width() {
+        assert_eq!(Style::eve_dense().rail_narrow, 48.0);
     }
 }
