@@ -14,6 +14,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         fetch: Box::new(HttpFetch::new()),
         clock: Box::new(system_clock),
         eve: Box::new(LiveEve::open(dirs.data_dir())?),
+        market: Box::new(mop_market::http::UreqHttp::new()),
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

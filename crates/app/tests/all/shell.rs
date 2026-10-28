@@ -14,16 +14,15 @@ mod tests {
     use egui::{Event, Key, Modifiers, PointerButton, Pos2, vec2};
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
-    use eve_means_of_profit::build::prices::Prices;
     use eve_means_of_profit::rail::Page;
     use eve_means_of_profit::session::NoEve;
     use eve_means_of_profit::theme::{Style, contrast};
     use eve_means_of_profit::{App, AppConfig};
-    use mop_market::error::MarketError;
-    use mop_market::fuzzwork::{BytesHttp, BytesResponse};
     use mop_sde::{Fetch, FetchError, LATEST_URL, import};
     use mop_store::{Density, InterfaceSize, Store};
     use tempfile::TempDir;
+
+    use crate::offline::Offline;
 
     const NOW: i64 = 1_000_000;
     const BUILD: u64 = 3_607_705;
@@ -241,26 +240,12 @@ mod tests {
             fetch: Box::new(fake),
             clock: Box::new(|| NOW),
             eve: Box::new(NoEve),
+            market: Box::new(Offline),
         };
-        let mut harness = Harness::builder()
+        Harness::builder()
             .with_size(vec2(1280.0, 800.0))
-            .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
-        // The price market would otherwise be the live one; these tests never reach it.
-        harness.state_mut().shared_mut().market = Arc::new(Prices::new(Box::new(Offline)));
-        harness
-    }
-
-    /// Prices that cannot be reached: every request fails, as on a machine with no network.
-    struct Offline;
-
-    impl BytesHttp for Offline {
-        fn get_bytes(
-            &self,
-            _url: &str,
-            _if_none_match: Option<&str>,
-        ) -> Result<BytesResponse, MarketError> {
-            Err(MarketError::Network("offline in tests".to_string()))
-        }
+            .with_max_steps(crate::SETTLE_STEPS)
+            .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"))
     }
 
     /// Whether some node shows `text`. The error text is on both the first-run screen and the status line.

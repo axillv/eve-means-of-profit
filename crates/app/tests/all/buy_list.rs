@@ -400,12 +400,14 @@ mod tests {
             fetch: Box::new(NoNetwork),
             clock: Box::new(move || clock.load(Ordering::SeqCst)),
             eve: Box::new(NoEve),
+            market: Box::new(crate::offline::Offline),
         };
         let market = Arc::new(Prices::new(Box::new(FakeForge {
             state: Arc::clone(&world.forge),
         })));
         let mut harness = Harness::builder()
             .with_size(vec2(width, 800.0))
+            .with_max_steps(crate::SETTLE_STEPS)
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
         harness.state_mut().shared_mut().market = market;
         harness

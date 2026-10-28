@@ -438,9 +438,11 @@ mod tests {
             fetch: Box::new(NoNetwork),
             clock: Box::new(|| NOW),
             eve: Box::new(eve),
+            market: Box::new(crate::offline::Offline),
         };
         let mut harness = Harness::builder()
             .with_size(vec2(1900.0, 800.0))
+            .with_max_steps(crate::SETTLE_STEPS)
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
         harness.state_mut().shared_mut().market = Arc::new(Prices::new(Box::new(EmptyForge)));
         // The saved login and its data arrive on the worker thread.

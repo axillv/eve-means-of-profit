@@ -385,9 +385,11 @@ mod tests {
             fetch: Box::new(NoNetwork),
             clock: Box::new(|| NOW),
             eve,
+            market: Box::new(crate::offline::Offline),
         };
         let mut harness = Harness::builder()
             .with_size(size)
+            .with_max_steps(crate::SETTLE_STEPS)
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
         harness.state_mut().shared_mut().market = Arc::new(Prices::new(Box::new(FakeForge)));
         harness

@@ -85,6 +85,8 @@ pub struct AppConfig {
     pub clock: Clock,
     /// The EVE login and the files next to it: the real one in the app, a fake in tests.
     pub eve: Box<dyn EveAccess>,
+    /// The price file's HTTP client: the real one in the app, a fake in tests.
+    pub market: Box<dyn mop_market::fuzzwork::BytesHttp + Send + Sync>,
 }
 
 /// What a job reports back to the UI thread.
@@ -283,8 +285,7 @@ impl App {
                 store,
                 worker: Worker::spawn(ctx.clone(), config.fetch),
                 market: Arc::new(
-                    build::prices::Prices::new(Box::new(mop_market::http::UreqHttp::new()))
-                        .recording(Arc::clone(&recorder)),
+                    build::prices::Prices::new(config.market).recording(Arc::clone(&recorder)),
                 ),
                 style,
                 density: settings.density,
