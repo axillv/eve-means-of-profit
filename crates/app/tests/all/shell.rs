@@ -231,6 +231,15 @@ mod tests {
             settings.interface_size = size;
             store.save_settings(&settings).unwrap();
         }
+
+        /// Stores whether the rail shows icons alone, as an earlier run of the app would have.
+        fn set_rail_icons_only(&self, icons_only: bool) {
+            fs::create_dir_all(&self.data).unwrap();
+            let mut store = Store::open(&self.user_db(), NOW).unwrap().store;
+            let mut settings = store.settings().unwrap();
+            settings.rail_icons_only = icons_only;
+            store.save_settings(&settings).unwrap();
+        }
     }
 
     fn start(fake: Fake, folders: &Folders) -> Harness<'static, App> {
@@ -381,6 +390,33 @@ mod tests {
         until(&mut harness, "the setup panels", |h| shown(h, "Price rule"));
         harness.get_by_label("Build").click();
         until(&mut harness, "the build pages again", build_page_shown);
+    }
+
+    #[test]
+    fn a_saved_icons_only_rail_starts_narrow_with_the_build_entry_short() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(990_000);
+        folders.set_rail_icons_only(true);
+        let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
+        until(&mut harness, "the build pages", build_page_shown);
+        assert!(
+            harness.get_by_label("Build").rect().width() <= 48.0,
+            "the icons-only Build entry is at most 48 px wide"
+        );
+    }
+
+    #[test]
+    fn a_rail_with_nothing_saved_shows_the_build_entry_wider_than_the_narrow_width() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(990_000);
+        let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
+        until(&mut harness, "the build pages", build_page_shown);
+        assert!(
+            harness.get_by_label("Build").rect().width() > 48.0,
+            "the labelled Build entry is wider than 48 px"
+        );
     }
 
     #[test]

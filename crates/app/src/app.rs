@@ -132,6 +132,10 @@ pub struct Shared {
     pub market: Arc<build::prices::Prices>,
     pub style: Style,
     pub density: Density,
+    /// Whether the rail shows icons alone, saved by an earlier run.
+    pub rail_icons_only: bool,
+    /// The data folder, shown on the Settings page.
+    pub data_dir: PathBuf,
     pub notices: Vec<Notice>,
     pub clock: Clock,
     /// The characters and their saved data, jEve's profile, and the structure names.
@@ -189,7 +193,6 @@ impl Shared {
 pub struct App {
     ctx: Context,
     shared: Shared,
-    data_dir: PathBuf,
     sde_path: PathBuf,
     cache_dir: PathBuf,
     startup: Startup,
@@ -289,6 +292,8 @@ impl App {
                 ),
                 style,
                 density: settings.density,
+                rail_icons_only: settings.rail_icons_only,
+                data_dir: config.data_dir,
                 notices,
                 clock: config.clock,
                 session: Session::new(config.eve),
@@ -296,7 +301,6 @@ impl App {
                 industry: IndustryData::default(),
                 claims: ClaimsState::default(),
             },
-            data_dir: config.data_dir,
             sde_path,
             cache_dir: config.cache_dir,
             startup: Startup::Ready,
@@ -376,12 +380,8 @@ impl App {
             | Startup::Failed(_) => self.first_run_screen(ui),
         }
         let ctx = ui.ctx().clone();
-        settings_window::show(
-            &ctx,
-            &mut self.settings_open,
-            &mut self.shared,
-            &self.data_dir,
-        );
+        let data_dir = self.shared.data_dir.clone();
+        settings_window::show(&ctx, &mut self.settings_open, &mut self.shared, &data_dir);
         table::sync_sorts(&ctx, &mut self.shared);
     }
 
@@ -431,7 +431,7 @@ impl App {
 
     fn pages(&mut self, ui: &mut Ui) {
         let style = self.shared.style;
-        rail::show(ui, &style, &mut self.page);
+        rail::show_with(ui, &style, &mut self.page, self.shared.rail_icons_only);
         egui::CentralPanel::default().show(ui, |ui| match self.page {
             Page::Build => dock::show_locked(
                 ui,
@@ -705,7 +705,7 @@ impl App {
     fn spawn_session_load(&self) {
         let eve = self.shared.session.eve();
         let (tx, ctx) = (self.events_tx.clone(), self.ctx.clone());
-        let data_dir = self.data_dir.clone();
+        let data_dir = self.shared.data_dir.clone();
         let job: Job = Box::new(move || {
             let loaded = session::load(&**session::lock_eve(&eve), &data_dir);
             notify(&tx, &ctx, Event::Loaded(loaded));
@@ -716,7 +716,7 @@ impl App {
     /// Reads the saved industry data on the worker. Refreshes wait for it.
     fn spawn_industry_load(&self) {
         let (tx, ctx) = (self.events_tx.clone(), self.ctx.clone());
-        let dir = self.data_dir.join("esi");
+        let dir = self.shared.data_dir.join("esi");
         let job: Job = Box::new(move || {
             let loaded = esi_industry::load_industry(&dir).map_err(|error| error.to_string());
             notify(&tx, &ctx, Event::IndustryLoaded(loaded));
@@ -769,7 +769,7 @@ impl App {
         let eve = self.shared.session.eve();
         let mut data = self.shared.industry.clone();
         let (tx, ctx) = (self.events_tx.clone(), self.ctx.clone());
-        let dir = self.data_dir.join("esi");
+        let dir = self.shared.data_dir.join("esi");
         let job: Job = Box::new(move || {
             // Read before the refresh saves over the file, so a corrupt file can be reported.
             let unreadable = esi_industry::load_industry(&dir).is_err();
