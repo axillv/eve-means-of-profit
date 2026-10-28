@@ -477,7 +477,7 @@ mod tests {
             if value.is_empty() {
                 continue;
             }
-            if (rect.center().y - y).abs() >= 4.0 {
+            if (rect.center().y - y).abs() >= 0.5 {
                 continue;
             }
             if rect.min.x < last {

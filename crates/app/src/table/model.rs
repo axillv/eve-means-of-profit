@@ -294,7 +294,7 @@ fn field(text: &str) -> String {
 pub fn row_height(density: Density) -> f32 {
     match density {
         Density::Sparse => 28.0,
-        Density::Normal => 22.0,
-        Density::Dense => 18.0,
+        Density::Normal => 24.0,
+        Density::Dense => 20.0,
     }
 }

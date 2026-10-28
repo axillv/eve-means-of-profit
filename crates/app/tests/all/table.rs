@@ -242,8 +242,8 @@ mod tests {
     #[test]
     fn row_heights_follow_the_density() {
         assert_eq!(row_height(Density::Sparse), 28.0);
-        assert_eq!(row_height(Density::Normal), 22.0);
-        assert_eq!(row_height(Density::Dense), 18.0);
+        assert_eq!(row_height(Density::Normal), 24.0);
+        assert_eq!(row_height(Density::Dense), 20.0);
     }
 
     /// A primary click at `pos`: the pointer moves there, then presses and releases.
@@ -424,8 +424,8 @@ mod tests {
         harness.run();
         let first = harness.get_by_label("Hobgoblin II").rect();
         let second = harness.get_by_label("Particle Accelerator Unit").rect();
-        // Normal density is 22 points per row; the label of each row sits at the row's centre.
-        assert!((second.center().y - first.center().y - 22.0).abs() < 0.5);
+        // Normal density is 24 points per row; the label of each row sits at the row's centre.
+        assert!((second.center().y - first.center().y - 24.0).abs() < 0.5);
         let header = harness.get_by_label("Item").rect();
         assert!(
             first.center().y > header.center().y,
