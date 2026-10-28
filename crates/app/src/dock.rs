@@ -68,7 +68,7 @@ pub fn characters_layout() -> DockState<CharactersPanel> {
 }
 
 /// The Setup page: Facilities, Price history and Display stacked on the left; Freight services over
-/// Price rule over Structures and Fees on the right.
+/// Price rule over Structures, Fees and Invention on the right.
 pub fn setup_layout() -> DockState<SetupPanel> {
     let mut dock = DockState::new(vec![SetupPanel::Facilities]);
     let surface = dock.main_surface_mut();
@@ -78,7 +78,15 @@ pub fn setup_layout() -> DockState<SetupPanel> {
         surface.split_below(facilities, 0.4, vec![SetupPanel::PriceHistory]);
     surface.split_below(history, 0.5, vec![SetupPanel::Display]);
     let [_freight, price] = surface.split_below(freight, 0.5, vec![SetupPanel::PriceRule]);
-    surface.split_below(price, 0.5, vec![SetupPanel::Structures, SetupPanel::Fees]);
+    surface.split_below(
+        price,
+        0.5,
+        vec![
+            SetupPanel::Structures,
+            SetupPanel::Fees,
+            SetupPanel::Invention,
+        ],
+    );
     dock
 }
 
@@ -173,13 +181,14 @@ impl<T: Copy, B: FnMut(&mut Ui, T)> TabViewer for Locked<T, B> {
 mod tests {
     use super::*;
 
-    const SETUP_PANELS: [SetupPanel; 7] = [
+    const SETUP_PANELS: [SetupPanel; 8] = [
         SetupPanel::Facilities,
         SetupPanel::FreightServices,
         SetupPanel::PriceHistory,
         SetupPanel::PriceRule,
         SetupPanel::Structures,
         SetupPanel::Fees,
+        SetupPanel::Invention,
         SetupPanel::Display,
     ];
 
@@ -192,6 +201,25 @@ mod tests {
             let count = panels.iter().filter(|shown| **shown == panel).count();
             assert_eq!(count, 1, "{} appears {count} times", panel.title());
         }
+    }
+
+    #[test]
+    fn invention_sits_in_the_fees_node_right_after_it() {
+        let dock = setup_layout();
+        let fees = dock
+            .iter_leaves()
+            .find(|(_, leaf)| leaf.tabs.contains(&SetupPanel::Fees))
+            .map(|(_, leaf)| leaf)
+            .expect("Fees is in the layout");
+        assert_eq!(
+            fees.tabs,
+            [
+                SetupPanel::Structures,
+                SetupPanel::Fees,
+                SetupPanel::Invention,
+            ],
+            "Invention is the tab after Fees and skills"
+        );
     }
 
     #[test]
