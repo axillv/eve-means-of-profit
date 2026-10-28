@@ -6,6 +6,7 @@ mod fees;
 mod fields;
 mod freight;
 pub mod history;
+mod invention;
 mod price_rule;
 mod structures;
 
@@ -27,6 +28,7 @@ pub enum SetupPanel {
     PriceRule,
     Structures,
     Fees,
+    Invention,
     Display,
 }
 
@@ -39,6 +41,7 @@ impl SetupPanel {
             Self::PriceRule => "Price rule",
             Self::Structures => "Structures",
             Self::Fees => "Fees and skills",
+            Self::Invention => "Invention skills",
             Self::Display => "Display",
         }
     }
@@ -64,6 +67,7 @@ pub fn show(_page: &mut SetupPage, panel: SetupPanel, ui: &mut Ui, cx: &mut Shar
         SetupPanel::PriceRule => price_rule::show(ui, cx),
         SetupPanel::Structures => structures::show(ui, cx),
         SetupPanel::Fees => fees::show(ui, cx),
+        SetupPanel::Invention => invention::show(ui, cx),
         SetupPanel::Display => {
             let data_dir = cx.data_dir.clone();
             egui::ScrollArea::vertical().show(ui, |ui| {
