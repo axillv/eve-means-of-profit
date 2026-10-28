@@ -14,7 +14,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use egui::{Rect, vec2};
+    use egui::{OutputCommand, Rect, vec2};
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
     use eve_means_of_profit::build::prices::Prices;
@@ -25,8 +25,11 @@ mod tests {
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use mop_core::freight::Packing;
+    use mop_core::money::Money;
     use mop_core::stock::{Asset, CharacterAssets};
-    use mop_esi::character_data::{CharacterData, Fetched, Kind, OwnedAssets, Refreshed};
+    use mop_esi::character_data::{
+        CharacterData, Fetched, Job, JobStatus, Kind, Order, OwnedAssets, Refreshed,
+    };
     use mop_esi::characters::{Character, Login};
     use mop_esi::error::EsiError;
     use mop_esi::places::{NamingReport, StructureNames};
@@ -53,6 +56,12 @@ mod tests {
     const MORPHITE: u32 = 11_399;
     /// The Light Scout Drone, built from Morphite and Particle Accelerator Units.
     const DRONE: u32 = 2_456;
+    /// The invention job's product in the Today fixture.
+    const HOBGOBLIN_II_BLUEPRINT: u32 = 2_457;
+    /// The ready reaction's product in the Today fixture.
+    const CRYSTALLINE_CARBONIDE: u32 = 16_670;
+    /// The blueprint the fixture's research, copying and reaction jobs use.
+    const RIFTER_BLUEPRINT: u32 = 691;
     /// The Notice text when the saved data is a day old.
     const OLD_NOTICE: &str = "Character data is 1d old. Refresh it on the Characters page.";
 
@@ -105,6 +114,38 @@ mod tests {
         }
     }
 
+    /// The Forge summary file the Today tests read: PAU sells cheapest at 61,200.00 and Morphite is
+    /// bought highest at 2,150.00.
+    struct Forge;
+
+    impl BytesHttp for Forge {
+        fn get_bytes(
+            &self,
+            _url: &str,
+            _if_none_match: Option<&str>,
+        ) -> Result<BytesResponse, MarketError> {
+            let text = format!(
+                "what,weightedaverage,maxval,minval,stddev,median,volume,numorders,fivepercent,orderSet\n\
+                 10000002|{PAU}|false,61500.00,65000.00,61200.00,0.0,62000.00,500,3,61300.00,175414\n\
+                 10000002|{MORPHITE}|true,2100.00,2150.00,2000.00,0.0,2050.00,40,2,2100.00,175414\n"
+            );
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder
+                .write_all(text.as_bytes())
+                .map_err(|error| MarketError::Network(error.to_string()))?;
+            let body = encoder
+                .finish()
+                .map_err(|error| MarketError::Network(error.to_string()))?;
+            Ok(BytesResponse {
+                status: 200,
+                etag: Some("\"1\"".to_owned()),
+                last_modified: Some("Mon, 12 Jan 1970 13:46:40 GMT".to_owned()),
+                retry_after: None,
+                body,
+            })
+        }
+    }
+
     /// A data folder with the game data imported and the user's store. The login data is saved by
     /// each test.
     struct Env {
@@ -117,7 +158,7 @@ mod tests {
         let dir = TempDir::new().expect("a temp folder");
         let data = dir.path().join("data");
         let cache = dir.path().join("cache");
-        fs::create_dir_all(&data).expect("the data folder");
+        fs::create_dir_all(data.join("esi")).expect("the data folder");
         import(&fixture(), &data.join("sde.sqlite")).expect("the fixture imports");
         let mut store = Store::open(&data.join("user.sqlite"), NOW)
             .expect("the store opens")
@@ -125,6 +166,10 @@ mod tests {
         let mut settings = store.settings().expect("settings");
         settings.last_sde_check = Some(NOW);
         store.save_settings(&settings).expect("settings saved");
+        let places = format!(
+            "{{\"version\":1,\"structures\":{{\"{HOME_FORT}\":{{\"name\":\"Home Fort\",\"system_id\":null,\"refused\":false,\"checked_at\":900000}}}}}}"
+        );
+        fs::write(data.join("esi").join("places.json"), places).expect("places written");
         Env {
             _dir: dir,
             data,
@@ -266,6 +311,166 @@ mod tests {
         )
     }
 
+    /// One industry job at Home Fort, as the jobs page's fixture makes them.
+    fn job(
+        job_id: i64,
+        activity_id: u32,
+        product: Option<u32>,
+        blueprint: u32,
+        runs: u32,
+        status: JobStatus,
+        end: i64,
+    ) -> Job {
+        Job {
+            job_id,
+            activity_id,
+            blueprint_type_id: blueprint,
+            product_type_id: product,
+            runs,
+            status,
+            start: end - 86_400,
+            end,
+            facility_id: HOME_FORT,
+            station_id: HOME_FORT,
+            output_location_id: HOME_FORT,
+            installer_id: i64::try_from(MAIN).expect("an id that fits"),
+            cost: None,
+            licensed_runs: None,
+        }
+    }
+
+    /// M1-26's jobs: an active PAU job, an invention of a Hobgoblin II Blueprint that has ended, a
+    /// ready reaction and a paused copy.
+    fn ready_jobs() -> Vec<Job> {
+        vec![
+            job(
+                1,
+                1,
+                Some(PAU),
+                RIFTER_BLUEPRINT,
+                10,
+                JobStatus::Active,
+                NOW + 7_500,
+            ),
+            job(
+                2,
+                8,
+                Some(HOBGOBLIN_II_BLUEPRINT),
+                HOBGOBLIN_II_BLUEPRINT,
+                1,
+                JobStatus::Active,
+                NOW - 10,
+            ),
+            job(
+                3,
+                11,
+                Some(CRYSTALLINE_CARBONIDE),
+                RIFTER_BLUEPRINT,
+                5,
+                JobStatus::Ready,
+                NOW - 3_600,
+            ),
+            job(
+                4,
+                5,
+                None,
+                RIFTER_BLUEPRINT,
+                1,
+                JobStatus::Paused,
+                NOW + 20_000,
+            ),
+        ]
+    }
+
+    /// One market order at Jita 4-4, as the orders page's fixture makes them.
+    fn order(
+        order_id: i64,
+        type_id: u32,
+        is_buy: bool,
+        price: Money,
+        (remain, total): (u64, u64),
+        expires: i64,
+    ) -> Order {
+        Order {
+            order_id,
+            type_id,
+            location_id: JITA_4_4,
+            region_id: 10_000_002,
+            is_buy,
+            price,
+            volume_remain: remain,
+            volume_total: total,
+            issued: 900_000,
+            expires,
+            range: "station".to_owned(),
+            escrow: is_buy.then(|| price.checked_mul_qty(total).expect("an escrow that fits")),
+            min_volume: None,
+            is_corporation: false,
+        }
+    }
+
+    /// M1-26's orders, with the Morphite buy still open, plus a PAU sell at 61,000.00: two beaten
+    /// PAU sells, a beaten corp PAU sell and a beaten Morphite buy.
+    fn beaten_orders() -> Vec<Order> {
+        let mut corp = order(
+            3,
+            PAU,
+            false,
+            Money::from_ten_thousandths(700_000_000),
+            (50, 50),
+            NOW + 260_000,
+        );
+        corp.is_corporation = true;
+        vec![
+            order(
+                1,
+                PAU,
+                false,
+                Money::from_ten_thousandths(615_000_000),
+                (100, 200),
+                NOW + 260_000,
+            ),
+            order(
+                2,
+                MORPHITE,
+                true,
+                Money::from_ten_thousandths(21_000_000),
+                (10, 10),
+                NOW + 100_000,
+            ),
+            corp,
+            order(
+                4,
+                PAU,
+                false,
+                Money::from_ten_thousandths(610_000_000),
+                (1, 1),
+                NOW + 260_000,
+            ),
+        ]
+    }
+
+    /// Main's saved data with the jobs and orders given, fetched at the clock's time.
+    fn data_with(jobs: Option<Vec<Job>>, orders: Option<Vec<Order>>) -> CharacterData {
+        CharacterData {
+            character_id: MAIN,
+            assets: None,
+            orders: orders.map(|data| Fetched {
+                data,
+                fetched_at: NOW,
+                last_modified: None,
+                expires: None,
+            }),
+            jobs: jobs.map(|data| Fetched {
+                data,
+                fetched_at: NOW,
+                last_modified: None,
+                expires: None,
+            }),
+            wallet: None,
+        }
+    }
+
     /// The places file with one structure EVE refused, as the naming step writes it.
     fn write_places(env: &Env) {
         let text = format!(
@@ -319,6 +524,42 @@ mod tests {
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
         harness.state_mut().shared_mut().market = Arc::new(Prices::new(Box::new(EmptyForge)));
         harness
+    }
+
+    /// A harness whose orders read the Forge summary file.
+    fn start_with_forge(env: &Env, eve: FakeEve, clock: i64) -> Harness<'static, App> {
+        let mut harness = start(env, eve, clock);
+        harness.state_mut().shared_mut().market = Arc::new(Prices::new(Box::new(Forge)));
+        harness
+    }
+
+    /// Asks the Forge for its file and runs frames until the file is held.
+    fn hold_forge(harness: &mut Harness<'_, App>) {
+        let market = {
+            let shared = harness.state_mut().shared_mut();
+            let market = Arc::clone(&shared.market);
+            market.refresh(&shared.worker, NOW, true);
+            market
+        };
+        until(harness, "the Forge file", |_| {
+            market.published_at().is_some()
+        });
+    }
+
+    /// The text the last drawn frame put on the clipboard, if any.
+    fn copied_text(harness: &Harness<'_, App>) -> Option<String> {
+        harness
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|command| {
+                if let OutputCommand::CopyText(text) = command {
+                    Some(text.clone())
+                } else {
+                    None
+                }
+            })
     }
 
     /// The texts of the notices the app holds.
@@ -903,6 +1144,8 @@ mod tests {
             0,
             "Warnings has no button"
         );
+        assert!(!shown(&harness, "0 ready to deliver"));
+        assert!(!shown(&harness, "0 beaten · 0 open"));
     }
 
     #[test]
@@ -934,6 +1177,86 @@ mod tests {
     }
 
     #[test]
+    fn today_lists_the_ready_jobs_oldest_first() {
+        let env = env();
+        saved::save_character(&esi_dir(&env), &data_with(Some(ready_jobs()), None))
+            .expect("Main's jobs saved");
+        let mut harness = start(&env, FakeEve::new(vec![character(MAIN, "Main")], None), NOW);
+        loaded(&mut harness);
+
+        assert!(shown(&harness, "2 ready to deliver"));
+        assert!(shown(&harness, "Deliver 5 × Crystalline Carbonide"));
+        assert!(shown(&harness, "Home Fort · ready 1h"));
+        assert!(shown(&harness, "Deliver 1 × Hobgoblin II Blueprint"));
+        assert!(shown(&harness, "Home Fort · ready 10s"));
+        assert!(
+            crate::ui::top(&harness, "Deliver 5 × Crystalline Carbonide")
+                < crate::ui::top(&harness, "Deliver 1 × Hobgoblin II Blueprint"),
+            "the job that ended first is above"
+        );
+
+        crate::ui::click(&mut harness, "Deliver 5 × Crystalline Carbonide");
+        assert!(
+            shown(&harness, "4 jobs · 2 ready to deliver"),
+            "a job row shows Jobs"
+        );
+    }
+
+    #[test]
+    fn today_lists_the_beaten_orders_and_copies_the_price_to_type() {
+        let env = env();
+        saved::save_character(&esi_dir(&env), &data_with(None, Some(beaten_orders())))
+            .expect("Main's orders saved");
+        let mut harness =
+            start_with_forge(&env, FakeEve::new(vec![character(MAIN, "Main")], None), NOW);
+        loaded(&mut harness);
+        hold_forge(&mut harness);
+
+        assert!(shown(&harness, "3 beaten · 4 open"));
+        assert!(shown(&harness, "Sell Particle Accelerator Unit beaten"));
+        assert!(shown(&harness, "Buy Morphite beaten"));
+        assert!(shown(&harness, "70,000.00, best 61,200.00"));
+        assert!(shown(&harness, "61,500.00, best 61,200.00"));
+        assert!(shown(&harness, "2,100.00, best 2,150.00"));
+        assert!(
+            crate::ui::top(&harness, "70,000.00, best 61,200.00")
+                < crate::ui::top(&harness, "61,500.00, best 61,200.00"),
+            "the widest gap is above"
+        );
+        assert!(
+            crate::ui::top(&harness, "61,500.00, best 61,200.00")
+                < crate::ui::top(&harness, "2,100.00, best 2,150.00"),
+            "the smallest gap is last"
+        );
+
+        harness
+            .get_all_by_label("Orders: Copy 61,190.00")
+            .next()
+            .expect("the corp PAU row's copy button")
+            .click();
+        harness.step();
+        assert_eq!(copied_text(&harness).as_deref(), Some("61190.00"));
+        assert!(shown(&harness, "Warnings"), "Today stays after a copy");
+
+        crate::ui::click(&mut harness, "Buy Morphite beaten");
+        assert!(
+            shown(&harness, "4 orders · sell 9,711,000.00 · escrow 21,000.00"),
+            "an order row shows Orders"
+        );
+    }
+
+    #[test]
+    fn a_character_with_nothing_to_do_shows_zero_counts_and_no_rows() {
+        let env = env();
+        let mut harness = start(&env, FakeEve::new(vec![character(MAIN, "Main")], None), NOW);
+        loaded(&mut harness);
+
+        assert!(shown(&harness, "0 ready to deliver"));
+        assert!(shown(&harness, "0 beaten · 0 open"));
+        assert!(!shown(&harness, "Main"), "no rows show");
+    }
+
+    #[test]
     fn a_filling_button_goes_to_its_page() {
         let env = env();
         let mut harness = start(&env, FakeEve::new(Vec::new(), None), NOW);
@@ -958,6 +1281,23 @@ mod tests {
         harness.remove_cursor();
         harness.run();
         harness.snapshot("today-empty");
+    }
+
+    #[test]
+    fn the_today_blocks_match_their_snapshot() {
+        let env = env();
+        saved::save_character(
+            &esi_dir(&env),
+            &data_with(Some(ready_jobs()), Some(beaten_orders())),
+        )
+        .expect("Main's jobs and orders saved");
+        let mut harness =
+            start_with_forge(&env, FakeEve::new(vec![character(MAIN, "Main")], None), NOW);
+        loaded(&mut harness);
+        hold_forge(&mut harness);
+        harness.remove_cursor();
+        harness.run();
+        harness.snapshot("today-blocks");
     }
 
     #[test]
