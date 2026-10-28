@@ -3,7 +3,7 @@
 
 pub mod model;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::iter;
 
 use egui::epaint::PathStroke;
@@ -13,6 +13,8 @@ use egui::{
 };
 use mop_store::Density;
 
+use crate::Shared;
+use crate::status::Notice;
 use crate::theme::Style;
 use model::{
     Cell, Column, ColumnKind, Direction, Row, row_height, sort_order, span, to_tsv, visible,
@@ -45,6 +47,95 @@ pub fn hidden_to_text(hidden: &[String]) -> String {
     hidden.join(",")
 }
 
+/// The text to save `sort` as: the column id and `asc` or `desc`, such as `need:desc`. Empty when
+/// there is no sort, or its column is past the end of the table.
+pub fn sort_to_text(columns: &[Column], sort: Option<(usize, Direction)>) -> String {
+    let Some((position, direction)) = sort else {
+        return String::new();
+    };
+    let Some(column) = columns.get(position) else {
+        return String::new();
+    };
+    let direction = match direction {
+        Direction::Ascending => "asc",
+        Direction::Descending => "desc",
+    };
+    format!("{}:{direction}", column.id)
+}
+
+/// The sort named by `text`, such as `need:desc`, read by column id. A malformed text, or one
+/// naming a column the table does not have, is no sort.
+pub fn sort_from_text(columns: &[Column], text: &str) -> Option<(usize, Direction)> {
+    let (id, direction) = text.split_once(':')?;
+    let direction = match direction {
+        "asc" => Direction::Ascending,
+        "desc" => Direction::Descending,
+        _ => return None,
+    };
+    let position = columns.iter().position(|column| column.id == id)?;
+    Some((position, direction))
+}
+
+/// The setting key of the saved sort of the table with id `table`.
+fn sort_key(table: u64) -> String {
+    format!("table_sort.{table:016x}")
+}
+
+/// The sorts travelling between the tables and [`sync_sorts`], which owns the store: the ids still
+/// waiting for their saved answer, the answers, and the sorts that changed and must be saved.
+#[derive(Debug, Default, Clone)]
+struct SortMailbox {
+    wanted: BTreeSet<u64>,
+    saved: BTreeMap<u64, String>,
+    changed: BTreeMap<u64, String>,
+}
+
+fn mailbox_key() -> Id {
+    Id::new("table sorts")
+}
+
+fn mailbox(ui: &Ui) -> SortMailbox {
+    ui.data(|data| {
+        data.get_temp::<SortMailbox>(mailbox_key())
+            .unwrap_or_default()
+    })
+}
+
+fn put_mailbox(ui: &Ui, mailbox: SortMailbox) {
+    ui.data_mut(|data| data.insert_temp(mailbox_key(), mailbox));
+}
+
+/// Answers the tables' questions about their saved sorts and saves the ones that changed. Called
+/// once at the end of each frame, after the pages have drawn. Without an app (as in the table's own
+/// tests) nothing calls this, so the tables keep their sort for the run only.
+pub(crate) fn sync_sorts(ctx: &egui::Context, cx: &mut Shared) {
+    let Some(mut mailbox) = ctx.data(|data| data.get_temp::<SortMailbox>(mailbox_key())) else {
+        return;
+    };
+    for table in std::mem::take(&mut mailbox.wanted) {
+        let answer = match cx.store.setting(&sort_key(table)) {
+            Ok(Some(text)) => text,
+            Ok(None) => String::new(),
+            Err(error) => {
+                cx.notices.push(Notice::error(format!(
+                    "Could not read the settings: {error}"
+                )));
+                String::new()
+            }
+        };
+        mailbox.saved.insert(table, answer);
+        ctx.request_repaint();
+    }
+    for (table, text) in std::mem::take(&mut mailbox.changed) {
+        if let Err(error) = cx.store.set_setting(&sort_key(table), &text) {
+            cx.notices.push(Notice::error(format!(
+                "Could not save the settings: {error}"
+            )));
+        }
+    }
+    ctx.data_mut(|data| data.insert_temp(mailbox_key(), mailbox));
+}
+
 /// The width of the fold arrow and the indent per depth, in points.
 const ARROW_WIDTH: f32 = 14.0;
 const INDENT: f32 = 14.0;
@@ -66,6 +157,8 @@ pub struct TableResponse {
 #[derive(Debug, Default, Clone)]
 struct State {
     sort: Option<(usize, Direction)>,
+    /// Whether the sort is the player's or the saved one: until then a table waits for its answer.
+    sort_loaded: bool,
     collapsed: BTreeSet<u64>,
 }
 
@@ -189,6 +282,22 @@ impl<'a> Table<'a> {
         let mut state: State =
             ui.data_mut(|data| data.get_temp_mut_or_default::<State>(self.id).clone());
         let sort_before = state.sort;
+        let table = self.id.value();
+        // The saved answer comes through the mailbox: without an app nothing answers, so the table
+        // waits for the rest of the run and keeps the sort it was given.
+        if !state.sort_loaded {
+            let mut mailbox = mailbox(ui);
+            match mailbox.saved.remove(&table) {
+                Some(text) => {
+                    state.sort = sort_from_text(self.columns, &text);
+                    state.sort_loaded = true;
+                }
+                None => {
+                    mailbox.wanted.insert(table);
+                }
+            }
+            put_mailbox(ui, mailbox);
+        }
         let height = row_height(density);
         let columns_width: f32 = self.columns.iter().map(|column| column.width).sum();
         let width = panel_width.max(columns_width);
@@ -265,6 +374,15 @@ impl<'a> Table<'a> {
             && !state.collapsed.remove(&key)
         {
             state.collapsed.insert(key);
+        }
+        if state.sort != sort_before {
+            // The saved sort, or the player's click, is the sort from now on; the mailbox saves it.
+            state.sort_loaded = true;
+            let mut mailbox = mailbox(ui);
+            mailbox
+                .changed
+                .insert(table, sort_to_text(self.columns, state.sort));
+            put_mailbox(ui, mailbox);
         }
         if response.toggled.is_some() || state.sort != sort_before {
             ui.ctx().request_repaint();

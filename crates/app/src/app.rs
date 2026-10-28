@@ -382,6 +382,7 @@ impl App {
             &mut self.shared,
             &self.data_dir,
         );
+        table::sync_sorts(&ctx, &mut self.shared);
     }
 
     /// Steps the interface size with Ctrl +, Ctrl − and Ctrl 0, then saves it. At 200% Ctrl +
