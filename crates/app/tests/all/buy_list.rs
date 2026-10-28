@@ -34,7 +34,7 @@ mod tests {
     use mop_market::error::MarketError;
     use mop_market::fuzzwork::{BytesHttp, BytesResponse};
     use mop_sde::{Fetch, FetchError, RouteKind, import};
-    use mop_store::Store;
+    use mop_store::{InventionChoice, Store};
     use std::collections::BTreeMap;
     use tempfile::TempDir;
 
@@ -120,6 +120,13 @@ mod tests {
             Line::sell(11688, "30500.00", "31500.00", "31000.00", "30900.00"),
             Line::sell(20418, "50000.00", "50000.00", "50000.00", "50000.00"),
             Line::sell(20419, "43750.00", "43750.00", "43750.00", "43750.00"),
+            Line::sell(
+                34202,
+                "1200000.00",
+                "1200000.00",
+                "1200000.00",
+                "1200000.00",
+            ),
             Line {
                 type_id: 11481,
                 buy: true,
@@ -599,10 +606,16 @@ mod tests {
 
     /// Makes a plan for Hobgoblin II, quantity 10, freight on Jita → Kiainti, and opens its Buy list.
     fn buy_list_for(harness: &mut Harness<'_, App>) {
+        buy_list_for_quantity(harness, 10);
+    }
+
+    /// Makes a plan for Hobgoblin II, quantity `quantity`, freight on Jita → Kiainti, and opens its
+    /// Buy list.
+    fn buy_list_for_quantity(harness: &mut Harness<'_, App>, quantity: u32) {
         click(harness, "New");
         type_into(harness, "", "hobgoblin");
         click(harness, "Hobgoblin II");
-        type_into(harness, "1", "10");
+        type_into(harness, "1", &quantity.to_string());
         // The Buy list's own freight line also reads "No freight", so take the dropdown.
         harness
             .query_all(
@@ -641,6 +654,74 @@ mod tests {
 
     fn lock_folders(world: &World) -> MutexGuard<'_, Vec<Env>> {
         world.folders.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A Hobgoblin II × 8 plan saved with the invention skills at 4 and `choice` stored for 2456,
+    /// then opened again by a new app with the prices already in. The window is taller than the
+    /// other tests' so the decryptor row, below the two datacores, is in view.
+    fn invention_list(world: &World, choice: InventionChoice) -> Harness<'static, App> {
+        let size = vec2(1280.0, 1000.0);
+        let env = make_env(&standard_services());
+        let mut harness = start_window(&env, world, size);
+        harness.run();
+        buy_list_for_quantity(&mut harness, 8);
+        settle(&mut harness, "Oldest: 4m");
+        click(&mut harness, "Save");
+        {
+            let mut store = Store::open(&env.data.join("user.sqlite"), NOW)
+                .expect("the store opens")
+                .store;
+            let plan = store.plans().expect("the plans")[0].id;
+            for skill in [11453, 11446, 23121] {
+                store
+                    .set_invention_skill(skill, 4)
+                    .expect("the skill is saved");
+            }
+            store
+                .set_plan_invention(plan, 2456, choice)
+                .expect("the choice is saved");
+        }
+        drop(harness);
+        let mut harness = start_window(&env, world, size);
+        harness.run();
+        click(&mut harness, "New plan");
+        settle(&mut harness, "Oldest: 4m");
+        lock_folders(world).push(env);
+        harness
+    }
+
+    /// The value the Buy list's footer line adds up.
+    fn footer_value(harness: &Harness<'_, App>) -> Money {
+        let label = harness
+            .query_all(by().label_contains("· value "))
+            .find_map(|node| {
+                let node = node.accesskit_node();
+                // A `Role::Label` keeps its text in the value, not in the label.
+                node.label().or_else(|| node.value())
+            })
+            .expect("the footer line");
+        let value = label
+            .split_once("· value ")
+            .and_then(|(_, rest)| rest.split_once(" · freight"))
+            .map(|(value, _)| value)
+            .expect("the value in the footer");
+        isk(value)
+    }
+
+    fn isk(text: &str) -> Money {
+        Money::parse_isk(text).expect("a price")
+    }
+
+    /// Clicks Copy multibuy and returns the text it put on the clipboard.
+    fn copy_multibuy(harness: &mut Harness<'_, App>) -> String {
+        harness
+            .get_all_by_label("Copy multibuy")
+            .last()
+            .expect("the copy button")
+            .click();
+        // The copy is made in the frame of the click, and `run` would leave only the last frame's output.
+        harness.step();
+        copied_text(harness).expect("the multibuy text")
     }
 
     /// The Buy list once the prices are in, from a file made `seconds` before the clock's time. The
@@ -1981,5 +2062,155 @@ mod tests {
         results.extend_harness(&mut harness);
 
         results.unwrap();
+    }
+
+    /// The six lines of the Hobgoblin II × 8 plan, as the multibuy copy writes them.
+    const PLAN_COPY: &str = "Hobgoblin I\t8\nGuidance Systems\t8\nRobotics\t8\nMorphite\t8\nR.A.M.- Robotics\t8\nParticle Accelerator Unit\t8";
+
+    #[test]
+    fn the_datacores_of_the_whole_attempts_join_the_buy_list() {
+        let world = World::new();
+        let unticked = invention_list(
+            &world,
+            InventionChoice {
+                invent: false,
+                decryptor: None,
+            },
+        );
+        let harness = invention_list(
+            &world,
+            InventionChoice {
+                invent: true,
+                decryptor: None,
+            },
+        );
+        assert_datacore_rows(&harness);
+        // The datacores come after the plan's lines.
+        let tops: Vec<f32> = [
+            "Particle Accelerator Unit",
+            "Datacore - Electronic Engineering",
+            "Datacore - Graviton Physics",
+        ]
+        .iter()
+        .map(|name| row_anchor(&harness, name).1)
+        .collect();
+        assert!(
+            tops.windows(2).all(|pair| pair[0] < pair[1]),
+            "the datacores are out of order: {tops:?}"
+        );
+        assert_eq!(
+            footer_value(&harness).checked_sub(footer_value(&unticked)),
+            Some(isk("281250.00"))
+        );
+    }
+
+    #[test]
+    fn the_attainment_decryptor_is_bought_for_the_attempts_it_shortens() {
+        let world = World::new();
+        let unticked = invention_list(
+            &world,
+            InventionChoice {
+                invent: false,
+                decryptor: None,
+            },
+        );
+        let harness = invention_list(
+            &world,
+            InventionChoice {
+                invent: true,
+                decryptor: Some(34202),
+            },
+        );
+        assert_row(
+            &harness,
+            "Datacore - Electronic Engineering",
+            &["2", "0.20", "50,000.00", "100,000.00"],
+        );
+        assert_row(
+            &harness,
+            "Datacore - Graviton Physics",
+            &["2", "0.20", "43,750.00", "87,500.00"],
+        );
+        assert_row(
+            &harness,
+            "Attainment Decryptor",
+            &["2", "0.20", "1,200,000.00", "2,400,000.00"],
+        );
+        // The decryptor comes after the datacores, which come after the plan's lines.
+        let tops: Vec<f32> = [
+            "Particle Accelerator Unit",
+            "Datacore - Electronic Engineering",
+            "Datacore - Graviton Physics",
+            "Attainment Decryptor",
+        ]
+        .iter()
+        .map(|name| row_anchor(&harness, name).1)
+        .collect();
+        assert!(
+            tops.windows(2).all(|pair| pair[0] < pair[1]),
+            "the invention lines are out of order: {tops:?}"
+        );
+        assert_eq!(
+            footer_value(&harness).checked_sub(footer_value(&unticked)),
+            Some(isk("2587500.00"))
+        );
+    }
+
+    #[test]
+    fn a_datacore_in_stock_lowers_what_the_buy_list_and_the_copy_ask_for() {
+        let world = World::new();
+        let mut harness = invention_list(
+            &world,
+            InventionChoice {
+                invent: true,
+                decryptor: None,
+            },
+        );
+        assert!(
+            copy_multibuy(&mut harness)
+                .ends_with("Datacore - Electronic Engineering\t3\nDatacore - Graviton Physics\t3")
+        );
+        paste(&mut harness, "Datacore - Electronic Engineering\t1");
+        assert_eq!(
+            cells(&harness, "Datacore - Electronic Engineering"),
+            [
+                "Datacore - Electronic Engineering",
+                "3",
+                "1",
+                "2",
+                "0.20",
+                "50,000.00",
+                "50,000.00",
+                "4m",
+                "100,000.00",
+            ]
+        );
+        assert!(
+            copy_multibuy(&mut harness)
+                .ends_with("Datacore - Electronic Engineering\t2\nDatacore - Graviton Physics\t3")
+        );
+    }
+
+    #[test]
+    fn an_uninvented_part_buys_no_datacores_or_decryptor() {
+        let world = World::new();
+        let mut harness = invention_list(
+            &world,
+            InventionChoice {
+                invent: false,
+                decryptor: None,
+            },
+        );
+        assert_eq!(
+            harness.query_all(by().label_contains("Datacore")).count(),
+            0
+        );
+        assert_eq!(
+            harness
+                .query_all(by().label_contains("Attainment Decryptor"))
+                .count(),
+            0
+        );
+        assert_eq!(copy_multibuy(&mut harness), PLAN_COPY);
     }
 }
