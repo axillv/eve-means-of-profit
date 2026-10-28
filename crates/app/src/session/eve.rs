@@ -19,6 +19,7 @@ use mop_esi::industry::{self, IndustryData, IndustryKind};
 use mop_esi::places::{self, NamingReport, StructureNames};
 use mop_esi::saved;
 use mop_esi::secrets::{fallback_warning, open_secrets};
+use mop_esi::skills::{self, CharacterSkills, NpcStanding};
 use mop_jeve::profiles_dir;
 
 /// How long the browser has to answer a login.
@@ -83,6 +84,15 @@ pub trait EveAccess: Send {
         now: i64,
     ) -> Result<Refreshed, EsiError> {
         Ok(Refreshed::NotYet { until: now })
+    }
+    /// Reads one character's fee skills and standings with one token. Quick; call it on the
+    /// worker. The default holds no login, so no character can be read.
+    fn read_skills_and_standings(
+        &mut self,
+        character_id: u64,
+        _now: i64,
+    ) -> Result<(CharacterSkills, Vec<NpcStanding>), EsiError> {
+        Err(EsiError::UnknownCharacter(character_id))
     }
     /// Names the structures in `ids` that are due for a check, with the login characters.
     fn name_structures(
@@ -187,6 +197,21 @@ impl EveAccess for LiveEve {
         let done = industry::refresh_industry(data, kind, &self.http, now)?;
         save_fetched(&self.esi_dir, data, kind)?;
         Ok(done)
+    }
+
+    fn read_skills_and_standings(
+        &mut self,
+        character_id: u64,
+        now: i64,
+    ) -> Result<(CharacterSkills, Vec<NpcStanding>), EsiError> {
+        let Ok(character) = u32::try_from(character_id) else {
+            return Err(EsiError::UnknownCharacter(character_id));
+        };
+        let token = self.auth.access_token(character_id, now)?;
+        let mut client = Client::new(&self.http);
+        let skills = skills::read_skills(&mut client, now, &token, character)?;
+        let standings = skills::read_standings(&mut client, now, &token, character)?;
+        Ok((skills, standings))
     }
 
     fn name_structures(

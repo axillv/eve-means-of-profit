@@ -1,13 +1,20 @@
 //! The Fees and skills panel: the skills and standings of the character who sells, which set the
 //! sales tax and the broker fee paid at Jita 4-4, and a broker fee typed by hand.
 
-use egui::{ComboBox, Id, RichText, Ui};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Arc, Mutex, PoisonError};
+
+use egui::{Button, ComboBox, Context, Id, RichText, Ui};
 use mop_core::fees::{Standing, npc_broker_rate, sales_tax_rate};
+use mop_core::industry::TypeId;
 use mop_core::money::Rate;
+use mop_esi::error::EsiError;
+use mop_esi::skills::{CharacterSkills, NpcStanding, StandingFrom};
 use mop_store::FeeSettings;
 
 use super::fields::{percent, text_field};
 use crate::Shared;
+use crate::session::lock_eve;
 use crate::status::Notice;
 use crate::theme::Style;
 
@@ -16,6 +23,27 @@ const MUTE_LINE: &str =
 const MIN_BROKER_FEE: &str = "Minimum 100.00 ISK per order.";
 /// The highest level of a fee skill.
 const MAX_SKILL_LEVEL: u8 = 5;
+/// Accounting and Broker Relations, the two skills the sales tax and broker fee use.
+const ACCOUNTING: TypeId = 16_622;
+const BROKER_RELATIONS: TypeId = 3_446;
+/// The Caldari State faction and the Caldari Navy corporation.
+const CALDARI_STATE: u32 = 500_001;
+const CALDARI_NAVY: u32 = 1_000_035;
+const NO_CHARACTER: &str = "No character logged in";
+const READING: &str = "Reading…";
+const REFUSED: &str = "EVE refused. Log in again and allow skills and standings.";
+
+/// What one read answers: the character's skills and standings, or why they could not be read.
+type ReadResult = Result<(CharacterSkills, Vec<NpcStanding>), EsiError>;
+/// The channel a read's answer comes back on.
+type ReadChannel = Arc<Mutex<Receiver<ReadResult>>>;
+
+/// The read the panel waits for: the character's name and the channel the worker answers on.
+#[derive(Debug, Clone)]
+struct Reading {
+    name: String,
+    result: ReadChannel,
+}
 
 /// What the panel keeps between frames: the text of each field, and what the store holds.
 #[derive(Debug, Clone, Default)]
@@ -32,6 +60,10 @@ struct Panel {
     faction: String,
     corporation: String,
     override_text: String,
+    /// The character the read dropdown shows.
+    character: Option<u64>,
+    /// The read in flight, if one is.
+    reading: Option<Reading>,
 }
 
 impl Panel {
@@ -49,6 +81,8 @@ impl Panel {
                 .broker_override
                 .map(Rate::to_percent_string)
                 .unwrap_or_default(),
+            character: None,
+            reading: None,
         }
     }
 }
@@ -61,6 +95,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Shared) {
     if !panel.tried {
         load(&mut panel, cx);
     }
+    take_read(&mut panel, cx);
     draw(&mut panel, ui, cx);
     ui.data_mut(|data| data.insert_temp(id, panel));
 }
@@ -76,8 +111,183 @@ fn load(panel: &mut Panel, cx: &mut Shared) {
     }
 }
 
+/// The panel's first row: pick a logged-in character and read its skills and standings.
+fn read_row(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
+    let characters: Vec<(u64, String)> = cx
+        .session
+        .characters()
+        .iter()
+        .map(|character| (character.id, character.name.clone()))
+        .collect();
+    let known = panel
+        .character
+        .is_some_and(|id| characters.iter().any(|(held, _)| *held == id));
+    if !known {
+        panel.character = characters.first().map(|(id, _)| *id);
+    }
+    ui.horizontal(|ui| {
+        ui.label("Read from character");
+        if characters.is_empty() {
+            ui.add_enabled_ui(false, |ui| {
+                ComboBox::from_id_salt("fee read character")
+                    .selected_text(NO_CHARACTER)
+                    .show_ui(ui, |_ui| {});
+            });
+            ui.add_enabled(false, Button::new("Read"));
+        } else {
+            let selected = panel
+                .character
+                .and_then(|id| characters.iter().find(|(held, _)| *held == id))
+                .map_or_else(|| NO_CHARACTER.to_owned(), |(_, name)| name.clone());
+            ComboBox::from_id_salt("fee read character")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    for (id, name) in &characters {
+                        ui.selectable_value(&mut panel.character, Some(*id), name);
+                    }
+                });
+            let busy = panel.reading.is_some();
+            let button = ui.add_enabled(!busy, Button::new(if busy { READING } else { "Read" }));
+            if button.clicked() {
+                start_read(panel, cx, ui.ctx());
+            }
+        }
+    });
+}
+
+/// Asks the worker for one character's skills and standings. The answer comes back on a channel
+/// the panel keeps, and is taken in by [`take_read`].
+fn start_read(panel: &mut Panel, cx: &mut Shared, ctx: &Context) {
+    let Some(id) = panel.character else {
+        return;
+    };
+    let Some(name) = cx
+        .session
+        .characters()
+        .iter()
+        .find(|character| character.id == id)
+        .map(|character| character.name.clone())
+    else {
+        return;
+    };
+    let eve = cx.session.eve();
+    let now = (cx.clock)();
+    let (tx, rx) = mpsc::channel();
+    panel.reading = Some(Reading {
+        name,
+        result: Arc::new(Mutex::new(rx)),
+    });
+    let ctx = ctx.clone();
+    let job = move || {
+        let result = lock_eve(&eve).read_skills_and_standings(id, now);
+        drop(tx.send(result));
+        ctx.request_repaint();
+    };
+    if !cx.worker.run(Box::new(job)) {
+        panel.reading = None;
+        cx.notices.push(Notice::error(
+            "The background worker has stopped. Restart the app.",
+        ));
+    }
+}
+
+/// Takes in the answer of the read, when it has come back. A good answer replaces the fields and
+/// saves them; a failure leaves the fields as they were.
+fn take_read(panel: &mut Panel, cx: &mut Shared) {
+    let Some(reading) = &panel.reading else {
+        return;
+    };
+    let received = reading
+        .result
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .try_recv();
+    match received {
+        Ok(result) => {
+            let name = reading.name.clone();
+            panel.reading = None;
+            match result {
+                Ok((skills, standings)) => {
+                    let settings = fees_from(&skills, &standings, panel.saved);
+                    put_fields(panel, settings);
+                    save(panel, cx, settings);
+                    if panel.failed.is_none() {
+                        cx.notices.push(Notice::info(format!(
+                            "Read skills and standings from {name}."
+                        )));
+                    }
+                }
+                Err(error) => cx.notices.push(Notice::error(read_error(&name, &error))),
+            }
+        }
+        Err(TryRecvError::Empty) => {}
+        Err(TryRecvError::Disconnected) => {
+            let name = reading.name.clone();
+            panel.reading = None;
+            cx.notices.push(Notice::error(format!(
+                "Could not read {name}: the read stopped unexpectedly."
+            )));
+        }
+    }
+}
+
+/// The fields take a read's settings. The broker override follows them, so it is only touched when
+/// the settings it came from did.
+fn put_fields(panel: &mut Panel, settings: FeeSettings) {
+    panel.accounting = settings.accounting;
+    panel.broker_relations = settings.broker_relations;
+    panel.faction = standing_text(settings.faction_standing);
+    panel.corporation = standing_text(settings.corporation_standing);
+    panel.override_text = settings
+        .broker_override
+        .map(Rate::to_percent_string)
+        .unwrap_or_default();
+}
+
+/// The settings a read gives: Accounting and Broker Relations, and the Caldari State and Caldari
+/// Navy standings, with the broker override kept from `before`. A value EVE did not send is 0 or
+/// 0.00.
+fn fees_from(
+    skills: &CharacterSkills,
+    standings: &[NpcStanding],
+    before: FeeSettings,
+) -> FeeSettings {
+    FeeSettings {
+        accounting: level_of(skills, ACCOUNTING),
+        broker_relations: level_of(skills, BROKER_RELATIONS),
+        faction_standing: standing_of(standings, CALDARI_STATE, StandingFrom::Faction),
+        corporation_standing: standing_of(standings, CALDARI_NAVY, StandingFrom::NpcCorp),
+        broker_override: before.broker_override,
+    }
+}
+
+/// One skill's trained level, or 0 when the character has not trained it.
+fn level_of(skills: &CharacterSkills, skill: TypeId) -> u8 {
+    skills.levels.get(&skill).copied().unwrap_or(0)
+}
+
+/// The standing a given kind of entity gives, or 0.00 when there is none.
+fn standing_of(standings: &[NpcStanding], from_id: u32, from: StandingFrom) -> Standing {
+    standings
+        .iter()
+        .find(|standing| standing.from_id == from_id && standing.from == from)
+        .and_then(|standing| Standing::from_hundredths(standing.hundredths).ok())
+        .unwrap_or_default()
+}
+
+/// The notice for a read that failed. EVE's refusal tells the player to log in again and allow
+/// skills and standings; anything else shows the error itself.
+pub(super) fn read_error(name: &str, error: &EsiError) -> String {
+    if matches!(error, EsiError::Server(403) | EsiError::Denied(_)) {
+        format!("Could not read {name}: {REFUSED}")
+    } else {
+        format!("Could not read {name}: {error}")
+    }
+}
+
 fn draw(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
     let style = cx.style;
+    read_row(panel, ui, cx);
     ui.label(RichText::new(MUTE_LINE).color(style.mute));
     skill_field(ui, "Accounting", &mut panel.accounting);
     skill_field(ui, "Broker Relations", &mut panel.broker_relations);
@@ -229,9 +439,32 @@ pub(super) fn standing_text(standing: Standing) -> String {
 #[cfg(test)]
 mod tests {
     use mop_core::fees::Standing;
+    use mop_core::industry::TypeId;
     use mop_core::money::Rate;
+    use mop_esi::error::EsiError;
+    use mop_esi::skills::{CharacterSkills, NpcStanding, StandingFrom};
+    use mop_store::FeeSettings;
 
-    use super::{percent_text, standing_text};
+    use super::{fees_from, percent_text, read_error, standing_text};
+
+    fn skills(levels: &[(TypeId, u8)]) -> CharacterSkills {
+        CharacterSkills {
+            levels: levels.iter().copied().collect(),
+            total_sp: 21_000_000,
+        }
+    }
+
+    fn npc(from_id: u32, from: StandingFrom, hundredths: i16) -> NpcStanding {
+        NpcStanding {
+            from_id,
+            from,
+            hundredths,
+        }
+    }
+
+    fn standing(hundredths: i16) -> Standing {
+        Standing::from_hundredths(hundredths).unwrap()
+    }
 
     #[test]
     fn percentages_keep_two_to_four_decimals() {
@@ -248,5 +481,76 @@ mod tests {
         assert_eq!(text(523), "5.23");
         assert_eq!(text(-125), "-1.25");
         assert_eq!(text(0), "0.00");
+    }
+
+    #[test]
+    fn a_read_takes_the_two_skills_and_the_two_standings() {
+        let read = skills(&[(3_446, 5), (11_453, 4), (16_622, 4), (23_121, 3)]);
+        let standings = [
+            npc(500_001, StandingFrom::Faction, 523),
+            npc(1_000_035, StandingFrom::NpcCorp, -126),
+            npc(3_008_416, StandingFrom::Agent, 900),
+        ];
+        let before = FeeSettings {
+            broker_override: Some(Rate::from_ppm(15_000)),
+            ..FeeSettings::default()
+        };
+        assert_eq!(
+            fees_from(&read, &standings, before),
+            FeeSettings {
+                accounting: 4,
+                broker_relations: 5,
+                faction_standing: standing(523),
+                corporation_standing: standing(-126),
+                broker_override: Some(Rate::from_ppm(15_000)),
+            }
+        );
+    }
+
+    #[test]
+    fn a_read_without_the_fee_data_leaves_zero_and_keeps_the_override() {
+        let before = FeeSettings {
+            accounting: 2,
+            broker_relations: 3,
+            faction_standing: standing(100),
+            corporation_standing: standing(-200),
+            broker_override: Some(Rate::from_ppm(2_500)),
+        };
+        let standings = [
+            // A corporation standing from the faction's id is not the faction standing.
+            npc(500_001, StandingFrom::NpcCorp, 500),
+            npc(3_008_416, StandingFrom::Agent, 900),
+        ];
+        assert_eq!(
+            fees_from(&skills(&[]), &standings, before),
+            FeeSettings {
+                accounting: 0,
+                broker_relations: 0,
+                faction_standing: standing(0),
+                corporation_standing: standing(0),
+                broker_override: Some(Rate::from_ppm(2_500)),
+            }
+        );
+    }
+
+    #[test]
+    fn a_refused_read_says_to_log_in_again() {
+        assert_eq!(
+            read_error("Ana Tester", &EsiError::Server(403)),
+            "Could not read Ana Tester: EVE refused. Log in again and allow skills and standings."
+        );
+        assert_eq!(
+            read_error("Ana Tester", &EsiError::Denied("no scope".to_owned())),
+            "Could not read Ana Tester: EVE refused. Log in again and allow skills and standings."
+        );
+    }
+
+    #[test]
+    fn another_read_error_shows_the_error_itself() {
+        let error = EsiError::Network("timed out".to_owned());
+        assert_eq!(
+            read_error("Ana Tester", &error),
+            format!("Could not read Ana Tester: {error}")
+        );
     }
 }
