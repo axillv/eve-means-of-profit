@@ -3,7 +3,9 @@
 //! [`Style::apply`] maps the tokens onto egui's visuals. [`Style::row_fill`] gives the background
 //! of one table row. [`contrast`] is the WCAG ratio the design note's tests check.
 
-use egui::{Color32, Context, CornerRadius, Stroke, Theme, Visuals};
+use egui::{
+    Color32, Context, CornerRadius, FontFamily, FontId, Stroke, TextStyle, Theme, Visuals, vec2,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Style {
@@ -86,6 +88,28 @@ impl Style {
         widgets.active.bg_stroke = Stroke::new(1.0, self.accent);
         widgets.active.fg_stroke = Stroke::new(1.0, self.text);
         widgets.active.corner_radius = control;
+        style.text_styles = [
+            (
+                TextStyle::Small,
+                FontId::new(11.0, FontFamily::Proportional),
+            ),
+            (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
+            (
+                TextStyle::Button,
+                FontId::new(14.0, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Monospace,
+                FontId::new(13.0, FontFamily::Monospace),
+            ),
+            (
+                TextStyle::Heading,
+                FontId::new(18.0, FontFamily::Proportional),
+            ),
+        ]
+        .into();
+        style.spacing.interact_size.y = 24.0;
+        style.spacing.button_padding = vec2(8.0, 4.0);
         ctx.set_theme(Theme::Dark);
         ctx.set_global_style(style);
     }

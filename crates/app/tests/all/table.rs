@@ -7,8 +7,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use egui::{
-        Event, Id, Modifiers, MouseWheelUnit, OutputCommand, PointerButton, Pos2, TouchPhase, Ui,
-        Vec2, pos2, vec2,
+        Context, Event, Id, Modifiers, MouseWheelUnit, OutputCommand, PointerButton, Pos2,
+        TextStyle, TouchPhase, Ui, Vec2, pos2, vec2,
     };
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
@@ -745,5 +745,20 @@ mod tests {
                 .iter()
                 .any(|response| response.clicked == Some(4))
         );
+    }
+
+    #[test]
+    fn the_theme_sets_14_px_text_and_24_px_controls() {
+        let ctx = Context::default();
+        Style::eve_dense().apply(&ctx);
+        let style = ctx.global_style();
+        let size = |text: TextStyle| style.text_styles[&text].size;
+        assert_eq!(size(TextStyle::Body), 14.0);
+        assert_eq!(size(TextStyle::Button), 14.0);
+        assert_eq!(size(TextStyle::Small), 11.0);
+        assert_eq!(size(TextStyle::Monospace), 13.0);
+        assert_eq!(size(TextStyle::Heading), 18.0);
+        assert_eq!(style.spacing.interact_size.y, 24.0);
+        assert_eq!(style.spacing.button_padding, vec2(8.0, 4.0));
     }
 }

@@ -127,10 +127,20 @@ fn tooltip<S>(harness: &mut Harness<'_, S>, before: &[String]) -> Vec<String> {
 /// Scrolls to the first node labelled `label`, hovers it, and returns the tooltip it shows.
 pub(crate) fn hover<S>(harness: &mut Harness<'_, S>, label: &str) -> Vec<String> {
     first(harness, label).scroll_to_me();
-    harness.step();
-    let before = labels(harness);
-    first(harness, label).hover();
-    tooltip(harness, &before)
+    // Scrolling and the tooltip's own layout can move the node in the frame the pointer arrives,
+    // which leaves the pointer over whatever slid under it (at 14 px, the line below). Only trust
+    // a tooltip read when the node stayed where it was hovered.
+    harness.run();
+    for _ in 0..4 {
+        let before = labels(harness);
+        let rect = first(harness, label).rect();
+        harness.hover_at(rect.center());
+        let tip = tooltip(harness, &before);
+        if first(harness, label).rect() == rect {
+            return tip;
+        }
+    }
+    Vec::new()
 }
 
 /// Moves the pointer to `at` and returns the tooltip it shows.

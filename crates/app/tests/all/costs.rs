@@ -455,7 +455,8 @@ mod tests {
 
     /// The nodes of the Steps row labelled `row`, left to right: position and text, empty cells
     /// left out. The table is wider than its panel, so cells reach past the Buy list's edge; the
-    /// row ends where the x-position falls back.
+    /// row ends where the x-position falls back. Nodes without text (the row's own click area and
+    /// the cells' frames) do not count as a fallback.
     fn row_nodes(harness: &Harness<'_, App>, row: &str) -> Vec<(egui::Rect, String)> {
         let edge = steps_edge(harness);
         let y = steps_y(harness, row);
@@ -470,6 +471,12 @@ mod tests {
         let mut found = Vec::new();
         let mut last = f32::MIN;
         for (rect, value) in &nodes[start..] {
+            let Some(value) = value else {
+                continue;
+            };
+            if value.is_empty() {
+                continue;
+            }
             if (rect.center().y - y).abs() >= 4.0 {
                 continue;
             }
@@ -477,11 +484,7 @@ mod tests {
                 break;
             }
             last = rect.min.x;
-            if let Some(value) = value
-                && !value.is_empty()
-            {
-                found.push((*rect, value.clone()));
-            }
+            found.push((*rect, value.clone()));
         }
         found
     }

@@ -15,7 +15,7 @@ mod tests {
     use std::time::Duration;
 
     use egui::accesskit::Role;
-    use egui::{Event, Id, Key, Modifiers, MouseWheelUnit, OutputCommand, TouchPhase, vec2};
+    use egui::{Event, Id, Key, Modifiers, MouseWheelUnit, OutputCommand, TouchPhase, Vec2, vec2};
     use egui_kittest::kittest::{NodeT, Queryable, by};
     use egui_kittest::{Harness, SnapshotResults};
     use eve_means_of_profit::build::prices::Prices;
@@ -393,6 +393,11 @@ mod tests {
 
     /// `start` in a window `width` points wide.
     fn start_sized(env: &Env, world: &World, width: f32) -> Harness<'static, App> {
+        start_window(env, world, vec2(width, 800.0))
+    }
+
+    /// `start` in a window of `size`: the Buy list needs the room at 14 px text.
+    fn start_window(env: &Env, world: &World, size: Vec2) -> Harness<'static, App> {
         let clock = Arc::clone(&world.now);
         let config = AppConfig {
             data_dir: env.data.clone(),
@@ -406,7 +411,7 @@ mod tests {
             state: Arc::clone(&world.forge),
         })));
         let mut harness = Harness::builder()
-            .with_size(vec2(width, 800.0))
+            .with_size(size)
             .with_max_steps(crate::SETTLE_STEPS)
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
         harness.state_mut().shared_mut().market = market;
@@ -899,7 +904,7 @@ mod tests {
             forge.lines.retain(|line| line.type_id != 9848);
         }
         let env = make_env(&standard_services());
-        let mut harness = start(&env, &world);
+        let mut harness = start_window(&env, &world, vec2(1280.0, 1000.0));
         harness.run();
         buy_list_for(&mut harness);
         settle(&mut harness, "only 4 on market");
@@ -937,7 +942,7 @@ mod tests {
         let world = World::new();
         lock(&world.forge).published = NOW - 21_601;
         let env = make_env(&standard_services());
-        let mut harness = start(&env, &world);
+        let mut harness = start_window(&env, &world, vec2(1280.0, 1000.0));
         harness.run();
         buy_list_for(&mut harness);
         settle(&mut harness, "Oldest: 6h");
@@ -1024,6 +1029,10 @@ mod tests {
         let mut harness = aged_list(&world, 172_800, "2d old");
         let text = "Oldest: 2d · Prices over a day old: refresh before you buy.";
         settle(&mut harness, text);
+        // The line sits below an 800 px window at the 14 px metrics; the colour is only on screen
+        // once it is scrolled into view.
+        harness.get_by_label(text).scroll_to_me();
+        harness.run();
         let old = harness.get_by_label(text).rect();
         assert!(coloured(&mut harness, old));
 

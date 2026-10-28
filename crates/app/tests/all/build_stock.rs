@@ -266,6 +266,11 @@ mod tests {
     }
 
     fn start(env: &Env, eve: FakeEve) -> Harness<'static, App> {
+        start_sized(env, eve, 800.0)
+    }
+
+    /// `start` in a window `height` points tall: the Plan panel needs the room at 14 px text.
+    fn start_sized(env: &Env, eve: FakeEve, height: f32) -> Harness<'static, App> {
         let config = AppConfig {
             data_dir: env.data.clone(),
             cache_dir: env.cache.clone(),
@@ -275,7 +280,7 @@ mod tests {
             market: Box::new(crate::offline::Offline),
         };
         let mut harness = Harness::builder()
-            .with_size(vec2(1900.0, 800.0))
+            .with_size(vec2(1900.0, height))
             .with_max_steps(crate::SETTLE_STEPS)
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
         harness.state_mut().shared_mut().market = Arc::new(Prices::new(Box::new(EmptyForge)));
@@ -510,7 +515,7 @@ mod tests {
             characters: vec![character(MAIN, "Main"), character(ALT, "Alt")],
             jeve: Some(jeve.path().to_path_buf()),
         };
-        let mut harness = start(&env, eve);
+        let mut harness = start_sized(&env, eve, 1100.0);
         make_plan(&mut harness);
 
         pick(&mut harness, "Pasted", "From characters");
@@ -578,7 +583,7 @@ mod tests {
             characters: vec![character(MAIN, "Main"), character(ALT, "Alt")],
             jeve: Some(jeve.path().to_path_buf()),
         };
-        let mut harness = start(&env, eve.clone());
+        let mut harness = start_sized(&env, eve.clone(), 1100.0);
         make_plan(&mut harness);
         pick(&mut harness, "Pasted", "From characters");
         click_box(&mut harness, Role::CheckBox, "Hauler (jEve)");
@@ -586,7 +591,7 @@ mod tests {
         click_box(&mut harness, Role::CheckBox, JITA_LABEL);
         drop(harness);
 
-        let mut restarted = start(&env, eve);
+        let mut restarted = start_sized(&env, eve, 1100.0);
         click(&mut restarted, "Hobgoblin 300");
         assert!(ticked(&restarted, "Main"));
         assert!(ticked(&restarted, "Alt (jEve)"));
