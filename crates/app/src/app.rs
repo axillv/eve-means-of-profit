@@ -224,7 +224,6 @@ pub struct App {
     characters_dock: DockState<CharactersPanel>,
     setup_page: SetupPage,
     setup_dock: DockState<SetupPanel>,
-    settings_open: bool,
     /// The saved interface size, shown as the zoom factor.
     interface_size: InterfaceSize,
     /// Whether the saved industry data has been read.
@@ -327,7 +326,6 @@ impl App {
             characters_dock: dock::characters_layout(),
             setup_page: SetupPage,
             setup_dock: dock::setup_layout(),
-            settings_open: false,
             interface_size: settings.interface_size,
             industry_loaded: false,
             industry_timing: IndustryTimings::default(),
@@ -361,7 +359,7 @@ impl App {
             self.shared.notices.push(Notice::error(error));
         }
         if ui.input_mut(|input| input.consume_key(Modifiers::CTRL, Key::Comma)) {
-            self.settings_open = true;
+            self.page = Page::Setup;
         }
         self.zoom_with_keys(ui);
         self.menu_bar(ui);
@@ -385,10 +383,7 @@ impl App {
             | Startup::Cancelled
             | Startup::Failed(_) => self.first_run_screen(ui),
         }
-        let ctx = ui.ctx().clone();
-        let data_dir = self.shared.data_dir.clone();
-        settings_window::show(&ctx, &mut self.settings_open, &mut self.shared, &data_dir);
-        table::sync_sorts(&ctx, &mut self.shared);
+        table::sync_sorts(&ui.ctx().clone(), &mut self.shared);
     }
 
     /// Steps the interface size with Ctrl +, Ctrl − and Ctrl 0, then saves it. At 200% Ctrl +
@@ -427,7 +422,7 @@ impl App {
                 });
                 ui.menu_button("View", |ui| {
                     if ui.button("Settings…").clicked() {
-                        self.settings_open = true;
+                        self.page = Page::Setup;
                         ui.close();
                     }
                 });

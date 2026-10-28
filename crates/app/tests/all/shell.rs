@@ -11,7 +11,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use egui::{Event, Key, Modifiers, PointerButton, Pos2, vec2};
+    use egui::{Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, TouchPhase, vec2};
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
     use eve_means_of_profit::rail::Page;
@@ -189,7 +189,7 @@ mod tests {
         }
 
         /// A folder with the same name every run, for the screenshots: the data folder shows in the
-        /// settings window, so a random name would change the picture.
+        /// settings page, so a random name would change the picture.
         fn fixed() -> Self {
             let root = std::env::temp_dir().join("eve-means-of-profit-shell-snapshots");
             drop(fs::remove_dir_all(&root));
@@ -289,6 +289,19 @@ mod tests {
         }
     }
 
+    /// Scrolls the Display panel with the pointer held at `at`, by `delta` points down (negative)
+    /// or up (positive). The controls at the bottom of the panel need it.
+    fn scroll_display(harness: &mut Harness<'_, App>, at: Pos2, delta: f32) {
+        harness.hover_at(at);
+        harness.event(Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: vec2(0.0, delta),
+            phase: TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(20);
+    }
+
     fn build_page_shown(harness: &Harness<'_, App>) -> bool {
         ["Plans", "Pasted stock", "Plan", "Steps", "Buy list"]
             .iter()
@@ -310,6 +323,22 @@ mod tests {
     fn saved_rail_icons_only(folders: &Folders) -> bool {
         let mut store = Store::open(&folders.user_db(), NOW).unwrap().store;
         store.settings().unwrap().rail_icons_only
+    }
+
+    /// The text put on the clipboard by the frame just drawn, if any.
+    fn copied_text(harness: &Harness<'_, App>) -> Option<String> {
+        harness
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|command| {
+                if let egui::OutputCommand::CopyText(text) = command {
+                    Some(text.clone())
+                } else {
+                    None
+                }
+            })
     }
 
     /// The top edge of the first node labelled `label`, to check what is above what.
@@ -639,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_comma_opens_settings_and_a_density_is_saved() {
+    fn ctrl_comma_opens_the_settings_page_and_a_density_is_saved() {
         let folders = Folders::new();
         folders.install_game_data();
         folders.set_last_check(990_000);
@@ -647,7 +676,7 @@ mod tests {
         until(&mut harness, "the build pages", build_page_shown);
 
         harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
-        until(&mut harness, "the settings window", |h| {
+        until(&mut harness, "the settings page", |h| {
             shown(h, "Interface size")
         });
         harness.get_by_label("Dense").click();
@@ -658,14 +687,88 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_window_shows_the_interface_sizes_and_the_density_names() {
+    fn ctrl_comma_and_the_view_menu_open_the_settings_page() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(990_000);
+        let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
+        until(&mut harness, "the build pages", build_page_shown);
+
+        harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
+        until(&mut harness, "the settings page", |h| {
+            shown(h, "Facilities") && shown(h, "Price history") && shown(h, "Display")
+        });
+        assert!(
+            top_of(&harness, "Facilities") < top_of(&harness, "Price history")
+                && top_of(&harness, "Price history") < top_of(&harness, "Display"),
+            "the three panels sit down the left in that order"
+        );
+        assert_eq!(
+            harness
+                .query_all_by_role_and_label(egui::accesskit::Role::Window, "Settings")
+                .count(),
+            0,
+            "no Settings window opens"
+        );
+
+        harness.get_by_label("Build").click();
+        until(&mut harness, "the build pages again", build_page_shown);
+        harness.get_by_label("View").click();
+        until(&mut harness, "the View menu", |h| shown(h, "Settings…"));
+        harness.get_by_label("Settings…").click();
+        until(&mut harness, "the settings page from the menu", |h| {
+            shown(h, "Facilities") && shown(h, "Price history") && shown(h, "Display")
+        });
+        assert!(
+            top_of(&harness, "Facilities") < top_of(&harness, "Price history")
+                && top_of(&harness, "Price history") < top_of(&harness, "Display"),
+            "the menu opens the same page with the panels in that order"
+        );
+        assert_eq!(
+            harness
+                .query_all_by_role_and_label(egui::accesskit::Role::Window, "Settings")
+                .count(),
+            0,
+            "the menu opens no Settings window"
+        );
+    }
+
+    #[test]
+    fn ctrl_comma_on_the_first_run_screen_opens_no_settings_page_or_window() {
+        let folders = Folders::new();
+        let mut harness = start(Fake::new(Latest::Status(503)), &folders);
+        until(&mut harness, "the error text", |h| {
+            shown(
+                h,
+                "Could not get the game data: the server answered with status 503",
+            )
+        });
+
+        harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
+        settle(&mut harness);
+        assert!(
+            !shown(&harness, "Facilities"),
+            "the Settings page stays away"
+        );
+        assert!(!shown(&harness, "Price history"));
+        assert_eq!(
+            harness
+                .query_all_by_role_and_label(egui::accesskit::Role::Window, "Settings")
+                .count(),
+            0,
+            "no Settings window opens"
+        );
+    }
+
+    #[test]
+    fn the_settings_page_shows_the_interface_sizes_and_the_density_names() {
         let folders = Folders::new();
         folders.install_game_data();
         folders.set_last_check(990_000);
         let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
         until(&mut harness, "the build pages", build_page_shown);
         harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
-        until(&mut harness, "the settings window", |h| {
+        until(&mut harness, "the settings page", |h| {
             shown(h, "Interface size")
         });
 
@@ -698,7 +801,7 @@ mod tests {
         let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
         until(&mut harness, "the build pages", build_page_shown);
         harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
-        until(&mut harness, "the settings window", |h| {
+        until(&mut harness, "the settings page", |h| {
             shown(h, "Interface size")
         });
 
@@ -713,6 +816,38 @@ mod tests {
     }
 
     #[test]
+    fn the_settings_page_saves_150_percent_and_copies_the_data_folder_path() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(990_000);
+        let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
+        until(&mut harness, "the build pages", build_page_shown);
+        harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
+        until(&mut harness, "the settings page", |h| {
+            shown(h, "Interface size")
+        });
+
+        harness.get_by_label("150%").click();
+        settle(&mut harness);
+        assert!(
+            (zoom(&harness) - 1.5).abs() < 0.001,
+            "the click zooms to 150%"
+        );
+        assert_eq!(saved_size(&folders), InterfaceSize::P150);
+
+        // The Display panel is scrollable and Copy path sits at its bottom.
+        let at = harness.get_by_label("Interface size").rect().center();
+        scroll_display(&mut harness, at, -250.0);
+        harness.get_by_label("Copy path").click();
+        harness.run_steps(1);
+        assert_eq!(
+            copied_text(&harness),
+            Some(folders.data.display().to_string()),
+            "Copy path copies the data folder"
+        );
+    }
+
+    #[test]
     fn a_saved_interface_size_is_the_selected_settings_choice() {
         let folders = Folders::new();
         folders.install_game_data();
@@ -721,7 +856,7 @@ mod tests {
         let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
         until(&mut harness, "the build pages", build_page_shown);
         harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
-        until(&mut harness, "the settings window", |h| {
+        until(&mut harness, "the settings page", |h| {
             shown(h, "Interface size")
         });
 
@@ -730,14 +865,14 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_window_shows_the_rail_choices_below_the_density() {
+    fn the_settings_page_shows_the_rail_choices_below_the_density() {
         let folders = Folders::new();
         folders.install_game_data();
         folders.set_last_check(990_000);
         let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
         until(&mut harness, "the build pages", build_page_shown);
         harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
-        until(&mut harness, "the settings window", |h| {
+        until(&mut harness, "the settings page", |h| {
             shown(h, "Interface size")
         });
 
@@ -769,11 +904,13 @@ mod tests {
         let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
         until(&mut harness, "the build pages", build_page_shown);
         harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
-        until(&mut harness, "the settings window", |h| {
+        until(&mut harness, "the settings page", |h| {
             shown(h, "Interface size")
         });
         assert!(harness.get_by_label("Build").rect().width() > 48.0);
 
+        let at = harness.get_by_label("Interface size").rect().center();
+        scroll_display(&mut harness, at, -250.0);
         harness.get_by_label("Icons only").click();
         settle(&mut harness);
         assert!(
@@ -786,7 +923,9 @@ mod tests {
             "the icons-only Build entry is at most 48 px wide"
         );
 
-        harness.get_by_label("Icons and labels").click();
+        let at = harness.get_by_label("Copy path").rect().center();
+        scroll_display(&mut harness, at, 250.0);
+        harness.get_by_label("Icons and labels").click_accesskit();
         settle(&mut harness);
         assert!(
             !saved_rail_icons_only(&folders),
@@ -928,10 +1067,17 @@ mod tests {
         harness.get_by_label("Build").click();
         until(&mut harness, "the build pages again", build_page_shown);
         harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
-        until(&mut harness, "the settings window", |h| {
-            shown(h, "Settings")
+        until(&mut harness, "the settings page", |h| {
+            shown(h, "Facilities") && shown(h, "Price history") && shown(h, "Display")
         });
         settle(&mut harness);
+        assert_eq!(
+            harness
+                .query_all_by_role_and_label(egui::accesskit::Role::Window, "Settings")
+                .count(),
+            0,
+            "the Settings page stands in for the window"
+        );
         harness.snapshot("shell-settings");
     }
 
