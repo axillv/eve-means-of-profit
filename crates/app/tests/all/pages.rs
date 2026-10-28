@@ -381,7 +381,10 @@ mod tests {
             ("Assets", &["Places", "Assets", "Item"]),
             ("Net worth", &["Net worth", "By character", "Right now"]),
             ("Characters", &["Characters", "jEve data"]),
-            ("Setup", &["Facilities", "Freight services", "Price rule"]),
+            (
+                "Settings",
+                &["Facilities", "Freight services", "Price rule"],
+            ),
         ];
         for (page, panels) in pages {
             rail(&mut harness, page);
@@ -406,6 +409,30 @@ mod tests {
         rail(&mut harness, "Build");
         for panel in ["Plans", "Pasted stock", "Plan", "Steps", "Buy list", "Item"] {
             assert_eq!(harness.query_all_by_label(panel).count(), 1, "{panel}");
+        }
+    }
+
+    #[test]
+    fn the_last_rail_entry_is_settings_and_shows_the_settings_panels() {
+        let env = env();
+        let mut harness = start(&env, FakeEve::new(Vec::new(), None), NOW);
+        loaded(&mut harness);
+        assert_eq!(Page::ALL.last().map(|page| page.label()), Some("Settings"));
+        let left = rail_left(&harness);
+        let settings: Vec<Rect> = harness
+            .query_all_by_label("Settings")
+            .filter(|node| (node.rect().min.x - left).abs() < 1.0)
+            .map(|node| node.rect())
+            .collect();
+        assert_eq!(settings.len(), 1, "Settings is on the rail exactly once");
+        assert!(
+            harness.query_all_by_label("Setup").next().is_none(),
+            "no entry is labelled Setup"
+        );
+
+        rail(&mut harness, "Settings");
+        for panel in ["Facilities", "Freight services", "Price rule"] {
+            assert!(shown(&harness, panel), "{panel} is shown");
         }
     }
 
@@ -437,7 +464,7 @@ mod tests {
             "Assets",
             "Net worth",
             "Characters",
-            "Setup",
+            "Settings",
         ];
         let entries: Vec<Rect> = labels
             .iter()
@@ -521,7 +548,7 @@ mod tests {
             "Assets",
             "Net worth",
             "Characters",
-            "Setup",
+            "Settings",
         ];
         assert_eq!(rail_labels(&labelled), expected);
         assert_eq!(

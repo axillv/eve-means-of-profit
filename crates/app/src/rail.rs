@@ -42,7 +42,7 @@ impl Page {
             Self::Orders => "Orders",
             Self::Jobs => "Industry jobs",
             Self::Characters => "Characters",
-            Self::Setup => "Setup",
+            Self::Setup => "Settings",
         }
     }
 
