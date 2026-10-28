@@ -128,7 +128,17 @@ pub(crate) fn label_rows(ui: &Ui, label: &str, width: f32) -> Vec<String> {
 
 /// Draws the rail. A click on an entry makes it the page on show.
 pub fn show(ui: &mut Ui, style: &Style, page: &mut Page) {
-    let width = rail_width(ui);
+    show_with(ui, style, page, false);
+}
+
+/// Draws the rail, with either each entry's icon and label or, when `icons_only`, the icon alone
+/// and the label as hover text.
+pub fn show_with(ui: &mut Ui, style: &Style, page: &mut Page, icons_only: bool) {
+    let width = if icons_only {
+        style.rail_narrow
+    } else {
+        rail_width(ui)
+    };
     let content_width = width
         - egui::Frame::side_top_panel(ui.style())
             .total_margin()
@@ -140,42 +150,70 @@ pub fn show(ui: &mut Ui, style: &Style, page: &mut Page) {
         .exact_size(width)
         .resizable(false)
         .show(ui, |ui| {
-            for entry in Page::ALL {
-                if entry.starts_group() {
-                    ui.add_space(GROUP_SPACE);
-                    let (line, _) =
-                        ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
-                    ui.painter().hline(
-                        line.x_range(),
-                        line.center().y,
-                        Stroke::new(1.0, style.line),
-                    );
-                    ui.add_space(GROUP_SPACE);
-                }
-
-                let (fill, text) = if *page == entry {
-                    (style.accent, style.on_accent)
-                } else {
-                    (style.row, style.text)
-                };
-                let label = label_rows(ui, entry.label(), label_width).join("\n");
-                let button = Button::new((
-                    RichText::new(entry.icon()).color(text),
-                    RichText::new(label).color(text),
-                ))
-                .fill(fill)
-                .corner_radius(style.control_radius)
-                .wrap_mode(TextWrapMode::Extend)
-                .min_size(vec2(content_width, 40.0));
-                let response = ui.add(button);
-                response.widget_info(|| {
-                    WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), entry.label())
+            if icons_only {
+                ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                    entries(ui, style, page, content_width, label_width, true);
                 });
-                if response.clicked() {
-                    *page = entry;
-                }
+            } else {
+                entries(ui, style, page, content_width, label_width, false);
             }
         });
+}
+
+/// Draws every entry, in [`Page::ALL`] order, with the group lines above the entries that start a
+/// group.
+fn entries(
+    ui: &mut Ui,
+    style: &Style,
+    page: &mut Page,
+    content_width: f32,
+    label_width: f32,
+    icons_only: bool,
+) {
+    for entry in Page::ALL {
+        if entry.starts_group() {
+            ui.add_space(GROUP_SPACE);
+            let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+            ui.painter().hline(
+                line.x_range(),
+                line.center().y,
+                Stroke::new(1.0, style.line),
+            );
+            ui.add_space(GROUP_SPACE);
+        }
+
+        let (fill, text) = if *page == entry {
+            (style.accent, style.on_accent)
+        } else {
+            (style.row, style.text)
+        };
+        let button = if icons_only {
+            Button::new(RichText::new(entry.icon()).color(text))
+        } else {
+            let label = label_rows(ui, entry.label(), label_width).join("\n");
+            Button::new((
+                RichText::new(entry.icon()).color(text),
+                RichText::new(label).color(text),
+            ))
+        };
+        let button = button
+            .fill(fill)
+            .corner_radius(style.control_radius)
+            .wrap_mode(TextWrapMode::Extend)
+            .min_size(vec2(content_width, 40.0));
+        let response = ui.add(button);
+        response.widget_info(|| {
+            WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), entry.label())
+        });
+        let response = if icons_only {
+            response.on_hover_text(entry.label())
+        } else {
+            response
+        };
+        if response.clicked() {
+            *page = entry;
+        }
+    }
 }
 
 #[cfg(test)]

@@ -18,7 +18,9 @@ mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
     use eve_means_of_profit::build::prices::Prices;
+    use eve_means_of_profit::rail::{self, Page};
     use eve_means_of_profit::session::{EveAccess, PendingLogin};
+    use eve_means_of_profit::theme::Style;
     use eve_means_of_profit::{App, AppConfig};
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -476,6 +478,83 @@ mod tests {
                 "{above} to {below} is a group gap"
             );
         }
+    }
+
+    /// A plain harness that draws only the rail, with `show_with` and either its labels or its
+    /// icons.
+    fn rail_only(icons_only: bool) -> Harness<'static, Page> {
+        let style = Style::eve_dense();
+        Harness::builder()
+            .with_size(vec2(400.0, 800.0))
+            .build_ui_state(
+                move |ui, page| {
+                    style.apply(ui.ctx());
+                    rail::show_with(ui, &style, page, icons_only);
+                },
+                Page::Build,
+            )
+    }
+
+    /// The rail's labels, top to bottom.
+    fn rail_labels(harness: &Harness<'_, Page>) -> Vec<&'static str> {
+        let mut labels: Vec<(&'static str, f32)> = Page::ALL
+            .iter()
+            .map(|page| {
+                (
+                    page.label(),
+                    harness.get_by_label(page.label()).rect().top(),
+                )
+            })
+            .collect();
+        labels.sort_by(|left, right| left.1.total_cmp(&right.1));
+        labels.into_iter().map(|(label, _)| label).collect()
+    }
+
+    #[test]
+    fn the_icons_only_rail_is_narrow_and_lists_the_pages_in_the_same_order() {
+        let labelled = rail_only(false);
+        let icons = rail_only(true);
+        let expected = [
+            "Build",
+            "Industry jobs",
+            "Orders",
+            "Assets",
+            "Net worth",
+            "Characters",
+            "Setup",
+        ];
+        assert_eq!(rail_labels(&labelled), expected);
+        assert_eq!(
+            rail_labels(&icons),
+            expected,
+            "icons-only keeps the labels' order"
+        );
+        for label in expected {
+            let rect = icons.get_by_label(label).rect();
+            assert!(
+                rect.width() <= 48.0,
+                "{label} is at most 48 px wide, not {}",
+                rect.width()
+            );
+        }
+    }
+
+    #[test]
+    fn hovering_an_icons_only_entry_shows_its_label() {
+        let mut harness = rail_only(true);
+        let tip = crate::ui::hover(&mut harness, "Orders");
+        assert!(
+            tip.iter().any(|text| text == "Orders"),
+            "Orders is its hover text: {tip:?}"
+        );
+    }
+
+    #[test]
+    fn clicking_an_icons_only_entry_shows_its_page() {
+        let mut harness = rail_only(true);
+        harness.get_by_label("Net worth").click();
+        harness.run();
+        assert_eq!(*harness.state(), Page::NetWorth);
     }
 
     #[test]
