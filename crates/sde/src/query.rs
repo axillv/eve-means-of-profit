@@ -255,6 +255,17 @@ impl Sde {
         }
         Ok(book)
     }
+
+    /// Every imported recipe as `(product, blueprint)`, by product, one row each.
+    pub fn product_blueprints(&self) -> Result<Vec<(TypeId, TypeId)>, SdeError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT product_id, blueprint_id FROM recipes ORDER BY product_id")?;
+        let pairs = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(pairs)
+    }
 }
 
 fn item_from_row(row: &Row<'_>) -> rusqlite::Result<Item> {

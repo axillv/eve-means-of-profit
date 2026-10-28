@@ -1,5 +1,6 @@
 //! Core logic: game data, prices and calculations. No UI.
 
+pub mod blueprint_offers;
 pub mod buylist;
 pub mod decimal;
 pub mod fees;

@@ -404,6 +404,25 @@ mod tests {
     }
 
     #[test]
+    fn product_blueprints_lists_each_product_with_its_blueprint() {
+        let (_dir, sde) = imported();
+        let pairs = sde.product_blueprints().unwrap();
+        assert_eq!(pairs.len(), 12);
+        assert_eq!(pairs.first(), Some(&(587, 691)));
+        assert_eq!(pairs.last(), Some(&(16672, 46207)));
+        assert!(pairs.contains(&(2454, 2455)));
+        assert!(pairs.contains(&(2456, 2457)));
+        assert!(!pairs.contains(&(16672, 45732)));
+        assert_eq!(
+            pairs
+                .iter()
+                .filter(|(product, _)| *product == 16672)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn a_failed_import_keeps_the_old_database() {
         let dir = TempDir::new().unwrap();
         let db = dir.path().join("sde.db");
