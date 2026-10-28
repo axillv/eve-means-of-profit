@@ -1,25 +1,16 @@
-//! The Settings controls: the interface size, the market density and the rail's look (all saved at
-//! once), and the data folder.
+//! The Settings page's Display panel: the interface size, the market density and the rail's look
+//! (all saved at once), and the data folder.
 
 use std::path::Path;
 
-use egui::{Context, Ui, Window};
+use egui::Ui;
 use mop_store::{Density, InterfaceSize};
 
 use crate::Shared;
 
-/// Shows the window while `open` is set.
-pub fn show(ctx: &Context, open: &mut bool, shared: &mut Shared, data_dir: &Path) {
-    Window::new("Settings")
-        .open(open)
-        .collapsible(false)
-        .resizable(false)
-        .show(ctx, |ui| show_body(ui, shared, data_dir));
-}
-
 /// Draws every Settings control. Choosing an interface size, a density or a rail look saves it at
-/// once. The Settings page panel (M1-117) draws this too.
-pub fn show_body(ui: &mut Ui, shared: &mut Shared, data_dir: &Path) {
+/// once.
+pub fn show(ui: &mut Ui, shared: &mut Shared, data_dir: &Path) {
     ui.label("Interface size");
     let mut size = zoomed_size(ui.ctx().zoom_factor());
     ui.horizontal(|ui| {

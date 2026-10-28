@@ -67,7 +67,7 @@ pub fn show(_page: &mut SetupPage, panel: SetupPanel, ui: &mut Ui, cx: &mut Shar
         SetupPanel::Display => {
             let data_dir = cx.data_dir.clone();
             egui::ScrollArea::vertical().show(ui, |ui| {
-                settings_window::show_body(ui, cx, &data_dir);
+                settings_window::show(ui, cx, &data_dir);
             });
         }
     }
