@@ -16,6 +16,8 @@ use crate::schema::{activity_from_name, activity_name};
 pub(crate) const ENGINEERING_COMPLEX_GROUP: u32 = 1404;
 /// The group of refineries: reactions only, in low or null security.
 pub(crate) const REFINERY_GROUP: u32 = 1406;
+/// The capital ship groups: hulls need a capital shipyard.
+const CAPITAL_SHIP_GROUPS: [u32; 6] = [30, 485, 547, 659, 883, 1538];
 /// The most rigs one structure takes.
 const MAX_RIGS: usize = 3;
 
@@ -30,6 +32,33 @@ pub enum Security {
 pub enum StructureKind {
     EngineeringComplex,
     Refinery,
+}
+
+/// What a product needs of a facility before a job can be started there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FacilityNeed {
+    Manufacturing,
+    Reaction,
+    CapitalHull,
+}
+
+impl FacilityNeed {
+    /// The need of `group_id` built by `activity`: a capital hull needs a capital shipyard.
+    pub fn of(activity: Activity, group_id: u32) -> Self {
+        match activity {
+            Activity::Reaction => Self::Reaction,
+            Activity::Manufacturing if CAPITAL_SHIP_GROUPS.contains(&group_id) => Self::CapitalHull,
+            Activity::Manufacturing => Self::Manufacturing,
+        }
+    }
+
+    /// The activity a job of this need runs under.
+    fn activity(self) -> Activity {
+        match self {
+            Self::Manufacturing | Self::CapitalHull => Activity::Manufacturing,
+            Self::Reaction => Activity::Reaction,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -310,6 +339,42 @@ impl Sde {
         activity: Activity,
     ) -> Result<(), FacilityError> {
         self.setup(facility, activity).map(|_| ())
+    }
+
+    /// Whether `facility` can house a capital shipyard: a large or XL engineering complex outside
+    /// high security, which is the app's proxy for one with the capital shipyard service fitted.
+    pub fn capital_shipyard(&self, facility: &Facility) -> Result<bool, SdeError> {
+        let Some(id) = facility.structure else {
+            return Ok(false);
+        };
+        let Some(info) = self.structure_info(id)? else {
+            return Ok(false);
+        };
+        Ok(info.kind == StructureKind::EngineeringComplex
+            && matches!(info.rig_size, 3 | 4)
+            && facility.security != Security::High)
+    }
+
+    /// Whether one of `facilities` can build a product that needs `need`.
+    ///
+    /// A facility that does not pass the checks is skipped. An `Sde` error is returned.
+    pub fn can_build(
+        &self,
+        facilities: &[Facility],
+        need: FacilityNeed,
+    ) -> Result<bool, FacilityError> {
+        for facility in facilities {
+            match self.check_facility(facility, need.activity()) {
+                Ok(()) => {}
+                Err(FacilityError::Sde(error)) => return Err(FacilityError::Sde(error)),
+                Err(_) => continue,
+            }
+            if need == FacilityNeed::CapitalHull && !self.capital_shipyard(facility)? {
+                continue;
+            }
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// Checks in order: the structure, the activity and security, the rig count, then each rig.

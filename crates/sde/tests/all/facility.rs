@@ -7,7 +7,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use mop_core::industry::{Activity, IndustryError, Modifier, job_quantity};
-    use mop_sde::facility::{Facility, FacilityError, Rig, Security, Structure, StructureKind};
+    use mop_sde::facility::{
+        Facility, FacilityError, FacilityNeed, Rig, Security, Structure, StructureKind,
+    };
     use mop_sde::{Sde, SdeError, import};
     use rusqlite::Connection;
     use serde_json::{Value, json};
@@ -614,5 +616,120 @@ mod tests {
             manufacturing(&sde, &set, PARTICLE_ACCELERATOR, 10),
             "0.8460936"
         );
+    }
+
+    #[test]
+    fn a_need_follows_the_activity_and_the_capital_hull_groups() {
+        for group_id in [30, 485, 547, 659, 883, 1538] {
+            assert_eq!(
+                FacilityNeed::of(Activity::Manufacturing, group_id),
+                FacilityNeed::CapitalHull
+            );
+        }
+        for group_id in [25, 513, 902, 941, 1404] {
+            assert_eq!(
+                FacilityNeed::of(Activity::Manufacturing, group_id),
+                FacilityNeed::Manufacturing
+            );
+        }
+        assert_eq!(
+            FacilityNeed::of(Activity::Reaction, 485),
+            FacilityNeed::Reaction
+        );
+    }
+
+    #[test]
+    fn a_capital_shipyard_is_a_large_engineering_complex_outside_high_security() {
+        let (_dir, sde) = imported();
+        let raitaru = |security| facility(Some(RAITARU), security, &[]);
+        let azbel = |security| facility(Some(AZBEL), security, &[]);
+        let sotiyo = |security| facility(Some(SOTIYO), security, &[]);
+
+        for security in [Security::High, Security::Low, Security::Null] {
+            assert!(!sde.capital_shipyard(&raitaru(security)).unwrap());
+        }
+        assert!(!sde.capital_shipyard(&azbel(Security::High)).unwrap());
+        assert!(sde.capital_shipyard(&azbel(Security::Low)).unwrap());
+        assert!(sde.capital_shipyard(&azbel(Security::Null)).unwrap());
+        assert!(!sde.capital_shipyard(&sotiyo(Security::High)).unwrap());
+        assert!(sde.capital_shipyard(&sotiyo(Security::Low)).unwrap());
+        assert!(
+            !sde.capital_shipyard(&facility(Some(ATHANOR), Security::Low, &[]))
+                .unwrap()
+        );
+        assert!(
+            !sde.capital_shipyard(&facility(None, Security::High, &[]))
+                .unwrap()
+        );
+        assert!(
+            !sde.capital_shipyard(&facility(Some(NOT_A_STRUCTURE), Security::Null, &[]))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn can_build_finds_a_facility_that_offers_the_activity() {
+        let (_dir, sde) = imported();
+        let npc_high = facility(None, Security::High, &[]);
+        let raitaru_low = facility(Some(RAITARU), Security::Low, &[]);
+        let athanor_low = facility(Some(ATHANOR), Security::Low, &[]);
+        let athanor_high = facility(Some(ATHANOR), Security::High, &[]);
+
+        assert!(
+            sde.can_build(std::slice::from_ref(&npc_high), FacilityNeed::Manufacturing)
+                .unwrap()
+        );
+        assert!(
+            sde.can_build(
+                std::slice::from_ref(&raitaru_low),
+                FacilityNeed::Manufacturing
+            )
+            .unwrap()
+        );
+        assert!(!sde.can_build(&[], FacilityNeed::Manufacturing).unwrap());
+        assert!(
+            sde.can_build(std::slice::from_ref(&athanor_low), FacilityNeed::Reaction)
+                .unwrap()
+        );
+        assert!(
+            !sde.can_build(&[athanor_high], FacilityNeed::Reaction)
+                .unwrap()
+        );
+        assert!(!sde.can_build(&[npc_high], FacilityNeed::Reaction).unwrap());
+        assert!(
+            !sde.can_build(&[raitaru_low], FacilityNeed::Reaction)
+                .unwrap()
+        );
+        assert!(
+            !sde.can_build(&[athanor_low], FacilityNeed::Manufacturing)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_capital_hull_needs_a_capital_shipyard() {
+        let (_dir, sde) = imported();
+        let azbel_low = facility(Some(AZBEL), Security::Low, &[]);
+        let azbel_high = facility(Some(AZBEL), Security::High, &[]);
+        let raitaru_low = facility(Some(RAITARU), Security::Low, &[]);
+        let npc_high = facility(None, Security::High, &[]);
+
+        assert!(
+            sde.can_build(&[azbel_low], FacilityNeed::CapitalHull)
+                .unwrap()
+        );
+        assert!(
+            !sde.can_build(&[azbel_high], FacilityNeed::CapitalHull)
+                .unwrap()
+        );
+        assert!(
+            !sde.can_build(&[raitaru_low], FacilityNeed::CapitalHull)
+                .unwrap()
+        );
+        assert!(
+            !sde.can_build(&[npc_high], FacilityNeed::CapitalHull)
+                .unwrap()
+        );
+        assert!(!sde.can_build(&[], FacilityNeed::CapitalHull).unwrap());
     }
 }

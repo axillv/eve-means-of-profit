@@ -14,7 +14,9 @@ pub mod schema;
 pub mod stations;
 
 pub use error::SdeError;
-pub use facility::{Facility, FacilityError, Rig, Security, Structure, StructureKind};
+pub use facility::{
+    Facility, FacilityError, FacilityNeed, Rig, Security, Structure, StructureKind,
+};
 pub use fetch::{
     Fetch, FetchError, HttpFetch, LATEST_URL, download_and_import, latest_build, needs_update,
     update_due, zip_url,
