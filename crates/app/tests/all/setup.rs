@@ -24,6 +24,7 @@ mod tests {
     use mop_market::book::PriceRule;
     use mop_market::fuzzwork::{Side, SummaryRow};
     use mop_sde::{Facility, Fetch, FetchError, RouteKind, Sde, Security, import};
+    use mop_store::price_history::PointPrices;
     use mop_store::{PlanRecord, Store};
     use tempfile::TempDir;
 
@@ -753,6 +754,122 @@ mod tests {
                 )
                 .expect("the reading is recorded");
         }
+    }
+
+    /// Two net worth price copies: PAU Sell and Buy at `NOW`, Tritanium Sell a day later.
+    fn save_net_worth_copies(folders: &Folders) {
+        let mut store = Store::open(&folders.data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
+        let row = |min: i64| SummaryRow {
+            min: Money::from_ten_thousandths(min),
+            max: Money::ZERO,
+            weighted_average: Money::ZERO,
+            median: Money::ZERO,
+            five_percent: Money::ZERO,
+            volume: 1,
+            orders: 1,
+        };
+        let pau = PointPrices {
+            at: NOW,
+            published_at: None,
+            rows: BTreeMap::from([
+                ((12_612, Side::Sell), row(500)),
+                ((12_612, Side::Buy), row(400)),
+            ]),
+        };
+        store.save_point_prices(&pau).expect("the PAU copy saves");
+        let tritanium = PointPrices {
+            at: NOW + 86_400,
+            published_at: None,
+            rows: BTreeMap::from([((34, Side::Sell), row(600))]),
+        };
+        store
+            .save_point_prices(&tritanium)
+            .expect("the Tritanium copy saves");
+        assert_eq!(
+            store.point_prices_size().expect("the size"),
+            (2, 3),
+            "two copies, three price rows"
+        );
+    }
+
+    /// The `Total ... estimated` part of the footer line, without the database file size.
+    fn estimated_total(harness: &Harness<'_, App>) -> String {
+        harness
+            .query_all_by_label_contains("Total ")
+            .filter_map(|node| node.value())
+            .find_map(|line| {
+                line.split_once(" · database file ")
+                    .map(|(total, _)| total.to_owned())
+            })
+            .unwrap_or_else(|| panic!("the total line shows"))
+    }
+
+    /// The count in the `Dropped <n> days` message, when it shows.
+    fn dropped_days(harness: &Harness<'_, App>) -> Option<u64> {
+        harness
+            .query_all_by_label_contains("Dropped ")
+            .filter_map(|node| node.value())
+            .find_map(|line| {
+                line.strip_prefix("Dropped ")
+                    .and_then(|rest| rest.strip_suffix(" days"))
+                    .and_then(|days| days.parse().ok())
+            })
+    }
+
+    #[test]
+    fn net_worth_price_copies_show_apart_from_the_daily_history() {
+        let folders = Folders::new();
+        seed_forge_history(&folders);
+        let harness = start_at(&folders, vec2(1280.0, 1400.0));
+        assert!(shown(&harness, "Net worth prices: none yet"));
+        let without_copies = estimated_total(&harness);
+        drop(harness);
+
+        save_net_worth_copies(&folders);
+        let harness = start_at(&folders, vec2(1280.0, 1400.0));
+        assert!(shown(
+            &harness,
+            "Net worth prices: 2 copies, 3 rows, about 300 B"
+        ));
+        assert!(shown(
+            &harness,
+            "Kept for good: these prices cannot be fetched again, so no rule or limit above thins them."
+        ));
+        assert_eq!(
+            estimated_total(&harness),
+            without_copies,
+            "the copies are not added to the daily history total"
+        );
+    }
+
+    #[test]
+    fn a_size_limit_thins_the_history_but_keeps_the_net_worth_copies() {
+        let folders = Folders::new();
+        seed_forge_history(&folders);
+        save_net_worth_copies(&folders);
+        let mut harness = start_at(&folders, vec2(1280.0, 1400.0));
+        assert!(shown(
+            &harness,
+            "Net worth prices: 2 copies, 3 rows, about 300 B"
+        ));
+
+        type_into(&mut harness, "Keep at most", "1");
+        click(&mut harness, "Save limit");
+
+        let dropped = dropped_days(&harness).expect("the limit drops days");
+        assert!(dropped > 0, "the Forge history is thinned: {dropped} days");
+        assert!(shown(
+            &harness,
+            "Net worth prices: 2 copies, 3 rows, about 300 B"
+        ));
+        drop(harness);
+
+        let store = Store::open(&folders.data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
+        assert_eq!(store.point_prices_size().expect("the size"), (2, 3));
     }
 
     #[test]

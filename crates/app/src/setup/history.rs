@@ -14,6 +14,8 @@ use crate::table::Table;
 use crate::table::model::{Cell, Column, ColumnKind, Row};
 
 const MUTE: &str = "One reading a day is kept for each market, for as long as its rule says. Sizes are estimates; the footer shows the real file size.";
+const KEPT_FOR_GOOD: &str =
+    "Kept for good: these prices cannot be fetched again, so no rule or limit above thins them.";
 const NO_VALUE: &str = "—";
 /// The most market rows the table shows before it scrolls.
 const TABLE_ROWS: usize = 6;
@@ -56,6 +58,8 @@ struct Snapshot {
     usage: Vec<MarketUsage>,
     auto_refresh: bool,
     database: u64,
+    /// The saved net worth price copies: how many, and how many price rows they hold.
+    copies: (u64, u64),
     at: i64,
 }
 
@@ -174,6 +178,19 @@ fn draw(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
         "Total {total} estimated · database file {}",
         format_bytes(snapshot.database)
     ));
+    ui.label(net_worth_prices_text(snapshot.copies.0, snapshot.copies.1));
+    ui.colored_label(cx.style.mute, KEPT_FOR_GOOD);
+}
+
+/// How many net worth price copies are kept, and about how much room they take.
+fn net_worth_prices_text(copies: u64, rows: u64) -> String {
+    if copies == 0 {
+        return "Net worth prices: none yet".to_owned();
+    }
+    let copy = if copies == 1 { "copy" } else { "copies" };
+    let row = if rows == 1 { "row" } else { "rows" };
+    let size = estimated_bytes(rows, 1).map_or(NO_VALUE.to_owned(), format_bytes);
+    format!("Net worth prices: {copies} {copy}, {rows} {row}, about {size}")
 }
 
 /// Reads the markets, their usage and the settings from the store.
@@ -182,6 +199,7 @@ fn load(panel: &mut Panel, cx: &mut Shared, now: i64) -> Result<(), StoreError> 
     let usage = cx.store.history_usage()?;
     let settings = cx.store.history_settings()?;
     let database = cx.store.database_bytes()?;
+    let copies = cx.store.point_prices_size()?;
     if !panel.limit_filled {
         panel.limit_filled = true;
         if let Some(bytes) = settings.limit_bytes {
@@ -198,6 +216,7 @@ fn load(panel: &mut Panel, cx: &mut Shared, now: i64) -> Result<(), StoreError> 
         usage,
         auto_refresh: settings.auto_refresh,
         database,
+        copies,
         at: now,
     });
     Ok(())
@@ -397,12 +416,13 @@ fn save_rule(panel: &mut Panel, cx: &mut Shared, market: i64) {
 fn limit_form(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
     let mut save = false;
     ui.horizontal_wrapped(|ui| {
-        ui.label("Keep at most");
+        let caption = ui.label("Keep at most");
         ui.add(
             TextEdit::singleline(&mut panel.limit)
                 .hint_text("no limit")
                 .desired_width(80.0),
-        );
+        )
+        .labelled_by(caption.id);
         ComboBox::from_id_salt("setup price history unit")
             .selected_text(panel.unit.label())
             .show_ui(ui, |ui| {
@@ -470,4 +490,30 @@ fn remove_market(panel: &mut Panel, cx: &mut Shared, market: i64, name: &str) {
     }
     panel.confirm_remove = None;
     panel.snapshot = None;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::net_worth_prices_text;
+
+    #[test]
+    fn the_net_worth_line_counts_the_copies_and_their_rows() {
+        assert_eq!(net_worth_prices_text(0, 0), "Net worth prices: none yet");
+        assert_eq!(
+            net_worth_prices_text(1, 1),
+            "Net worth prices: 1 copy, 1 row, about 100 B"
+        );
+        assert_eq!(
+            net_worth_prices_text(2, 3),
+            "Net worth prices: 2 copies, 3 rows, about 300 B"
+        );
+        assert_eq!(
+            net_worth_prices_text(3, 1000),
+            "Net worth prices: 3 copies, 1000 rows, about 100.0 kB"
+        );
+        assert_eq!(
+            net_worth_prices_text(1, u64::MAX),
+            "Net worth prices: 1 copy, 18446744073709551615 rows, about —"
+        );
+    }
 }
