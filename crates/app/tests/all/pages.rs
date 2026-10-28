@@ -14,7 +14,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use egui::vec2;
+    use egui::{Rect, vec2};
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
     use eve_means_of_profit::build::prices::Prices;
@@ -374,10 +374,10 @@ mod tests {
                 "Build",
                 &["Plans", "Pasted stock", "Plan", "Steps", "Buy list", "Item"],
             ),
+            ("Industry jobs", &["Industry jobs"]),
+            ("Orders", &["Orders"]),
             ("Assets", &["Places", "Assets", "Item"]),
             ("Net worth", &["Net worth", "By character", "Right now"]),
-            ("Orders", &["Orders"]),
-            ("Industry jobs", &["Industry jobs"]),
             ("Characters", &["Characters", "jEve data"]),
             ("Setup", &["Facilities", "Freight services", "Price rule"]),
         ];
@@ -404,6 +404,77 @@ mod tests {
         rail(&mut harness, "Build");
         for panel in ["Plans", "Pasted stock", "Plan", "Steps", "Buy list", "Item"] {
             assert_eq!(harness.query_all_by_label(panel).count(), 1, "{panel}");
+        }
+    }
+
+    /// The rail's left edge. Every rail entry starts there; panel titles start to its right.
+    fn rail_left(harness: &Harness<'_, App>) -> f32 {
+        harness.get_by_label("Build").rect().min.x
+    }
+
+    /// The rect of the rail entry named `label`, not a same-named page title.
+    fn rail_entry(harness: &Harness<'_, App>, label: &str) -> Rect {
+        let left = rail_left(harness);
+        harness
+            .get_all_by_label(label)
+            .find(|node| (node.rect().min.x - left).abs() < 1.0)
+            .unwrap_or_else(|| panic!("no rail entry labelled {label:?}"))
+            .rect()
+    }
+
+    #[test]
+    fn the_rail_groups_the_pages_and_wraps_only_at_spaces() {
+        let env = env();
+        let mut harness = start(&env, FakeEve::new(Vec::new(), None), NOW);
+        loaded(&mut harness);
+
+        let labels = [
+            "Build",
+            "Industry jobs",
+            "Orders",
+            "Assets",
+            "Net worth",
+            "Characters",
+            "Setup",
+        ];
+        let entries: Vec<Rect> = labels
+            .iter()
+            .map(|label| rail_entry(&harness, label))
+            .collect();
+        for pair in entries.windows(2) {
+            assert!(
+                pair[1].top() > pair[0].top(),
+                "each rail entry is below the one before it"
+            );
+        }
+        let left = rail_left(&harness);
+        for label in labels {
+            assert_eq!(
+                harness
+                    .query_all_by_label(label)
+                    .filter(|node| (node.rect().min.x - left).abs() < 1.0)
+                    .count(),
+                1,
+                "{label} is on the rail exactly once"
+            );
+        }
+
+        // Every entry is the same width; the rail adds the panel's padding around them.
+        let widest = entries.iter().map(|rect| rect.width()).fold(0.0, f32::max);
+        assert!(widest + 16.0 < 140.0, "the rail is under 140 px wide");
+        assert_eq!(entries[1].width(), widest, "Industry jobs fits its label");
+
+        let gap = |above: Rect, below: Rect| below.top() - above.bottom();
+        let ordinary = gap(
+            rail_entry(&harness, "Build"),
+            rail_entry(&harness, "Industry jobs"),
+        );
+        for (above, below) in [("Orders", "Assets"), ("Net worth", "Characters")] {
+            let grouped = gap(rail_entry(&harness, above), rail_entry(&harness, below));
+            assert!(
+                grouped >= ordinary + 16.0,
+                "{above} to {below} is a group gap"
+            );
         }
     }
 

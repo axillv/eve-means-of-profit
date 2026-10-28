@@ -955,7 +955,7 @@ mod tests {
     #[test]
     fn the_freight_hover_lists_every_service() {
         let world = World::new();
-        let mut harness = complete_list_sized(&world, &standard_services(), 1600.0);
+        let mut harness = complete_list_sized(&world, &standard_services(), 1640.0);
         hover(&mut harness, "109,914.68");
         assert!(shown(&harness, "Alliance 109,914.68"));
         assert!(shown(&harness, "Haulers 3,013,959.36"));
@@ -1301,7 +1301,7 @@ mod tests {
         );
         let mut services = standard_services();
         services.push(tiny);
-        let mut harness = complete_list_sized(&world, &services, 1600.0);
+        let mut harness = complete_list_sized(&world, &services, 1640.0);
         hover(&mut harness, "109,914.68");
         assert!(shown(&harness, "Tiny: cannot carry Hobgoblin I"));
         assert!(shown(&harness, "Alliance 109,914.68"));
