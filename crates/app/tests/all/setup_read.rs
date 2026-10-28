@@ -5,7 +5,7 @@
 #[cfg(test)]
 mod tests {
 
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::io::Write;
     use std::ops::ControlFlow;
@@ -439,15 +439,8 @@ mod tests {
         harness.run_steps(3);
     }
 
-    /// Opens the Fees and skills tab. A tab's title is painted by the dock, not a labelled node, so the
-    /// tab is pressed where it is drawn: in the tab bar over the Structures panel, after its title.
-    fn open_fees(harness: &mut Harness<'_, App>) {
-        let header = harness
-            .query_all_by_value("Structures")
-            .next()
-            .expect("the Structures panel shows")
-            .rect();
-        let at = egui::pos2(header.min.x + 120.0, header.min.y - 18.0);
+    /// Presses the point: how a tab, whose title the dock paints without a labelled node, is picked.
+    fn press_at(harness: &mut Harness<'_, App>, at: egui::Pos2) {
         harness.event(egui::Event::PointerMoved(at));
         harness.run_steps(2);
         for pressed in [true, false] {
@@ -460,6 +453,26 @@ mod tests {
             harness.run_steps(2);
         }
         harness.run_steps(3);
+    }
+
+    /// The point in the tab bar over the Structures panel, `offset` points after its left edge.
+    fn tab_bar_point(harness: &Harness<'_, App>, offset: f32) -> egui::Pos2 {
+        let header = harness
+            .query_all_by_value("Structures")
+            .next()
+            .expect("the Structures panel shows")
+            .rect();
+        egui::pos2(header.min.x + offset, header.min.y - 18.0)
+    }
+
+    /// Opens the Fees and skills tab, the second one in the node.
+    fn open_fees(harness: &mut Harness<'_, App>) {
+        press_at(harness, tab_bar_point(harness, 120.0));
+    }
+
+    /// Opens the Invention skills tab, the third one in the node.
+    fn open_invention(harness: &mut Harness<'_, App>) {
+        press_at(harness, tab_bar_point(harness, 230.0));
     }
 
     fn standing(hundredths: i16) -> Standing {
@@ -612,6 +625,97 @@ mod tests {
         let (eve, _refuse) = FakeEve::new(Vec::new());
         let mut harness = start(&env, eve);
         open_fees(&mut harness);
+
+        assert!(shown(&harness, "No character logged in"));
+        assert!(disabled(&harness, "Read"));
+    }
+
+    #[test]
+    fn reading_a_character_sets_every_invention_skill() {
+        let env = Env::new();
+        let (eve, _refuse) = FakeEve::new(vec![ana()]);
+        let mut harness = start(&env, eve);
+        open_invention(&mut harness);
+        assert!(shown(&harness, "Ana Tester"), "the character is picked");
+
+        click(&mut harness, "Read");
+        wait_for_notice(
+            &mut harness,
+            Level::Notice,
+            "Read invention skills from Ana Tester.",
+        );
+        harness.run_steps(2);
+
+        assert!(
+            value_on_row(&harness, "Electronic Engineering", "4"),
+            "Electronic Engineering is 4"
+        );
+        assert!(
+            value_on_row(&harness, "Gallente Encryption Methods", "3"),
+            "Gallente Encryption Methods is 3"
+        );
+        for name in [
+            "Amarr Encryption Methods",
+            "Graviton Physics",
+            "Mechanical Engineering",
+            "Minmatar Encryption Methods",
+            "Minmatar Starship Engineering",
+        ] {
+            assert!(value_on_row(&harness, name, "0"), "{name} is 0");
+        }
+        assert_eq!(
+            env.store().invention_skills().unwrap(),
+            BTreeMap::from([
+                (11_445, 0),
+                (11_446, 0),
+                (11_452, 0),
+                (11_453, 4),
+                (21_791, 0),
+                (23_087, 0),
+                (23_121, 3),
+            ]),
+            "every listed skill is saved, the untrained ones as 0"
+        );
+    }
+
+    #[test]
+    fn a_refused_invention_read_leaves_the_rows_and_says_to_log_in_again() {
+        let env = Env::new();
+        let (eve, refuse) = FakeEve::new(vec![ana()]);
+        let mut harness = start(&env, eve);
+        open_invention(&mut harness);
+        click_combo(&mut harness, "assumed 0", 0);
+        click_nth(&mut harness, "3", 0);
+        let before = env.store().invention_skills().unwrap();
+        assert_eq!(before, BTreeMap::from([(11_453, 3)]));
+
+        refuse.store(true, Ordering::Relaxed);
+        click(&mut harness, "Read");
+        wait_for_notice(
+            &mut harness,
+            Level::Error,
+            "Could not read Ana Tester: EVE refused. Log in again and allow skills and standings.",
+        );
+        harness.run_steps(2);
+
+        assert!(shown(&harness, "ERROR"));
+        assert!(
+            value_on_row(&harness, "Electronic Engineering", "3"),
+            "Electronic Engineering stays 3"
+        );
+        assert!(
+            value_on_row(&harness, "Mechanical Engineering", "assumed 0"),
+            "an unset row stays unset"
+        );
+        assert_eq!(env.store().invention_skills().unwrap(), before);
+    }
+
+    #[test]
+    fn with_no_character_the_invention_read_row_says_so_and_disables_read() {
+        let env = Env::new();
+        let (eve, _refuse) = FakeEve::new(Vec::new());
+        let mut harness = start(&env, eve);
+        open_invention(&mut harness);
 
         assert!(shown(&harness, "No character logged in"));
         assert!(disabled(&harness, "Read"));
