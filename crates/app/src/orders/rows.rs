@@ -14,10 +14,6 @@ use crate::build::state::type_name;
 pub(crate) const STALE_SECS: i64 = 21_600;
 
 /// Past this age the order's data is called old in words.
-#[expect(
-    dead_code,
-    reason = "the Orders page's hover text reads it; nothing here does yet"
-)]
 pub(crate) const OLD_SECS: i64 = 86_400;
 
 /// One market order, as the table shows it.

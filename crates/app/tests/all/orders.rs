@@ -418,6 +418,35 @@ mod tests {
     }
 
     #[test]
+    fn an_age_over_a_day_says_to_refresh_on_hover() {
+        let env = env();
+        saved::save_character(&esi_dir(&env), &data_fetched_at(MAIN, 1, NOW - 90_000))
+            .expect("Main's order saved");
+        let requests = Arc::new(Mutex::new(0));
+        let mut harness = start(&env, vec![character(MAIN, "Main")], requests);
+        loaded(&mut harness);
+        click(&mut harness, "Orders");
+
+        assert_eq!(
+            hover(&mut harness, "1d old"),
+            vec!["Over a day old. Refresh before you rely on it."]
+        );
+    }
+
+    #[test]
+    fn an_age_under_a_day_has_no_hover() {
+        let env = env();
+        saved::save_character(&esi_dir(&env), &data_fetched_at(MAIN, 1, NOW - 25_200))
+            .expect("Main's order saved");
+        let requests = Arc::new(Mutex::new(0));
+        let mut harness = start(&env, vec![character(MAIN, "Main")], requests);
+        loaded(&mut harness);
+        click(&mut harness, "Orders");
+
+        assert!(hover(&mut harness, "7h").is_empty());
+    }
+
+    #[test]
     fn each_row_holds_its_own_values_and_the_sells_come_first() {
         let env = env();
         saved::save_character(&esi_dir(&env), &main_data(NOW - 120)).expect("Main's orders saved");

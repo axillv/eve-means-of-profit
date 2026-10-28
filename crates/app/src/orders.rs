@@ -6,10 +6,11 @@ pub(crate) mod rows;
 use egui::{Id, RichText, Ui};
 
 use crate::Shared;
+use crate::build::prices::OLD_HOVER;
 use crate::build::state::report;
 use crate::table::model::{Cell, Column, ColumnKind, Row};
 use crate::table::{Table, hidden_from_text};
-use rows::{Entry, STALE_SECS, age_label, expires_text, grouped, utc_text};
+use rows::{Entry, OLD_SECS, STALE_SECS, age_label, expires_text, grouped, utc_text};
 
 /// The table's name for its saved hidden columns: `columns.orders`.
 const TABLE: &str = "orders";
@@ -110,6 +111,11 @@ pub fn show(_page: &mut OrdersPage, panel: OrdersPanel, ui: &mut Ui, cx: &mut Sh
                 true
             }
             ("age", _, _) => match entry.age {
+                Some(age) if age > OLD_SECS => {
+                    ui.colored_label(cx.style.stale, age_label(Some(age)))
+                        .on_hover_text(OLD_HOVER);
+                    true
+                }
                 Some(age) if age > STALE_SECS => {
                     ui.colored_label(cx.style.stale, age_label(Some(age)));
                     true
