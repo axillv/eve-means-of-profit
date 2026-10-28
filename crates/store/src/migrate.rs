@@ -242,6 +242,16 @@ CREATE TABLE price_history (
     orders INTEGER NOT NULL,
     PRIMARY KEY (market, type_id, side, day)
 ) WITHOUT ROWID;
+CREATE TABLE market_history (
+    type_id INTEGER CHECK (type_id >= 0),
+    day INTEGER CHECK (day >= 0),
+    average INTEGER CHECK (average >= 0),
+    highest INTEGER CHECK (highest >= 0),
+    lowest INTEGER CHECK (lowest >= 0),
+    volume INTEGER CHECK (volume >= 0),
+    orders INTEGER CHECK (orders >= 0),
+    PRIMARY KEY (type_id, day)
+) WITHOUT ROWID;
 CREATE TABLE point_prices (
     at INTEGER PRIMARY KEY,
     published_at INTEGER

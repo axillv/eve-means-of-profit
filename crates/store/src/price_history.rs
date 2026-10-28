@@ -8,6 +8,8 @@ use mop_core::industry::TypeId;
 use mop_core::money::Money;
 use mop_core::price_history::{ROW_BYTES, Retention, RetentionError, days_to_drop};
 use mop_market::fuzzwork::{Side, SummaryRow};
+use mop_market::history::{DayStat, HISTORY_DAYS, HistoryDay, summarise};
+use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{Result, StoreError};
@@ -16,6 +18,7 @@ use crate::{bad_code, from_stored, to_stored_u64};
 
 const MARKETS: &str = "history_markets";
 const READINGS: &str = "price_history";
+const DAY_HISTORY: &str = "market_history";
 const SETTINGS: &str = "history_settings";
 const MARKET_COLUMNS: &str = "id, kind, place, daily_days, total_days, enabled";
 
@@ -180,6 +183,91 @@ fn reading_error(day: i64, column: &str, value: i64) -> StoreError {
     StoreError::BadData(format!(
         "{READINGS} day {day}, column {column}: {value} is not a valid value"
     ))
+}
+
+/// The stored columns of one day of ESI sales history, read as whatever SQLite holds: day,
+/// average, highest, lowest, volume and orders.
+type RawHistoryDay = (Value, Value, Value, Value, Value, Value);
+
+fn raw_history_day(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawHistoryDay> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+    ))
+}
+
+fn history_error(type_id: TypeId, day: Option<i64>, column: &str, value: &str) -> StoreError {
+    let row = match day {
+        Some(day) => format!("{type_id}/{day}"),
+        None => type_id.to_string(),
+    };
+    StoreError::BadData(format!(
+        "{DAY_HISTORY} row {row}, column {column}: {value} is out of range"
+    ))
+}
+
+fn history_integer(type_id: TypeId, day: Option<i64>, column: &str, value: Value) -> Result<i64> {
+    match value {
+        Value::Integer(value) => Ok(value),
+        Value::Null => Err(history_error(type_id, day, column, "NULL")),
+        Value::Real(value) => Err(history_error(type_id, day, column, &value.to_string())),
+        Value::Text(value) => Err(history_error(type_id, day, column, &format!("{value:?}"))),
+        Value::Blob(value) => Err(history_error(type_id, day, column, &format!("{value:?}"))),
+    }
+}
+
+fn history_money(type_id: TypeId, day: i64, column: &str, value: Value) -> Result<Money> {
+    let value = history_integer(type_id, Some(day), column, value)?;
+    if value < 0 {
+        return Err(history_error(
+            type_id,
+            Some(day),
+            column,
+            &value.to_string(),
+        ));
+    }
+    Ok(Money::from_ten_thousandths(value))
+}
+
+fn history_u64(type_id: TypeId, day: i64, column: &str, value: Value) -> Result<u64> {
+    let value = history_integer(type_id, Some(day), column, value)?;
+    u64::try_from(value)
+        .ok()
+        .ok_or_else(|| history_error(type_id, Some(day), column, &value.to_string()))
+}
+
+fn history_day_from_stored(type_id: TypeId, raw: RawHistoryDay) -> Result<HistoryDay> {
+    let (day, average, highest, lowest, volume, orders) = raw;
+    let day = history_integer(type_id, None, "day", day)?;
+    Ok(HistoryDay {
+        day,
+        average: history_money(type_id, day, "average", average)?,
+        highest: history_money(type_id, day, "highest", highest)?,
+        lowest: history_money(type_id, day, "lowest", lowest)?,
+        volume: history_u64(type_id, day, "volume", volume)?,
+        orders: history_u64(type_id, day, "orders", orders)?,
+    })
+}
+
+fn write_history_day(conn: &Connection, type_id: TypeId, day: &HistoryDay) -> Result<()> {
+    conn.execute(
+        "INSERT INTO market_history (type_id, day, average, highest, lowest, volume, orders) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            i64::from(type_id),
+            day.day,
+            day.average.ten_thousandths(),
+            day.highest.ten_thousandths(),
+            day.lowest.ten_thousandths(),
+            to_stored_u64(day.volume)?,
+            to_stored_u64(day.orders)?,
+        ],
+    )?;
+    Ok(())
 }
 
 /// The newest day the market has a reading for, if it has any.
@@ -569,6 +657,85 @@ impl Store {
         Ok(())
     }
 
+    /// Saves an item's ESI sales history: the type's earlier rows go, then the newest 30 days are
+    /// written, all in one transaction. An empty list deletes the type's rows and writes nothing.
+    pub fn save_day_history(&mut self, type_id: TypeId, days: &[HistoryDay]) -> Result<u64> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM market_history WHERE type_id = ?1",
+            params![i64::from(type_id)],
+        )?;
+        let keep = usize::try_from(HISTORY_DAYS)
+            .ok()
+            .ok_or(StoreError::TooLarge)?;
+        let mut by_day = BTreeMap::new();
+        for day in days {
+            by_day.insert(day.day, day);
+        }
+        let kept = by_day.values().rev().take(keep).collect::<Vec<_>>();
+        let mut rows_written: u64 = 0;
+        for day in kept.into_iter().rev() {
+            write_history_day(&tx, type_id, day)?;
+            rows_written = rows_written.checked_add(1).ok_or(StoreError::TooLarge)?;
+        }
+        tx.commit()?;
+        Ok(rows_written)
+    }
+
+    /// One type's saved sales history, oldest day first.
+    pub fn day_history(&self, type_id: TypeId) -> Result<Vec<HistoryDay>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT day, average, highest, lowest, volume, orders FROM market_history \
+             WHERE type_id = ?1 ORDER BY day",
+        )?;
+        let raws = stmt
+            .query_map(params![i64::from(type_id)], raw_history_day)?
+            .collect::<rusqlite::Result<Vec<RawHistoryDay>>>()?;
+        raws.into_iter()
+            .map(|raw| history_day_from_stored(type_id, raw))
+            .collect()
+    }
+
+    /// The units sold a day and 30-day middle of one type, when it has a saved history.
+    pub fn day_stat(&self, type_id: TypeId) -> Result<Option<DayStat>> {
+        Ok(summarise(&self.day_history(type_id)?))
+    }
+
+    /// The units sold a day and 30-day middle of every type that has a saved history, by type.
+    pub fn day_stats(&self) -> Result<BTreeMap<TypeId, DayStat>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT type_id, day, average, highest, lowest, volume, orders FROM market_history \
+             ORDER BY type_id, day",
+        )?;
+        let raws = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Value>(1)?,
+                    row.get::<_, Value>(2)?,
+                    row.get::<_, Value>(3)?,
+                    row.get::<_, Value>(4)?,
+                    row.get::<_, Value>(5)?,
+                    row.get::<_, Value>(6)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut grouped: BTreeMap<TypeId, Vec<HistoryDay>> = BTreeMap::new();
+        for (type_value, day, average, highest, lowest, volume, orders) in raws {
+            let type_id: TypeId = from_stored(type_value, DAY_HISTORY, type_value, "type_id")?;
+            let raw = (day, average, highest, lowest, volume, orders);
+            let history_day = history_day_from_stored(type_id, raw)?;
+            grouped.entry(type_id).or_default().push(history_day);
+        }
+        let mut stats = BTreeMap::new();
+        for (type_id, days) in grouped {
+            if let Some(stat) = summarise(&days) {
+                stats.insert(type_id, stat);
+            }
+        }
+        Ok(stats)
+    }
+
     /// Saves the market prices of one net worth point. A copy already saved at the same time is
     /// replaced whole. A failed row writes nothing.
     pub fn save_point_prices(&mut self, prices: &PointPrices) -> Result<()> {
@@ -711,6 +878,14 @@ fn point_rows(conn: &Connection, at: i64) -> Result<BTreeMap<(TypeId, Side), Sum
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+    use std::rc::Rc;
+
+    use mop_market::error::MarketError;
+    use mop_market::fuzzwork::{BytesHttp, BytesResponse};
+    use mop_market::history::History;
+
     use super::*;
 
     const FORGE_PLACE: u64 = 10_000_002;
@@ -847,5 +1022,221 @@ mod tests {
 
         assert_eq!(store.point_prices(0, i64::MAX).expect("read").len(), 1);
         assert_eq!(store.point_prices_size().expect("size"), (1, 2));
+    }
+
+    fn history_day(day: i64, average: i64, volume: u64) -> HistoryDay {
+        HistoryDay {
+            day,
+            average: Money::from_ten_thousandths(average),
+            highest: Money::from_ten_thousandths(average),
+            lowest: Money::from_ten_thousandths(average),
+            volume,
+            orders: 1,
+        }
+    }
+
+    #[test]
+    fn saving_day_history_keeps_the_newest_30_days() {
+        let (_dir, _path, mut store) = open_temp();
+        let days = (20_455..=20_485)
+            .map(|day| history_day(day, 100_000, 100))
+            .collect::<Vec<_>>();
+
+        assert_eq!(store.save_day_history(34, &days).expect("save"), 30);
+        let saved = store.day_history(34).expect("days");
+        assert_eq!(saved.len(), 30);
+        assert_eq!(saved.first().map(|day| day.day), Some(20_456));
+        assert_eq!(saved.last().map(|day| day.day), Some(20_485));
+        assert_eq!(
+            store.day_stat(34).expect("stat"),
+            Some(DayStat {
+                last_day: 20_485,
+                units_day: 100,
+                middle: Money::from_ten_thousandths(100_000),
+                days: 30,
+            })
+        );
+    }
+
+    #[test]
+    fn saving_day_history_replaces_the_type_and_keeps_one_row_a_day() {
+        let (_dir, _path, mut store) = open_temp();
+        let first = (20_455..=20_485)
+            .map(|day| history_day(day, 100_000, 100))
+            .collect::<Vec<_>>();
+        store.save_day_history(34, &first).expect("first");
+
+        let changed = [
+            history_day(20_485, 200_000, 30),
+            history_day(20_486, 400_000, 60),
+        ];
+        assert_eq!(store.save_day_history(34, &changed).expect("replace"), 2);
+        let saved = store.day_history(34).expect("days");
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0].day, 20_485);
+        assert_eq!(saved[0].average, Money::from_ten_thousandths(200_000));
+        assert_eq!(
+            store.day_stat(34).expect("stat"),
+            Some(DayStat {
+                last_day: 20_486,
+                units_day: 3,
+                middle: Money::from_ten_thousandths(300_000),
+                days: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn an_empty_day_history_deletes_the_type() {
+        let (_dir, _path, mut store) = open_temp();
+        store
+            .save_day_history(34, &[history_day(20_484, 100_000, 30)])
+            .expect("save");
+
+        assert_eq!(store.save_day_history(34, &[]).expect("clear"), 0);
+        assert!(store.day_history(34).expect("days").is_empty());
+        assert_eq!(store.day_stat(34).expect("stat"), None);
+    }
+
+    #[test]
+    fn day_stats_holds_every_type() {
+        let (_dir, _path, mut store) = open_temp();
+        store
+            .save_day_history(34, &[history_day(20_484, 100_000, 30)])
+            .expect("34");
+        store
+            .save_day_history(35, &[history_day(20_484, 50_000, 30)])
+            .expect("35");
+
+        let stats = store.day_stats().expect("stats");
+        assert_eq!(
+            stats.get(&34),
+            Some(&DayStat {
+                last_day: 20_484,
+                units_day: 1,
+                middle: Money::from_ten_thousandths(100_000),
+                days: 1,
+            })
+        );
+        assert_eq!(
+            stats.get(&35),
+            Some(&DayStat {
+                last_day: 20_484,
+                units_day: 1,
+                middle: Money::from_ten_thousandths(50_000),
+                days: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn a_stored_type_that_does_not_fit_is_bad_data() {
+        let (_dir, _path, mut store) = open_temp();
+        store
+            .save_day_history(34, &[history_day(20_484, 100_000, 30)])
+            .expect("save");
+        store
+            .conn
+            .execute(
+                "UPDATE market_history SET type_id = ?1",
+                params![i64::from(u32::MAX) + 1],
+            )
+            .expect("raw update");
+
+        let err = store.day_stats().expect_err("bad data");
+        let StoreError::BadData(what) = err else {
+            panic!("expected BadData, got {err:?}");
+        };
+        assert!(what.contains("market_history"), "{what}");
+        assert!(what.contains("type_id"), "{what}");
+    }
+
+    #[test]
+    fn a_stored_value_of_the_wrong_kind_is_bad_data_naming_the_column() {
+        let (_dir, _path, mut store) = open_temp();
+        store
+            .save_day_history(34, &[history_day(20_484, 100_000, 30)])
+            .expect("save");
+        store
+            .conn
+            .execute("UPDATE market_history SET average = 'x'", [])
+            .expect("raw update");
+
+        let err = store.day_history(34).expect_err("bad data");
+        let StoreError::BadData(what) = err else {
+            panic!("expected BadData, got {err:?}");
+        };
+        assert!(what.contains("market_history"), "{what}");
+        assert!(what.contains("average"), "{what}");
+    }
+
+    struct DayHistoryFake {
+        bodies: BTreeMap<u32, String>,
+        calls: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl DayHistoryFake {
+        fn new(bodies: BTreeMap<u32, String>) -> (Self, Rc<RefCell<Vec<String>>>) {
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            (
+                Self {
+                    bodies,
+                    calls: Rc::clone(&calls),
+                },
+                calls,
+            )
+        }
+    }
+
+    impl BytesHttp for DayHistoryFake {
+        fn get_bytes(
+            &self,
+            url: &str,
+            _if_none_match: Option<&str>,
+        ) -> std::result::Result<BytesResponse, MarketError> {
+            self.calls.borrow_mut().push(url.to_owned());
+            let type_id = url
+                .rsplit_once("type_id=")
+                .and_then(|(_, text)| text.parse::<u32>().ok());
+            let body = type_id
+                .and_then(|type_id| self.bodies.get(&type_id))
+                .cloned()
+                .unwrap_or_default();
+            Ok(BytesResponse {
+                status: 200,
+                etag: None,
+                last_modified: None,
+                retry_after: None,
+                body: body.into_bytes(),
+            })
+        }
+    }
+
+    fn history_json(average: &str, volume: u64) -> String {
+        format!(
+            r#"[{{"average":{average},"date":"2026-01-01","highest":{average},"lowest":{average},"order_count":1,"volume":{volume}}}]"#
+        )
+    }
+
+    #[test]
+    fn the_refresh_loop_fetches_and_saves_every_type() {
+        let mut bodies = BTreeMap::new();
+        bodies.insert(34, history_json("10.0", 300));
+        bodies.insert(35, history_json("5.0", 150));
+        let (fake, calls) = DayHistoryFake::new(bodies);
+        let history = History::forge(fake);
+
+        let (_dir, _path, mut store) = open_temp();
+        for type_id in [34, 35] {
+            let days = history.fetch(type_id).expect("fetch");
+            store.save_day_history(type_id, &days).expect("save");
+        }
+        assert_eq!(store.day_stats().expect("stats").len(), 2);
+
+        // A second fetch of 34 still has the one day; no duplicate row.
+        let days = history.fetch(34).expect("refetch");
+        store.save_day_history(34, &days).expect("replace");
+        assert_eq!(store.day_history(34).expect("days").len(), 1);
+        assert_eq!(calls.borrow().len(), 3);
     }
 }

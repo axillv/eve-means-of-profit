@@ -6,5 +6,6 @@ pub mod book;
 pub mod cache;
 pub mod error;
 pub mod fuzzwork;
+pub mod history;
 pub mod http;
 pub mod plex;
