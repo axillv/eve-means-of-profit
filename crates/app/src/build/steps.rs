@@ -10,12 +10,13 @@ use mop_core::format::group_thousands;
 use mop_core::industry::{Activity, JobSplit, Recipe, RecipeBook, TypeId};
 use mop_core::make_or_buy::{Choice, Decision};
 use mop_core::plan::{BuyLine, Plan, Step};
+use mop_core::reserve;
 use mop_sde::Sde;
 use mop_store::PlanRecord;
 
 use super::costs::{self, Costs, PENDING};
 use super::prices::age_text;
-use super::state::{BuildPage, NO_REACTIONS, me_of, type_name};
+use super::state::{BuildPage, NO_REACTIONS, me_of, push_error, type_name};
 use crate::status::Notice;
 use crate::table::Table;
 use crate::table::model::{Cell, Column, ColumnKind, Row};
@@ -46,6 +47,9 @@ struct View {
     tick_enabled: bool,
     tick_hover: Option<&'static str>,
     me: Option<u8>,
+    /// The units the row takes from stock, split from the running jobs in its hover.
+    own: u64,
+    own_hover: Option<String>,
     jobs_text: String,
     jobs_hover: String,
     cost: Figure,
@@ -91,6 +95,18 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
         }
     };
     let now = (cx.clock)();
+    let assigned = match reserve::assigned_to(record.id, &cx.claims.running, &cx.claims.assignments)
+    {
+        Ok(assigned) => assigned,
+        Err(error) => {
+            push_error(
+                &mut cx.notices,
+                format!("Could not work out plan reservations: {error}"),
+            );
+            BTreeMap::new()
+        }
+    };
+    let running = running_by_type(plan, &assigned);
     let costs = costs::compute(ui, page, record, plan, cx, now);
     let mut names = BTreeMap::new();
     let steps = costs
@@ -107,14 +123,22 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
     let lines = tree(plan, &page.recipes, record.product);
     let views: BTreeMap<u64, View> = lines
         .iter()
-        .map(|line| (u64::from(line.type_id), view(line, record, &costs, &names)))
+        .map(|line| {
+            let units = running.get(&line.type_id).copied().unwrap_or(0);
+            (
+                u64::from(line.type_id),
+                view(line, record, &costs, &names, units),
+            )
+        })
         .collect();
     let rows: Vec<Row> = lines
         .iter()
         .map(|line| {
+            let units = running.get(&line.type_id).copied().unwrap_or(0);
             row(
                 line,
                 views.get(&u64::from(line.type_id)),
+                units,
                 cx.sde.as_ref(),
                 &mut cx.notices,
             )
@@ -135,6 +159,7 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
         match column {
             "build" => build_tick(ui, view, &mut edits),
             "me" => me_box(ui, view, &mut edits),
+            "own" => own_cell(ui, view),
             "jobs" => jobs_label(ui, view),
             "cost" => figure_cell(ui, &view.cost, &style, &mut edits),
             "decide" => figure_cell(ui, &view.decide, &style, &mut edits),
@@ -256,6 +281,17 @@ fn me_box(ui: &mut Ui, view: &View, edits: &mut Vec<Edit>) -> bool {
     if ui.add(DragValue::new(&mut me).range(0..=10)).changed() {
         edits.push(Edit::Me(view.type_id, me));
     }
+    true
+}
+
+/// The Own cell, with the hover that splits the hangar units from the running jobs' units. Rows
+/// with no running units are drawn by the table as usual.
+fn own_cell(ui: &mut Ui, view: &View) -> bool {
+    let Some(hover) = view.own_hover.as_deref() else {
+        return false;
+    };
+    ui.add(Label::new(grouped(view.own)).selectable(false))
+        .on_hover_text(hover);
     true
 }
 
@@ -383,7 +419,13 @@ fn walk<'a>(type_id: TypeId, depth: u32, tree: &Tree<'a>, out: &mut Vec<Line<'a>
     }
 }
 
-fn view(line: &Line, record: &PlanRecord, costs: &Costs, names: &BTreeMap<TypeId, String>) -> View {
+fn view(
+    line: &Line,
+    record: &PlanRecord,
+    costs: &Costs,
+    names: &BTreeMap<TypeId, String>,
+    running: u64,
+) -> View {
     let is_product = line.type_id == record.product;
     let reaction = line
         .recipe
@@ -395,6 +437,17 @@ fn view(line: &Line, record: &PlanRecord, costs: &Costs, names: &BTreeMap<TypeId
         }
         _ => None,
     };
+    let own = line
+        .step
+        .map(|step| step.from_stock)
+        .or_else(|| line.buy.map(|buy| buy.from_stock))
+        .unwrap_or(0);
+    let own_hover = (running > 0).then(|| {
+        format!(
+            "{} in hangars, {running} from running jobs",
+            own.saturating_sub(running)
+        )
+    });
     View {
         type_id: line.type_id,
         has_recipe: line.recipe.is_some(),
@@ -402,6 +455,8 @@ fn view(line: &Line, record: &PlanRecord, costs: &Costs, names: &BTreeMap<TypeId
         tick_enabled: !is_product && (!reaction || reactions_picked),
         tick_hover: (reaction && !reactions_picked && !is_product).then_some(NO_REACTIONS),
         me,
+        own,
+        own_hover,
         jobs_text: line
             .step
             .map(|step| grouped(step.jobs.job_count()))
@@ -536,7 +591,13 @@ fn jobs_hover(jobs: &JobSplit) -> String {
     parts.join(" + ")
 }
 
-fn row(line: &Line, view: Option<&View>, sde: Option<&Sde>, notices: &mut Vec<Notice>) -> Row {
+fn row(
+    line: &Line,
+    view: Option<&View>,
+    running: u64,
+    sde: Option<&Sde>,
+    notices: &mut Vec<Notice>,
+) -> Row {
     let me = match view.and_then(|view| view.me) {
         Some(me) => Cell::int(i128::from(me), me.to_string()),
         None => Cell::text("—"),
@@ -549,14 +610,16 @@ fn row(line: &Line, view: Option<&View>, sde: Option<&Sde>, notices: &mut Vec<No
     match (line.step, line.buy) {
         (Some(step), _) => {
             cells.extend(amounts(step.needed, step.from_stock));
+            cells.push(blank_when_zero(running));
             cells.push(number(step.to_build));
             cells.push(Cell::text("—"));
             cells.push(number(step.runs));
             cells.push(number(step.jobs.job_count()));
-            cells.push(spare(step.spare));
+            cells.push(blank_when_zero(step.spare));
         }
         (None, Some(buy)) => {
             cells.extend(amounts(buy.needed, buy.from_stock));
+            cells.push(blank_when_zero(running));
             cells.push(Cell::text("—"));
             cells.push(number(buy.to_buy));
             cells.extend([Cell::text(""), Cell::text(""), Cell::text("")]);
@@ -581,13 +644,36 @@ fn number(value: u64) -> Cell {
     Cell::int(i128::from(value), grouped(value))
 }
 
-/// A Spare of 0 shows nothing.
-fn spare(value: u64) -> Cell {
+/// A value of 0 shows nothing.
+fn blank_when_zero(value: u64) -> Cell {
     if value == 0 {
         Cell::int(0, "")
     } else {
         number(value)
     }
+}
+
+/// The units per type the assigned jobs account for, capped at what each row takes from stock:
+/// the running jobs are used before the hangar units. Types with no units are left out.
+fn running_by_type(plan: &Plan, assigned: &BTreeMap<TypeId, u64>) -> BTreeMap<TypeId, u64> {
+    let mut running: BTreeMap<TypeId, u64> = BTreeMap::new();
+    for step in &plan.steps {
+        if let Some(&units) = assigned.get(&step.type_id) {
+            let units = units.min(step.from_stock);
+            if units != 0 {
+                running.insert(step.type_id, units);
+            }
+        }
+    }
+    for line in &plan.buy {
+        if let Some(&units) = assigned.get(&line.type_id) {
+            let units = units.min(line.from_stock);
+            if units != 0 {
+                running.insert(line.type_id, units);
+            }
+        }
+    }
+    running
 }
 
 fn grouped(value: u64) -> String {
@@ -607,6 +693,7 @@ fn columns() -> Vec<Column> {
         column("me", "ME", ColumnKind::Number, 50.0),
         column("need", "Need", ColumnKind::Number, 90.0),
         column("own", "Own", ColumnKind::Number, 90.0),
+        column("running", "Running", ColumnKind::Number, 70.0),
         column("make", "Make", ColumnKind::Number, 90.0),
         column("buy", "Buy", ColumnKind::Number, 90.0),
         column("runs", "Runs", ColumnKind::Number, 80.0),
@@ -615,4 +702,59 @@ fn columns() -> Vec<Column> {
         column("cost", "Job cost", ColumnKind::Number, 150.0),
         column("decide", "Make or buy", ColumnKind::Text, 330.0),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use mop_core::industry::{Activity, JobSplit};
+
+    use super::*;
+
+    const HOBGOBLIN_I: TypeId = 2454;
+    const TRITANIUM: TypeId = 34;
+
+    /// Hobgoblin I with 2 of its units from stock, and a Tritanium line with no units from stock.
+    fn plan() -> Plan {
+        Plan {
+            steps: vec![Step {
+                type_id: HOBGOBLIN_I,
+                activity: Activity::Manufacturing,
+                depth: 0,
+                needed: 2,
+                from_stock: 2,
+                to_build: 0,
+                runs: 0,
+                jobs: JobSplit {
+                    full_jobs: 0,
+                    runs_per_full_job: 1,
+                    last_job_runs: 0,
+                },
+                spare: 0,
+            }],
+            buy: vec![BuyLine {
+                type_id: TRITANIUM,
+                depth: 1,
+                needed: 3,
+                from_stock: 0,
+                to_buy: 3,
+            }],
+            unused_stock: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn running_is_the_assigned_units_up_to_what_the_row_takes_from_stock() {
+        let plan = plan();
+        let assigned = BTreeMap::from([(HOBGOBLIN_I, 5), (TRITANIUM, 3)]);
+        assert_eq!(
+            running_by_type(&plan, &assigned),
+            BTreeMap::from([(HOBGOBLIN_I, 2)])
+        );
+        let assigned = BTreeMap::from([(HOBGOBLIN_I, 1)]);
+        assert_eq!(
+            running_by_type(&plan, &assigned),
+            BTreeMap::from([(HOBGOBLIN_I, 1)])
+        );
+        assert_eq!(running_by_type(&plan, &BTreeMap::new()), BTreeMap::new());
+    }
 }
