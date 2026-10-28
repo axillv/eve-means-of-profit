@@ -9,6 +9,7 @@ pub mod industry;
 pub mod invention;
 pub mod invention_cost;
 pub mod job_cost;
+pub mod job_time;
 pub mod make_or_buy;
 pub mod money;
 pub mod net_worth;
