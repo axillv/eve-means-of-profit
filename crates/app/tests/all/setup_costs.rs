@@ -13,6 +13,7 @@ mod tests {
     use egui::{Key, Modifiers, vec2};
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
+    use eve_means_of_profit::rail::Page;
     use eve_means_of_profit::session::NoEve;
     use eve_means_of_profit::{App, AppConfig};
     use mop_core::fees::Standing;
@@ -107,7 +108,7 @@ mod tests {
             .with_max_steps(crate::SETTLE_STEPS)
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
         harness.run_steps(2);
-        click(&mut harness, "Setup");
+        click(&mut harness, Page::Setup.label());
         assert!(shown(&harness, "Price rule"), "the setup panels show");
         harness
     }

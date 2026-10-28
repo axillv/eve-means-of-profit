@@ -19,6 +19,7 @@ mod tests {
     use egui_kittest::kittest::{NodeT, Queryable, by};
     use egui_kittest::{Harness, SnapshotResults};
     use eve_means_of_profit::build::prices::Prices;
+    use eve_means_of_profit::rail::Page;
     use eve_means_of_profit::session::NoEve;
     use eve_means_of_profit::table::{copy_request, has_table};
     use eve_means_of_profit::{App, AppConfig};
@@ -1779,7 +1780,7 @@ mod tests {
     fn with_another_page_open_the_timer_request_still_runs() {
         let world = World::new();
         let mut harness = complete_list(&world, &standard_services());
-        click(&mut harness, "Setup");
+        click(&mut harness, Page::Setup.label());
         world.at(NOW + 900);
         for _ in 0..5 {
             harness.run();
