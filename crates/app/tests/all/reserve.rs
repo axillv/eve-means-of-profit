@@ -39,7 +39,7 @@ mod tests {
     use mop_store::{PlanRecord, Store};
     use tempfile::TempDir;
 
-    use crate::ui::{click, hover, shown, snapshot};
+    use crate::ui::{click, hover, shown, snapshot, top};
 
     const NOW: i64 = 1_000_000;
     const SCOPE_HOVER: &str =
@@ -371,6 +371,62 @@ mod tests {
         store(env).set_plan_order(ids).expect("the order is saved");
     }
 
+    /// The plans as the store lists them.
+    fn plan_order(env: &Env) -> Vec<i64> {
+        store(env)
+            .plans()
+            .expect("the plans")
+            .iter()
+            .map(|plan| plan.id)
+            .collect()
+    }
+
+    /// Right-clicks the row labelled `label`, opening its menu.
+    fn right_click(harness: &mut Harness<'_, App>, label: &str) {
+        harness.get_by_label(label).scroll_to_me();
+        harness.run_steps(2);
+        harness.get_by_label(label).hover();
+        harness.run_steps(2);
+        harness.get_by_label(label).click_secondary();
+        harness.run_steps(3);
+    }
+
+    /// Whether the menu entry labelled `label` is disabled.
+    fn menu_disabled(harness: &Harness<'_, App>, label: &str) -> bool {
+        harness.get_by_label(label).accesskit_node().is_disabled()
+    }
+
+    /// Clicks the last node labelled `label`, which is a dialog's button when the panel has one of
+    /// the same name.
+    fn click_last(harness: &mut Harness<'_, App>, label: &str) {
+        let count = harness.get_all_by_label(label).count();
+        assert!(count > 0, "no node labelled {label:?}");
+        harness
+            .get_all_by_label(label)
+            .nth(count - 1)
+            .expect("the button")
+            .click();
+        harness.run_steps(3);
+    }
+
+    /// Drags the row labelled `from` onto the row labelled `to`, moving in steps so egui sees the
+    /// pointer travel.
+    fn drag(harness: &mut Harness<'_, App>, from: &str, to: &str) {
+        let source = harness.get_by_label(from).rect().center();
+        let target = harness.get_by_label(to).rect().center();
+        harness.hover_at(source);
+        harness.run_steps(2);
+        harness.drag_at(source);
+        harness.run_steps(2);
+        let middle = pos2(source.x, source.y + (target.y - source.y) / 2.0);
+        harness.hover_at(middle);
+        harness.run_steps(2);
+        harness.hover_at(target);
+        harness.run_steps(2);
+        harness.drop_at(target);
+        harness.run_steps(4);
+    }
+
     /// Clicks the tick labelled `label`, near its left edge: a long label can run under a panel
     /// that takes a click at its middle.
     fn click_box(harness: &mut Harness<'_, App>, label: &str) {
@@ -689,6 +745,16 @@ mod tests {
     }
 
     #[test]
+    fn the_plans_order_snapshot_is_taken() {
+        let env = stock_environment();
+        reserving_pair(&env);
+        make_plan(&env, "Hobgoblin C", 2, &[HOBGOBLIN_I], "Hobgoblin I\t1");
+        let mut harness = start(&env, login());
+        click(&mut harness, "Hobgoblin A");
+        snapshot(&mut harness, "plans_order");
+    }
+
+    #[test]
     fn claims_are_taken_in_the_plan_order_a_then_b() {
         let env = stock_environment();
         let a = make_plan(&env, "Hobgoblin A", 10, &[HOBGOBLIN_I], "");
@@ -812,6 +878,127 @@ mod tests {
             &[("Need", "2"), ("Own", "2"), ("Make", "0")],
         );
         assert_no_row(&harness, "Tritanium");
+    }
+
+    #[test]
+    fn the_menu_moves_a_plan_down_and_the_claims_follow_it() {
+        let env = stock_environment();
+        let (a, b) = reserving_pair(&env);
+
+        let mut harness = start(&env, login());
+        right_click(&mut harness, "Hobgoblin A");
+        assert!(!menu_disabled(&harness, "Move down"));
+        click(&mut harness, "Move down");
+
+        assert_eq!(plan_order(&env), vec![b, a]);
+        assert!(top(&harness, "Hobgoblin B") < top(&harness, "Hobgoblin A"));
+
+        click(&mut harness, "Hobgoblin B");
+        assert_cells(
+            &harness,
+            "Hobgoblin I",
+            &[("Need", "2"), ("Own", "2"), ("Make", "0")],
+        );
+        click(&mut harness, "Hobgoblin A");
+        assert_cells(
+            &harness,
+            "Hobgoblin I",
+            &[("Need", "10"), ("Own", "6"), ("Make", "4")],
+        );
+        assert_cells(
+            &harness,
+            "Tritanium",
+            &[("Need", "2,036"), ("Own", "1,500"), ("Buy", "536")],
+        );
+        drop(harness);
+
+        let harness = start(&env, login());
+        assert!(top(&harness, "Hobgoblin B") < top(&harness, "Hobgoblin A"));
+    }
+
+    #[test]
+    fn the_fresh_list_ends_cannot_move_further() {
+        let env = stock_environment();
+        reserving_pair(&env);
+
+        let mut harness = start(&env, login());
+        right_click(&mut harness, "Hobgoblin A");
+        assert!(menu_disabled(&harness, "Move up"));
+        assert!(!menu_disabled(&harness, "Move down"));
+        drop(harness);
+
+        let mut harness = start(&env, login());
+        right_click(&mut harness, "Hobgoblin B");
+        assert!(menu_disabled(&harness, "Move down"));
+        assert!(!menu_disabled(&harness, "Move up"));
+    }
+
+    #[test]
+    fn dragging_a_plan_onto_another_reorders_the_list() {
+        let env = stock_environment();
+        let (a, b) = reserving_pair(&env);
+        let c = make_plan(&env, "Hobgoblin C", 2, &[HOBGOBLIN_I], "Hobgoblin I\t1");
+
+        let mut harness = start(&env, login());
+        drag(&mut harness, "Hobgoblin C", "Hobgoblin A");
+        assert_eq!(plan_order(&env), vec![c, a, b]);
+        assert!(top(&harness, "Hobgoblin C") < top(&harness, "Hobgoblin A"));
+        assert!(top(&harness, "Hobgoblin A") < top(&harness, "Hobgoblin B"));
+
+        drag(&mut harness, "Hobgoblin A", "Hobgoblin B");
+        assert_eq!(plan_order(&env), vec![c, b, a]);
+        assert!(top(&harness, "Hobgoblin C") < top(&harness, "Hobgoblin B"));
+        assert!(top(&harness, "Hobgoblin B") < top(&harness, "Hobgoblin A"));
+    }
+
+    #[test]
+    fn only_reserving_plans_show_the_reserves_label() {
+        let env = stock_environment();
+        reserving_pair(&env);
+        make_plan(&env, "Hobgoblin C", 2, &[HOBGOBLIN_I], "Hobgoblin I\t1");
+
+        let harness = start(&env, login());
+        let reserves: Vec<f32> = harness
+            .query_all(by().role(Role::Label).predicate(|node| {
+                node.label()
+                    .or_else(|| node.value())
+                    .is_some_and(|text| text.contains("reserves"))
+            }))
+            .map(|node| node.rect().center().y)
+            .collect();
+        assert_eq!(reserves.len(), 2, "{reserves:?}");
+        for name in ["Hobgoblin A", "Hobgoblin B"] {
+            let row = harness.get_by_label(name).rect().center().y;
+            assert!(
+                reserves.iter().any(|reserve| (reserve - row).abs() <= 3.0),
+                "{name} has no reserves label"
+            );
+        }
+        let c = harness.get_by_label("Hobgoblin C").rect().center().y;
+        assert!(
+            !reserves.iter().any(|reserve| (reserve - c).abs() <= 3.0),
+            "Hobgoblin C has a reserves label"
+        );
+    }
+
+    #[test]
+    fn deleting_a_reserving_plan_releases_its_claims() {
+        let env = stock_environment();
+        let (_, b) = reserving_pair(&env);
+
+        let mut harness = start(&env, login());
+        click(&mut harness, "Hobgoblin A");
+        click(&mut harness, "Delete");
+        assert!(shown(&harness, "Delete plan Hobgoblin A?"));
+        click_last(&mut harness, "Delete");
+        assert_eq!(plan_order(&env), vec![b]);
+
+        click(&mut harness, "Hobgoblin B");
+        assert_cells(
+            &harness,
+            "Hobgoblin I",
+            &[("Need", "2"), ("Own", "2"), ("Make", "0")],
+        );
     }
 
     #[test]

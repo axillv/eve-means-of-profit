@@ -1,7 +1,8 @@
 //! The Plans panel: the saved plans in the order the store lists them, the buttons that make, copy,
 //! rename and delete them, and the dialogs those ask through.
 
-use egui::{Align2, Button, Context, RichText, TextEdit, Ui, Window};
+use egui::{Align2, Button, Context, CursorIcon, Id, RichText, Sense, TextEdit, Ui, Window};
+use mop_store::PlanSummary;
 
 use super::state::{BuildPage, Dialog, Next, report};
 use crate::Shared;
@@ -25,6 +26,13 @@ pub fn show(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
             return;
         }
     };
+    let reserving = match cx.store.reserving_plans() {
+        Ok(ids) => ids,
+        Err(error) => {
+            report(cx, format!("Could not read the reserving plans: {error}"));
+            Vec::new()
+        }
+    };
     let selected = page.selected.is_some();
     let (mut new, mut duplicate, mut rename, mut delete) = (false, false, false, false);
     ui.horizontal(|ui| {
@@ -34,17 +42,11 @@ pub fn show(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
         delete = ui.add_enabled(selected, Button::new("Delete")).clicked();
     });
 
-    let mut clicked = None;
-    for plan in &plans {
-        if ui
-            .selectable_label(page.selected == Some(plan.id), plan.name.as_str())
-            .clicked()
-        {
-            clicked = Some(plan.id);
-        }
+    let picked = plan_rows(ui, &plans, &reserving, page.selected);
+    if let Some(order) = picked.order {
+        save_order(page, cx, &order);
     }
-
-    if let Some(id) = clicked {
+    if let Some(id) = picked.plan {
         page.request(Next::Select(id), cx);
     }
     if new {
@@ -75,6 +77,94 @@ pub fn show(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
             Dialog::Rename { id, text } => rename_dialog(page, ui.ctx(), cx, id, text),
             Dialog::Delete { id, name } => delete_dialog(page, ui.ctx(), cx, id, name),
         };
+    }
+}
+
+/// What the plan rows picked this frame: a plan to show, or a new list order to save.
+#[derive(Default)]
+struct Picked {
+    plan: Option<i64>,
+    order: Option<Vec<i64>>,
+}
+
+/// Draws one selectable row per plan, each with the ` · reserves` label when it reserves. A click
+/// picks the plan, a drag onto another row picks a new order, and the row's menu moves it one place.
+fn plan_rows(
+    ui: &mut Ui,
+    plans: &[PlanSummary],
+    reserving: &[i64],
+    selected: Option<i64>,
+) -> Picked {
+    let mut picked = Picked::default();
+    for (index, plan) in plans.iter().enumerate() {
+        let row = ui.horizontal(|ui| {
+            drop(ui.selectable_label(selected == Some(plan.id), plan.name.as_str()));
+            if reserving.contains(&plan.id) {
+                ui.label(RichText::new(" · reserves").weak());
+            }
+        });
+        // The whole row is the drag handle and catches the clicks the name label would, so a plan
+        // can be dropped onto any part of another row.
+        let response = ui
+            .interact(
+                row.response.rect,
+                Id::new(("plan row", plan.id)),
+                Sense::click_and_drag(),
+            )
+            .on_hover_cursor(CursorIcon::Grab);
+        if response.clicked() {
+            picked.plan = Some(plan.id);
+        }
+        response.dnd_set_drag_payload(plan.id);
+        if let Some(dragged) = response.dnd_release_payload::<i64>()
+            && *dragged != plan.id
+        {
+            picked.order = Some(moved(plans, *dragged, index));
+        }
+        response.context_menu(|menu| {
+            let first = index == 0;
+            let last = index + 1 == plans.len();
+            if menu.add_enabled(!first, Button::new("Move up")).clicked() {
+                picked.order = Some(swapped(plans, index, index - 1));
+                menu.close();
+            }
+            if menu.add_enabled(!last, Button::new("Move down")).clicked() {
+                picked.order = Some(swapped(plans, index, index + 1));
+                menu.close();
+            }
+        });
+    }
+    picked
+}
+
+/// The order `plans` takes when the plan `from` is dragged onto the row at `to`: `from` leaves its
+/// place and goes where `to` was before the move. `[A, B, C]` with A onto C gives `[B, C, A]`, and
+/// C onto A gives `[C, A, B]`.
+fn moved(plans: &[PlanSummary], from: i64, to: usize) -> Vec<i64> {
+    let mut order: Vec<i64> = plans.iter().map(|plan| plan.id).collect();
+    if let Some(index) = order.iter().position(|plan| *plan == from) {
+        let id = order.remove(index);
+        let at = to.min(order.len());
+        order.insert(at, id);
+    }
+    order
+}
+
+/// The order `plans` takes when the plan at `from` swaps places with the one at `to`.
+fn swapped(plans: &[PlanSummary], from: usize, to: usize) -> Vec<i64> {
+    let mut order: Vec<i64> = plans.iter().map(|plan| plan.id).collect();
+    order.swap(from, to);
+    order
+}
+
+/// Saves a new list order and works the plans out again, so the next plan sees the moved claims.
+fn save_order(page: &mut BuildPage, cx: &mut Shared, order: &[i64]) {
+    match cx.store.set_plan_order(order) {
+        Ok(()) => {
+            cx.claims.mark_stale();
+            page.recalc(cx);
+        }
+        Err(error) => report(cx, format!("Could not save the plan order: {error}")),
     }
 }
 
@@ -196,8 +286,15 @@ fn delete_dialog(
         None => Some(Dialog::Delete { id, name }),
         Some(Answer::Confirm) => {
             match cx.store.delete_plan(id) {
-                Ok(()) if page.selected == Some(id) => page.clear(),
-                Ok(()) => {}
+                Ok(()) => {
+                    // A deleted plan no longer reserves, so the claims of the plans after it change.
+                    cx.claims.mark_stale();
+                    if page.selected == Some(id) {
+                        page.clear();
+                    } else if page.selected.is_some() {
+                        page.recalc(cx);
+                    }
+                }
                 Err(error) => report(cx, format!("Could not delete the plan: {error}")),
             }
             None
