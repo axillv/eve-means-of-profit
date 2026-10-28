@@ -186,6 +186,54 @@ pub fn run_seconds(input: &JobTimeInput) -> Result<u64, JobTimeError> {
     u64::try_from(seconds).ok().ok_or(JobTimeError::Overflow)
 }
 
+/// Seconds in one day: a job's day is a plain 24 hours.
+pub const SECONDS_PER_DAY: u64 = 86_400;
+
+/// A job's whole timing: one run, the whole run of `runs`, and how both fit a day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JobDuration {
+    pub seconds_per_run: u64,
+    pub total_seconds: u64,
+    pub job_days: u64,
+    pub runs_per_day: u64,
+}
+
+/// Seconds `runs` runs take: `seconds_per_run × runs`, checked and not rounded further.
+pub fn job_seconds(seconds_per_run: u64, runs: u64) -> Result<u64, JobTimeError> {
+    seconds_per_run
+        .checked_mul(runs)
+        .ok_or(JobTimeError::Overflow)
+}
+
+/// The whole days a job's `total_seconds` spans, rounded up; 0 for 0 seconds.
+pub fn job_days(total_seconds: u64) -> u64 {
+    total_seconds.div_ceil(SECONDS_PER_DAY)
+}
+
+/// How many runs of `seconds_per_run` a 24-hour day holds, floored.
+///
+/// A run of 0 seconds, or one longer than a day, holds none.
+pub fn runs_per_day(seconds_per_run: u64) -> u64 {
+    if seconds_per_run == 0 || seconds_per_run > SECONDS_PER_DAY {
+        return 0;
+    }
+    SECONDS_PER_DAY
+        .checked_div(seconds_per_run)
+        .unwrap_or_default()
+}
+
+/// The whole timing of `runs` runs of `input`, computed from one [`run_seconds`].
+pub fn duration(input: &JobTimeInput, runs: u64) -> Result<JobDuration, JobTimeError> {
+    let seconds_per_run = run_seconds(input)?;
+    let total_seconds = job_seconds(seconds_per_run, runs)?;
+    Ok(JobDuration {
+        seconds_per_run,
+        total_seconds,
+        job_days: job_days(total_seconds),
+        runs_per_day: runs_per_day(seconds_per_run),
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobTimeError {
     TeOutOfRange(u8),
@@ -368,6 +416,67 @@ mod tests {
         ];
         let huge = structure(u64::MAX, 100, rigs);
         assert_eq!(run_seconds(&huge), Err(JobTimeError::Overflow));
+    }
+
+    #[test]
+    fn duration_reports_the_whole_job() {
+        assert_eq!(
+            duration(&input(15_000, 4, 3, 0), 10),
+            Ok(JobDuration {
+                seconds_per_run: 12_672,
+                total_seconds: 126_720,
+                job_days: 2,
+                runs_per_day: 6,
+            })
+        );
+    }
+
+    #[test]
+    fn zero_runs_give_no_time() {
+        assert_eq!(
+            duration(&input(15_000, 4, 3, 0), 0),
+            Ok(JobDuration {
+                seconds_per_run: 12_672,
+                total_seconds: 0,
+                job_days: 0,
+                runs_per_day: 6,
+            })
+        );
+    }
+
+    #[test]
+    fn runs_per_day_counts_whole_runs() {
+        assert_eq!(runs_per_day(10_772), 8);
+        assert_eq!(runs_per_day(8_160), 10);
+        assert_eq!(runs_per_day(86_400), 1);
+        assert_eq!(runs_per_day(86_401), 0);
+        assert_eq!(runs_per_day(0), 0);
+        assert_eq!(runs_per_day(1), 86_400);
+    }
+
+    #[test]
+    fn job_days_rounds_up() {
+        assert_eq!(job_days(0), 0);
+        assert_eq!(job_days(1), 1);
+        assert_eq!(job_days(86_399), 1);
+        assert_eq!(job_days(86_400), 1);
+        assert_eq!(job_days(86_401), 2);
+    }
+
+    #[test]
+    fn job_seconds_multiplies_runs() {
+        assert_eq!(job_seconds(0, 5), Ok(0));
+        assert_eq!(job_seconds(7, 1), Ok(7));
+        assert_eq!(job_seconds(u64::MAX, 1), Ok(u64::MAX));
+    }
+
+    #[test]
+    fn job_seconds_reports_overflow() {
+        assert_eq!(job_seconds(u64::MAX, 2), Err(JobTimeError::Overflow));
+        assert_eq!(
+            duration(&input(u64::MAX, 0, 0, 0), 2),
+            Err(JobTimeError::Overflow)
+        );
     }
 
     #[test]
