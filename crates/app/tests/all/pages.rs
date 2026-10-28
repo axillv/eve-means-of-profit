@@ -371,7 +371,8 @@ mod tests {
         let env = env();
         let mut harness = start(&env, FakeEve::new(Vec::new(), None), NOW);
         loaded(&mut harness);
-        let pages: [(&str, &[&str]); 7] = [
+        let pages: [(&str, &[&str]); 8] = [
+            ("Today", &["Today"]),
             (
                 "Build",
                 &["Plans", "Pasted stock", "Plan", "Steps", "Buy list", "Item"],
@@ -392,6 +393,7 @@ mod tests {
                 // Once each (a tab bar or a second copy would show twice); a title that is also
                 // a rail label shows once more, on the rail.
                 let on_rail = [
+                    "Today",
                     "Assets",
                     "Net worth",
                     "Orders",
@@ -458,6 +460,7 @@ mod tests {
         loaded(&mut harness);
 
         let labels = [
+            "Today",
             "Build",
             "Industry jobs",
             "Orders",
@@ -491,7 +494,7 @@ mod tests {
         // Every entry is the same width; the rail adds the panel's padding around them.
         let widest = entries.iter().map(|rect| rect.width()).fold(0.0, f32::max);
         assert!(widest + 16.0 < 140.0, "the rail is under 140 px wide");
-        assert_eq!(entries[1].width(), widest, "Industry jobs fits its label");
+        assert_eq!(entries[2].width(), widest, "Industry jobs fits its label");
 
         let gap = |above: Rect, below: Rect| below.top() - above.bottom();
         let ordinary = gap(
@@ -542,6 +545,7 @@ mod tests {
         let labelled = rail_only(false);
         let icons = rail_only(true);
         let expected = [
+            "Today",
             "Build",
             "Industry jobs",
             "Orders",
@@ -763,6 +767,7 @@ mod tests {
         }
         let mut harness = start(&env, FakeEve::new(Vec::new(), None), NOW);
         loaded(&mut harness);
+        rail(&mut harness, "Build");
         harness.get_by_label("Drone 10").click();
         harness.run();
         // Steps comes before Buy list in the Build page, so the first PAU row is the Steps one.
@@ -796,11 +801,172 @@ mod tests {
         harness.snapshot("pages-assets");
     }
 
+    /// The six block titles of the Today page, in [`Block::ALL`] order.
+    const TODAY_TITLES: [&str; 6] = [
+        "Jobs",
+        "Plans",
+        "Orders",
+        "Warnings",
+        "Net worth",
+        "Characters",
+    ];
+
+    /// The left edge of the Today page's content. The rail's Today entry shares its label with
+    /// the page heading, which is the rightmost.
+    fn today_left(harness: &Harness<'_, App>) -> f32 {
+        harness
+            .query_all_by_label("Today")
+            .map(|node| node.rect().min.x)
+            .fold(f32::NEG_INFINITY, f32::max)
+    }
+
+    /// The rect of the Today block title `label`, not the rail entry of the same name.
+    fn today_title(harness: &Harness<'_, App>, label: &str) -> Rect {
+        let left = today_left(harness);
+        harness
+            .query_all_by_label(label)
+            .find(|node| node.rect().min.x >= left - 1.0)
+            .unwrap_or_else(|| panic!("no Today block title {label:?}"))
+            .rect()
+    }
+
+    fn today_titles(harness: &Harness<'_, App>) -> Vec<Rect> {
+        TODAY_TITLES
+            .iter()
+            .map(|label| today_title(harness, label))
+            .collect()
+    }
+
+    #[test]
+    fn a_fresh_app_starts_on_today_and_every_empty_block_says_why() {
+        let env = env();
+        let mut harness = start(&env, FakeEve::new(Vec::new(), None), NOW);
+        loaded(&mut harness);
+
+        assert!(
+            shown(&harness, "Warnings"),
+            "Warnings shows without a rail click, so Today starts"
+        );
+        for text in [
+            "Jobs to deliver and free slots show here once a character is added.",
+            "No plans yet. Each plan shows its next step here.",
+            "Market orders someone has beaten show here once a character is added.",
+            "None. Price spikes and thin markets in your plans show here.",
+            "Starts with your first character.",
+            "None yet.",
+        ] {
+            assert!(shown(&harness, text), "{text:?} shows");
+        }
+
+        let titles = today_titles(&harness);
+        let left = titles[0].min.x;
+        for title in &titles[..4] {
+            assert!((title.min.x - left).abs() < 1.0, "the first four are left");
+        }
+        let right = titles[4].min.x;
+        assert!(right > left, "the last two are right of the first four");
+        for title in &titles[4..] {
+            assert!((title.min.x - right).abs() < 1.0, "the last two are right");
+        }
+        assert!((titles[4].top() - titles[0].top()).abs() < 0.5);
+        for pair in titles.windows(2) {
+            assert!(
+                pair[1].top() > pair[0].top() || pair[1].min.x > pair[0].min.x,
+                "titles are in Block::ALL order"
+            );
+        }
+
+        for name in [
+            "Jobs: Add character",
+            "Plans: Pick a product",
+            "Orders: Add character",
+            "Net worth: Add character",
+            "Characters: Add character",
+        ] {
+            assert_eq!(
+                harness.query_all_by_label(name).count(),
+                1,
+                "{name} is shown once"
+            );
+        }
+        assert_eq!(
+            harness
+                .query_all_by_label("Warnings: Add character")
+                .count(),
+            0,
+            "Warnings has no button"
+        );
+        assert_eq!(
+            harness
+                .query_all_by_label("Warnings: Pick a product")
+                .count(),
+            0,
+            "Warnings has no button"
+        );
+    }
+
+    #[test]
+    fn the_blocks_keep_their_places_across_pages_and_characters() {
+        let env = env();
+        let mut harness = start(&env, FakeEve::new(Vec::new(), None), NOW);
+        loaded(&mut harness);
+        let before = today_titles(&harness);
+
+        rail(&mut harness, "Build");
+        rail(&mut harness, "Today");
+        let after = today_titles(&harness);
+        assert_eq!(after, before, "the block places do not move");
+
+        let mut with_characters =
+            start(&env, FakeEve::new(vec![character(MAIN, "Main")], None), NOW);
+        loaded(&mut with_characters);
+        let character_titles = today_titles(&with_characters);
+        assert_eq!(
+            character_titles, before,
+            "a character does not move the blocks"
+        );
+        for column in [&before[..4], &before[4..]] {
+            let x = column[0].min.x;
+            for title in column {
+                assert!((title.min.x - x).abs() < 1.0, "one x per column");
+            }
+        }
+    }
+
+    #[test]
+    fn a_filling_button_goes_to_its_page() {
+        let env = env();
+        let mut harness = start(&env, FakeEve::new(Vec::new(), None), NOW);
+        loaded(&mut harness);
+
+        crate::ui::click(&mut harness, "Plans: Pick a product");
+        assert!(shown(&harness, "Steps"), "Pick a product shows Build");
+
+        rail(&mut harness, "Today");
+        crate::ui::click(&mut harness, "Jobs: Add character");
+        assert!(
+            shown(&harness, "jEve data"),
+            "Add character shows Characters"
+        );
+    }
+
+    #[test]
+    fn the_today_page_matches_its_snapshot() {
+        let env = env();
+        let mut harness = start(&env, FakeEve::new(Vec::new(), None), NOW);
+        loaded(&mut harness);
+        harness.remove_cursor();
+        harness.run();
+        harness.snapshot("today-empty");
+    }
+
     #[test]
     fn the_build_page_matches_its_snapshot() {
         let env = env();
         let mut harness = start(&env, FakeEve::new(Vec::new(), None), NOW);
         loaded(&mut harness);
+        rail(&mut harness, "Build");
+        harness.remove_cursor();
         harness.run();
         harness.snapshot("pages-build");
     }

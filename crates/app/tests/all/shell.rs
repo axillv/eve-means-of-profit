@@ -251,10 +251,12 @@ mod tests {
             eve: Box::new(NoEve),
             market: Box::new(Offline),
         };
-        Harness::builder()
+        let mut harness = Harness::builder()
             .with_size(vec2(1280.0, 800.0))
             .with_max_steps(crate::SETTLE_STEPS)
-            .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"))
+            .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
+        harness.state_mut().show_page(Page::Build);
+        harness
     }
 
     /// Whether some node shows `text`. The error text is on both the first-run screen and the status line.

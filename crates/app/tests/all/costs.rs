@@ -393,6 +393,9 @@ mod tests {
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
         harness.state_mut().shared_mut().market = Arc::new(Prices::new(Box::new(FakeForge)));
         harness
+            .state_mut()
+            .show_page(eve_means_of_profit::rail::Page::Build);
+        harness
     }
 
     /// Opens the plan and waits until the prices and the industry data have arrived.

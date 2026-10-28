@@ -284,6 +284,9 @@ mod tests {
             .with_max_steps(crate::SETTLE_STEPS)
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
         harness.state_mut().shared_mut().market = Arc::new(Prices::new(Box::new(EmptyForge)));
+        harness
+            .state_mut()
+            .show_page(eve_means_of_profit::rail::Page::Build);
         harness.run();
         harness
     }

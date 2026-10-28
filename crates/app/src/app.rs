@@ -24,6 +24,7 @@ pub mod setup;
 pub mod status;
 pub mod table;
 pub mod theme;
+pub mod today;
 pub mod worker;
 
 use std::error::Error;
@@ -311,7 +312,7 @@ impl App {
             history_checked: None,
             events,
             events_tx,
-            page: Page::Build,
+            page: Page::Today,
             build_page: BuildPage::default(),
             build_dock: dock::build_layout(),
             assets_page: AssetsPage,
@@ -344,6 +345,11 @@ impl App {
     /// The state the pages and windows share, for code that drives the app from outside.
     pub fn shared_mut(&mut self) -> &mut Shared {
         &mut self.shared
+    }
+
+    /// Makes `page` the page on show, for code that drives the app from outside.
+    pub fn show_page(&mut self, page: Page) {
+        self.page = page;
     }
 
     /// One frame: take the worker's results, then draw.
@@ -433,6 +439,11 @@ impl App {
         let style = self.shared.style;
         rail::show_with(ui, &style, &mut self.page, self.shared.rail_icons_only);
         egui::CentralPanel::default().show(ui, |ui| match self.page {
+            Page::Today => {
+                if let Some(page) = today::show(ui, &mut self.shared) {
+                    self.page = page;
+                }
+            }
             Page::Build => dock::show_locked(
                 ui,
                 &style,

@@ -383,6 +383,9 @@ mod tests {
             calls: Arc::clone(&calls),
         };
         harness.state_mut().shared_mut().market = Arc::new(Prices::new(Box::new(forge)));
+        harness
+            .state_mut()
+            .show_page(eve_means_of_profit::rail::Page::Build);
         (harness, calls)
     }
 

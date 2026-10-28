@@ -14,6 +14,7 @@ const GROUP_SPACE: f32 = 8.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
+    Today,
     Build,
     Assets,
     NetWorth,
@@ -24,7 +25,8 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 7] = [
+    pub const ALL: [Page; 8] = [
+        Page::Today,
         Page::Build,
         Page::Jobs,
         Page::Orders,
@@ -36,6 +38,7 @@ impl Page {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Today => "Today",
             Self::Build => "Build",
             Self::Assets => "Assets",
             Self::NetWorth => "Net worth",
@@ -49,6 +52,7 @@ impl Page {
     /// The icon that sits before the label.
     fn icon(self) -> &'static str {
         match self {
+            Self::Today => regular::SUN,
             Self::Build => regular::HAMMER,
             Self::Assets => regular::PACKAGE,
             Self::NetWorth => regular::CHART_LINE_UP,

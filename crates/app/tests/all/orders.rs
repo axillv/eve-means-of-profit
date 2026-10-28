@@ -324,6 +324,9 @@ mod tests {
         harness.state_mut().shared_mut().market =
             Arc::new(Prices::new(Box::new(FakeForge { requests })));
         harness
+            .state_mut()
+            .show_page(eve_means_of_profit::rail::Page::Build);
+        harness
     }
 
     /// Runs frames until the start-up read has arrived: the page's loading line is gone.

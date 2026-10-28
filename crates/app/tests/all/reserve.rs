@@ -514,6 +514,10 @@ mod tests {
             "the start-up read never arrived"
         );
         harness
+            .state_mut()
+            .show_page(eve_means_of_profit::rail::Page::Build);
+        harness.run();
+        harness
     }
 
     /// The left edge of the Buy list panel, which sits right of the Steps panel.
