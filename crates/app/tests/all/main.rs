@@ -16,6 +16,7 @@ mod reserve;
 mod setup;
 mod setup_costs;
 mod setup_invention;
+mod setup_read;
 mod setup_structures;
 mod shell;
 mod table;
