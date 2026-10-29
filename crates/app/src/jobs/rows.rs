@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use mop_core::industry::TypeId;
+use mop_core::plan::PlanProduct;
 use mop_core::reserve::{PlanForJobs, RunningJob, suggest};
 use mop_esi::character_data::JobStatus;
 use mop_store::reservations::PlanStock;
@@ -127,11 +128,11 @@ fn plan_name(plan_id: i64, plans: &[(PlanForJobs, String)]) -> String {
         .unwrap_or_else(|| format!("plan {plan_id}"))
 }
 
-/// A plan as the job suggestions read it: its id and product, what it builds, and the characters
-/// it accepts.
+/// A plan as the job suggestions read it: its id, its first product and the rest of them built
+/// alongside it, and the characters it accepts.
 fn for_jobs(
     plan_id: i64,
-    product: TypeId,
+    products: &[PlanProduct],
     build: &BTreeSet<TypeId>,
     stock: &PlanStock,
 ) -> PlanForJobs {
@@ -139,10 +140,15 @@ fn for_jobs(
         PlanStock::Characters(scope) => Some(scope.characters.clone()),
         PlanStock::Pasted => None,
     };
+    let product = products.first().map_or(0, |first| first.type_id);
+    let mut build = build.clone();
+    for later in products.iter().skip(1) {
+        build.insert(later.type_id);
+    }
     PlanForJobs {
         plan_id,
         product,
-        build: build.clone(),
+        build,
         characters,
     }
 }
@@ -168,7 +174,8 @@ fn read_plans(cx: &mut Shared) -> mop_store::Result<Vec<(PlanForJobs, String)>> 
             continue;
         };
         let stock = cx.store.plan_stock(summary.id)?;
-        let plan = for_jobs(summary.id, record.product, &record.build, &stock);
+        let products = cx.store.plan_products(summary.id)?;
+        let plan = for_jobs(summary.id, &products, &record.build, &stock);
         plans.push((plan, summary.name));
     }
     Ok(plans)
@@ -273,6 +280,11 @@ mod tests {
         ]
     }
 
+    /// One product of a plan, as the store reads it.
+    fn product(type_id: TypeId, quantity: u64) -> PlanProduct {
+        PlanProduct { type_id, quantity }
+    }
+
     #[test]
     fn an_unassigned_job_gets_the_plans_that_can_take_it() {
         let plans = plans();
@@ -338,12 +350,50 @@ mod tests {
             characters: BTreeSet::from([MAIN, ALT]),
             places: Places::All,
         };
-        let scoped = for_jobs(11, 2456, &build, &PlanStock::Characters(characters));
+        let scoped = for_jobs(
+            11,
+            &[product(2456, 10)],
+            &build,
+            &PlanStock::Characters(characters),
+        );
         assert_eq!(scoped.characters, Some(BTreeSet::from([MAIN, ALT])));
         assert_eq!(scoped.product, 2456);
         assert_eq!(scoped.build, build);
 
-        let pasted = for_jobs(11, 2456, &build, &PlanStock::Pasted);
+        let pasted = for_jobs(11, &[product(2456, 10)], &build, &PlanStock::Pasted);
         assert_eq!(pasted.characters, None);
+    }
+
+    #[test]
+    fn a_multi_product_plan_keeps_its_first_product_and_builds_the_later_ones() {
+        let products = [product(2456, 10), product(587, 2)];
+        let stock = PlanStock::Characters(StockScope {
+            characters: BTreeSet::from([MAIN]),
+            places: Places::All,
+        });
+        let plan = for_jobs(11, &products, &BTreeSet::new(), &stock);
+        assert_eq!(plan.product, 2456);
+        assert_eq!(plan.build, BTreeSet::from([587]));
+        assert_eq!(plan.characters, Some(BTreeSet::from([MAIN])));
+
+        // The running job for 587 is a later product, so the plan is suggested for it; the job
+        // for 2454 is suggested only while 2454 sits in the build set.
+        let plans = vec![(plan, "Hobgoblin A".to_owned())];
+        assert_eq!(
+            plan_cell(701, &running(), &plans, &BTreeMap::new()),
+            PlanCell::Suggest(vec![(11, "Hobgoblin A".to_owned())])
+        );
+        assert_eq!(
+            plan_cell(501, &running(), &plans, &BTreeMap::new()),
+            PlanCell::Suggest(Vec::new())
+        );
+
+        let with_build = for_jobs(11, &products, &BTreeSet::from([2454]), &stock);
+        let plans = vec![(with_build, "Hobgoblin A".to_owned())];
+        assert_eq!(
+            plan_cell(501, &running(), &plans, &BTreeMap::new()),
+            PlanCell::Suggest(vec![(11, "Hobgoblin A".to_owned())])
+        );
+        assert_eq!(for_jobs(11, &[], &BTreeSet::new(), &stock).product, 0);
     }
 }

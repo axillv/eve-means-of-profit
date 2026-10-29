@@ -6,8 +6,10 @@ use std::collections::BTreeMap;
 use egui::{Align2, Button, Context, CursorIcon, Id, RichText, Sense, TextEdit, Ui, Window};
 use mop_core::industry::TypeId;
 use mop_core::paste::parse_stock;
+use mop_core::plan::PlanProduct;
 use mop_core::reserve;
 use mop_core::stock::resolve;
+use mop_esi::character_data::Order;
 use mop_store::plans::PlanStage;
 use mop_store::{PlanStock, PlanSummary};
 
@@ -108,8 +110,7 @@ struct Picked {
 )]
 #[derive(Debug, Clone, Copy)]
 struct StageFacts {
-    owned: u64,
-    quantity: u64,
+    all_owned: bool,
     material_in: bool,
     assigned: bool,
     selling: bool,
@@ -120,7 +121,7 @@ struct StageFacts {
 fn automatic_stage(facts: &StageFacts) -> PlanStage {
     if facts.selling && facts.reached_done {
         PlanStage::Sold
-    } else if facts.owned >= facts.quantity {
+    } else if facts.all_owned {
         PlanStage::Done
     } else if facts.assigned {
         PlanStage::Building
@@ -129,6 +130,34 @@ fn automatic_stage(facts: &StageFacts) -> PlanStage {
     } else {
         PlanStage::Planned
     }
+}
+
+/// Whether the counted stock holds every product that has a type id, each at its quantity. A
+/// product without a type id asks for nothing, and a plan that holds nothing else to look for
+/// owns nothing.
+fn all_owned(products: &[PlanProduct], counted: &BTreeMap<TypeId, u64>) -> bool {
+    let mut owned = false;
+    for product in products.iter().filter(|product| product.type_id > 0) {
+        if counted.get(&product.type_id).copied().unwrap_or(0) < product.quantity {
+            return false;
+        }
+        owned = true;
+    }
+    owned
+}
+
+/// Whether `orders` holds a live sell order for any of the plan's products: a player's sell order
+/// that still has units left and has not expired.
+fn sells_any(products: &[PlanProduct], orders: &[Order], now: i64) -> bool {
+    orders.iter().any(|order| {
+        !order.is_buy
+            && !order.is_corporation
+            && order.volume_remain > 0
+            && order.expires > now
+            && products
+                .iter()
+                .any(|product| product.type_id == order.type_id)
+    })
 }
 
 /// The stage tag on a row: ` · Buying`, or ` · Done (you)` when the user set it.
@@ -187,6 +216,9 @@ fn advance_stages(plans: &mut [PlanSummary], page: &mut BuildPage, cx: &mut Shar
         let Ok(Some(record)) = cx.store.plan(summary.id) else {
             continue;
         };
+        let Ok(products) = cx.store.plan_products(summary.id) else {
+            continue;
+        };
         let Ok(stock) = cx.store.plan_stock(summary.id) else {
             continue;
         };
@@ -205,10 +237,14 @@ fn advance_stages(plans: &mut [PlanSummary], page: &mut BuildPage, cx: &mut Shar
                 None => BTreeMap::new(),
             },
         };
-        let owned = counted.get(&record.product).copied().unwrap_or(0);
+        // Done needs every product owned; any product's recipe or the plan's build inputs count
+        // as materials when they have units.
+        let all_owned = all_owned(&products, &counted);
         let mut inputs = record.build.clone();
-        if let Some(recipe) = page.recipes.get(record.product) {
-            inputs.extend(recipe.materials.iter().map(|(type_id, _)| *type_id));
+        for product in &products {
+            if let Some(recipe) = page.recipes.get(product.type_id) {
+                inputs.extend(recipe.materials.iter().map(|(type_id, _)| *type_id));
+            }
         }
         let material_in = inputs
             .iter()
@@ -222,19 +258,10 @@ fn advance_stages(plans: &mut [PlanSummary], page: &mut BuildPage, cx: &mut Shar
             cx.session
                 .character_data(id)
                 .and_then(|data| data.orders.as_ref())
-                .is_some_and(|orders| {
-                    orders.data.iter().any(|order| {
-                        order.type_id == record.product
-                            && !order.is_buy
-                            && !order.is_corporation
-                            && order.volume_remain > 0
-                            && order.expires > now
-                    })
-                })
+                .is_some_and(|orders| sells_any(&products, &orders.data, now))
         });
         let auto = automatic_stage(&StageFacts {
-            owned,
-            quantity: record.quantity,
+            all_owned,
             material_in,
             assigned,
             selling,
@@ -487,12 +514,12 @@ fn delete_dialog(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mop_core::money::Money;
 
     /// A plan with nothing seen yet, so each test turns on only the signals it needs.
-    fn facts(owned: u64, quantity: u64) -> StageFacts {
+    fn facts(all_owned: bool) -> StageFacts {
         StageFacts {
-            owned,
-            quantity,
+            all_owned,
             material_in: false,
             assigned: false,
             selling: false,
@@ -500,13 +527,38 @@ mod tests {
         }
     }
 
+    /// One product of a plan, as the store reads it.
+    fn product(type_id: TypeId, quantity: u64) -> PlanProduct {
+        PlanProduct { type_id, quantity }
+    }
+
+    /// A player's sell order for `type_id` that expires at `expires`.
+    fn order(type_id: TypeId, expires: i64) -> Order {
+        Order {
+            order_id: 1,
+            type_id,
+            location_id: 60_003_760,
+            region_id: 10_000_002,
+            is_buy: false,
+            price: Money::ZERO,
+            volume_remain: 1,
+            volume_total: 1,
+            issued: 900_000,
+            expires,
+            range: "station".to_owned(),
+            escrow: None,
+            min_volume: None,
+            is_corporation: false,
+        }
+    }
+
     #[test]
     fn automatic_stage_follows_the_game_data() {
-        assert_eq!(automatic_stage(&facts(0, 10)), PlanStage::Planned);
+        assert_eq!(automatic_stage(&facts(false)), PlanStage::Planned);
         assert_eq!(
             automatic_stage(&StageFacts {
                 material_in: true,
-                ..facts(0, 10)
+                ..facts(false)
             }),
             PlanStage::Buying
         );
@@ -514,15 +566,16 @@ mod tests {
             automatic_stage(&StageFacts {
                 material_in: true,
                 assigned: true,
-                ..facts(0, 10)
+                ..facts(false)
             }),
             PlanStage::Building
         );
+        assert_eq!(automatic_stage(&facts(true)), PlanStage::Done);
         assert_eq!(
             automatic_stage(&StageFacts {
                 material_in: true,
                 assigned: true,
-                ..facts(10, 10)
+                ..facts(true)
             }),
             PlanStage::Done
         );
@@ -530,17 +583,48 @@ mod tests {
             automatic_stage(&StageFacts {
                 selling: true,
                 reached_done: true,
-                ..facts(0, 10)
+                ..facts(false)
             }),
             PlanStage::Sold
         );
         assert_eq!(
             automatic_stage(&StageFacts {
                 selling: true,
-                ..facts(10, 10)
+                ..facts(true)
             }),
             PlanStage::Done
         );
+    }
+
+    #[test]
+    fn every_product_must_be_owned_for_done() {
+        let products = [product(2456, 10), product(587, 2)];
+        let one_short = BTreeMap::from([(2456, 10), (587, 1)]);
+        let complete = BTreeMap::from([(2456, 10), (587, 2)]);
+        let later_only = BTreeMap::from([(587, 2)]);
+        assert!(!all_owned(&products, &one_short));
+        assert!(all_owned(&products, &complete));
+        assert!(!all_owned(&products, &later_only));
+        // A product nothing was found for asks for no units; a plan that holds nothing else to
+        // look for owns nothing, as it did before it could hold several products.
+        assert!(!all_owned(&[product(0, 10)], &BTreeMap::new()));
+        assert!(all_owned(
+            &[product(0, 10), product(2456, 1)],
+            &BTreeMap::from([(2456, 1)])
+        ));
+    }
+
+    #[test]
+    fn an_order_for_any_product_makes_selling_true() {
+        let products = [product(2456, 10), product(587, 2)];
+        let now = 1_000_000;
+        assert!(sells_any(&products, &[order(587, now + 60)], now));
+        assert!(sells_any(&products, &[order(2456, now + 60)], now));
+        assert!(!sells_any(&products, &[order(2454, now + 60)], now));
+        assert!(!sells_any(&products, &[order(587, now - 60)], now));
+        let mut bought = order(587, now + 60);
+        bought.is_buy = true;
+        assert!(!sells_any(&products, &[bought], now));
     }
 
     #[test]
