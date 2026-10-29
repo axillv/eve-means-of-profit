@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use egui::{Button, Checkbox, ComboBox, Grid, Key, RichText, TextEdit, Ui};
 use mop_core::format::group_thousands;
 use mop_core::industry::{Activity, TypeId};
+use mop_core::plan::PlanProduct;
 use mop_core::reserve::Claims;
 use mop_core::stock::{
     CharacterId, ItemId, LocationId, Places, ResolvedAsset, StockScope, resolve,
@@ -48,6 +49,7 @@ pub fn show(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
         .show(ui, |ui| {
             product_row(page, ui, cx);
             quantity_row(page, ui, cx);
+            more_rows(page, ui, cx);
             facility_row(page, ui, cx, Activity::Manufacturing);
             facility_row(page, ui, cx, Activity::Reaction);
             price_row(page, ui, cx);
@@ -58,24 +60,37 @@ pub fn show(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
 
 /// The heading and the Save button. Returns whether Save was clicked.
 fn header(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> bool {
-    let Some(record) = page.record.as_ref() else {
+    if page.record.is_none() {
         return false;
-    };
-    let product = if record.product == 0 {
-        "no product yet".to_owned()
-    } else {
-        type_name(record.product, cx.sde.as_ref(), &mut cx.notices)
-    };
-    let mut text = format!("PLAN  {product} × {}", record.quantity);
-    if page.dirty {
-        text.push_str(" (unsaved)");
     }
+    let text = header_text(page, cx);
     let mut save = false;
     ui.horizontal(|ui| {
         ui.strong(text);
         save = ui.add_enabled(page.dirty, Button::new("Save")).clicked();
     });
     save
+}
+
+/// The heading: the first product and its quantity, then how many more the plan holds.
+pub(crate) fn header_text(page: &BuildPage, cx: &mut Shared) -> String {
+    let first = page.products.first().copied().unwrap_or(PlanProduct {
+        type_id: 0,
+        quantity: 1,
+    });
+    let product = if first.type_id == 0 {
+        "no product yet".to_owned()
+    } else {
+        type_name(first.type_id, cx.sde.as_ref(), &mut cx.notices)
+    };
+    let mut text = format!("PLAN  {product} × {}", first.quantity);
+    if page.products.len() > 1 {
+        text.push_str(&format!(" + {} more", page.products.len() - 1));
+    }
+    if page.dirty {
+        text.push_str(" (unsaved)");
+    }
+    text
 }
 
 fn product_row(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
@@ -99,14 +114,18 @@ fn product_row(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
         }
     });
     if let Some(id) = picked {
-        edit(page, cx, |record| record.product = id);
+        page.add_product(id, cx);
         page.product_query.clear();
     }
     ui.end_row();
 }
 
 /// Types with a recipe that match the search, at most [`MATCHES`] of them, in search order.
-fn product_matches(query: &str, page: &BuildPage, cx: &mut Shared) -> Vec<(TypeId, String)> {
+pub(crate) fn product_matches(
+    query: &str,
+    page: &BuildPage,
+    cx: &mut Shared,
+) -> Vec<(TypeId, String)> {
     let query = query.trim();
     let Some(sde) = cx.sde.as_ref() else {
         return Vec::new();
@@ -133,32 +152,51 @@ fn product_matches(query: &str, page: &BuildPage, cx: &mut Shared) -> Vec<(TypeI
 
 fn quantity_row(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
     ui.label("Quantity");
-    ui.vertical(|ui| {
-        let typed = ui.add(TextEdit::singleline(&mut page.quantity_text).desired_width(120.0));
-        if typed.changed() {
-            match parse_quantity(&page.quantity_text) {
-                Some(quantity) => {
-                    page.quantity_ok = true;
-                    edit(page, cx, |record| record.quantity = quantity);
-                }
-                None => page.quantity_ok = false,
-            }
-        }
-        if !page.quantity_ok {
-            ui.label(
-                RichText::new("Quantity must be a whole number of 1 or more").color(cx.style.neg),
-            );
-        }
-    });
+    ui.vertical(|ui| quantity_field(page, ui, cx, 0));
     ui.end_row();
 }
 
-/// A whole number of 1 or more, or `None`.
-fn parse_quantity(text: &str) -> Option<u64> {
-    text.trim()
-        .parse::<u64>()
-        .ok()
-        .filter(|quantity| *quantity >= 1)
+/// One grid row per product after the first: its name, its quantity field and a Remove button.
+/// A click removes one product, so the rows stop at the one removed.
+fn more_rows(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
+    let rows = page.products.len();
+    for row in 1..rows {
+        let Some(product) = page.products.get(row) else {
+            break;
+        };
+        let name = type_name(product.type_id, cx.sde.as_ref(), &mut cx.notices);
+        ui.label(name);
+        let mut removed = false;
+        ui.horizontal(|ui| {
+            quantity_field(page, ui, cx, row);
+            if ui
+                .add_enabled(page.can_remove(row), Button::new("Remove"))
+                .clicked()
+            {
+                page.remove_product(row, cx);
+                removed = true;
+            }
+        });
+        ui.end_row();
+        if removed {
+            break;
+        }
+    }
+}
+
+/// One product's quantity field, with the reason under it while its text does not read as a
+/// whole number of 1 or more.
+fn quantity_field(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared, row: usize) {
+    let Some(text) = page.quantity_texts.get_mut(row) else {
+        return;
+    };
+    let typed = ui.add(TextEdit::singleline(text).desired_width(120.0));
+    if typed.changed() && page.type_quantity(row) {
+        page.edited(cx);
+    }
+    if !page.quantity_ok.get(row).copied().unwrap_or(true) {
+        ui.label(RichText::new("Quantity must be a whole number of 1 or more").color(cx.style.neg));
+    }
 }
 
 fn facility_row(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared, activity: Activity) {
