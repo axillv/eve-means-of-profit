@@ -5,6 +5,7 @@
 #[cfg(test)]
 mod tests {
 
+    use std::collections::BTreeSet;
     use std::fs;
     use std::io::Write;
     use std::ops::ControlFlow;
@@ -16,6 +17,7 @@ mod tests {
     use eve_means_of_profit::rail::Page;
     use eve_means_of_profit::session::NoEve;
     use eve_means_of_profit::{App, AppConfig};
+    use mop_esi::characters::{Character, Login};
     use mop_sde::{Fetch, FetchError, import};
     use mop_store::{Store, StoreError};
     use tempfile::TempDir;
@@ -25,7 +27,12 @@ mod tests {
     const HOME_FORT: i64 = 1_035_466_617_946;
     const REFUSED: i64 = 1_035_466_617_999;
     const STAGING: i64 = 1_035_466_618_000;
-    const EMPTY: &str = "No structures yet. Refresh a character on the Characters page to find the structures your items are in.";
+    const MUTE: &str = "Names EVE gives come from your characters' data. A name you type here shows everywhere instead.";
+    const WHY: &str = "No structures yet.";
+    const WHAT_ADD: &str =
+        "The app lists the structures your items sit in once you add a character and refresh it.";
+    const WHAT_REFRESH: &str =
+        "Refresh a character on the Characters page to find the structures your items are in.";
 
     /// The network is never used: the game data is installed and checked the same day.
     struct NoNetwork;
@@ -222,6 +229,15 @@ mod tests {
         for header in ["Facilities", "Freight services", "Price rule", "Structures"] {
             assert!(shown(&harness, header), "the {header} panel shows");
         }
+        assert!(!shown(&harness, WHY), "the empty text is absent");
+        assert!(
+            !shown(&harness, "Add character"),
+            "the empty fill is absent"
+        );
+        assert!(
+            !shown(&harness, "Refresh a character"),
+            "the empty fill is absent"
+        );
 
         // Row 1: EVE's name, typed name, system, check time.
         let row_one = [
@@ -369,8 +385,68 @@ mod tests {
         let folders = Folders::new();
         let harness = start(&folders);
 
-        assert!(shown(&harness, EMPTY), "the empty text shows");
+        assert!(shown(&harness, WHY), "the empty text shows");
+        assert!(shown(&harness, MUTE), "the panel's explanation stays");
+        assert!(
+            rect_of(&harness, MUTE).bottom() < rect_of(&harness, WHY).top(),
+            "the explanation stays above the empty state"
+        );
         assert!(!shown(&harness, "0 structures"), "no table or footer shows");
+    }
+
+    #[test]
+    fn with_no_characters_the_empty_state_offers_add_character() {
+        let folders = Folders::new();
+        let mut harness = start(&folders);
+
+        assert!(shown(&harness, WHY));
+        assert!(shown(&harness, WHAT_ADD), "it says what adds a character");
+        assert!(shown(&harness, "Add character"), "the one fill shows");
+        assert!(
+            !shown(&harness, "Refresh a character"),
+            "the empty state draws no second button"
+        );
+
+        click(&mut harness, "Add character");
+        assert!(
+            shown(&harness, "jEve data"),
+            "Add character opens the Characters page"
+        );
+    }
+
+    #[test]
+    fn with_a_character_but_no_structures_the_empty_state_offers_refresh() {
+        let folders = Folders::new();
+        let mut harness = start(&folders);
+        harness
+            .state_mut()
+            .shared_mut()
+            .session
+            .put_character(Character {
+                id: 42,
+                name: "Main".to_owned(),
+                scopes: BTreeSet::new(),
+                added_at: NOW,
+                login: Login::Ok,
+            });
+        harness.run_steps(2);
+
+        assert!(shown(&harness, WHY));
+        assert!(
+            shown(&harness, WHAT_REFRESH),
+            "it says what finds a structure"
+        );
+        assert!(shown(&harness, "Refresh a character"), "the one fill shows");
+        assert!(
+            !shown(&harness, "Add character"),
+            "the empty state draws no second button"
+        );
+
+        click(&mut harness, "Refresh a character");
+        assert!(
+            shown(&harness, "jEve data"),
+            "Refresh a character opens the Characters page"
+        );
     }
 
     #[test]

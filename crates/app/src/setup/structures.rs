@@ -9,11 +9,17 @@ use mop_sde::Sde;
 
 use crate::Shared;
 use crate::build::prices::age_text;
+use crate::empty::{self, Fill};
+use crate::rail::Page;
 use crate::table::Table;
 use crate::table::model::{Cell, Column, ColumnKind, Row};
 
 const MUTE: &str = "Names EVE gives come from your characters' data. A name you type here shows everywhere instead.";
-const EMPTY: &str = "No structures yet. Refresh a character on the Characters page to find the structures your items are in.";
+const WHY: &str = "No structures yet.";
+const WHAT_ADD: &str =
+    "The app lists the structures your items sit in once you add a character and refresh it.";
+const WHAT_REFRESH: &str =
+    "Refresh a character on the Characters page to find the structures your items are in.";
 const NO_VALUE: &str = "—";
 const NO_ACCESS: &str = " · no access";
 /// The most structure rows the table shows before it scrolls.
@@ -84,7 +90,17 @@ fn draw(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
     let now = (cx.clock)();
     let places = places_of(cx.session.structures(), &typed, cx.sde.as_ref(), now);
     if places.is_empty() {
-        ui.colored_label(cx.style.mute, EMPTY);
+        let no_character = cx.session.characters().is_empty() && cx.session.jeve().is_none();
+        let (what, label) = if no_character {
+            (WHAT_ADD, "Add character")
+        } else {
+            (WHAT_REFRESH, "Refresh a character")
+        };
+        let fill = Fill {
+            label,
+            page: Some(Page::Characters),
+        };
+        empty::show(ui, &cx.style, WHY, what, Some(fill));
         return;
     }
 
