@@ -98,6 +98,40 @@ pub enum RuleValue {
     Fixed(Money),
 }
 
+/// What priced an item: its own rule, its group's, its category's, or the app-wide price.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PricedBy {
+    AppWide,
+    Item,
+    Group(u32),
+    Category(u32),
+}
+
+/// The rule that prices one item and what set it: the item's own rule, else its group's, else
+/// its category's, else the app-wide `Value items at` price. The most specific rule wins; only
+/// the target kind decides, never when its change was made.
+pub fn resolve(
+    rules: &BTreeMap<RuleTarget, RuleValue>,
+    app_wide: PriceRule,
+    type_id: TypeId,
+    group_id: u32,
+    category_id: u32,
+) -> (RuleValue, PricedBy) {
+    for (target, priced_by) in [
+        (RuleTarget::Item(type_id), PricedBy::Item),
+        (RuleTarget::Group(group_id), PricedBy::Group(group_id)),
+        (
+            RuleTarget::Category(category_id),
+            PricedBy::Category(category_id),
+        ),
+    ] {
+        if let Some(value) = rules.get(&target) {
+            return (*value, priced_by);
+        }
+    }
+    (RuleValue::Market(app_wide), PricedBy::AppWide)
+}
+
 /// One change of a price rule: the rule it is about, what it became (`None` means the rule was
 /// removed) and the Unix time the change was made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +226,7 @@ fn read_changes(
 }
 
 const KEY_PRICE_RULE: &str = "default_price_rule";
+const KEY_VALUE_PRICE: &str = "value_price";
 const KEY_DENSITY: &str = "density";
 const KEY_INTERFACE_SIZE: &str = "interface_size";
 const KEY_RAIL_ICONS_ONLY: &str = "rail_icons_only";
@@ -374,6 +409,29 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// The app-wide `Value items at` price: what a point with no rule over it is worth per
+    /// unit. Unset: [`PriceRule::SellFivePercent`]. A saved value that is not a known
+    /// [`plans::price_rule_code`] is the same bad-value error as a bad `default_price_rule`.
+    pub fn value_price(&self) -> Result<PriceRule> {
+        match read_setting(&self.conn, KEY_VALUE_PRICE)? {
+            None => Ok(PriceRule::SellFivePercent),
+            Some(text) => {
+                let code = stored_number(KEY_VALUE_PRICE, &text)?;
+                plans::price_rule_from_code(code).ok_or_else(|| bad_value(KEY_VALUE_PRICE, &text))
+            }
+        }
+    }
+
+    /// Saves the app-wide `Value items at` price, replacing an earlier one. Not dated:
+    /// switching it re-prices the whole net worth chart.
+    pub fn set_value_price(&mut self, rule: PriceRule) -> Result<()> {
+        write_setting(
+            &self.conn,
+            KEY_VALUE_PRICE,
+            &plans::price_rule_code(rule).to_string(),
+        )
     }
 
     /// Records what the price rule for `target` became at the Unix time `at`. A change for the
@@ -660,5 +718,102 @@ mod tests {
             )
             .expect("good change at the same time");
         assert_eq!(store.price_rule_changes().expect("changes").len(), 2);
+    }
+
+    /// The acceptance rules: an item, a group, a category and the app-wide fallback.
+    fn acceptance_rules() -> BTreeMap<RuleTarget, RuleValue> {
+        BTreeMap::from([
+            (RuleTarget::Item(11_551), RuleValue::Fixed(isk(29_000_000))),
+            (
+                RuleTarget::Group(18),
+                RuleValue::Market(PriceRule::BuyFivePercent),
+            ),
+            (
+                RuleTarget::Category(4),
+                RuleValue::Market(PriceRule::SellMedian),
+            ),
+        ])
+    }
+
+    #[test]
+    fn resolve_picks_the_most_specific_rule_or_the_app_wide_price() {
+        let rules = acceptance_rules();
+        // Capital Armor Plate: its own rule wins over its group's and its category's.
+        assert_eq!(
+            resolve(&rules, PriceRule::SellFivePercent, 11_551, 873, 17),
+            (RuleValue::Fixed(isk(29_000_000)), PricedBy::Item)
+        );
+        // Tritanium: no item rule, so the group's wins over the category's.
+        assert_eq!(
+            resolve(&rules, PriceRule::SellFivePercent, 34, 18, 4),
+            (
+                RuleValue::Market(PriceRule::BuyFivePercent),
+                PricedBy::Group(18)
+            )
+        );
+        // A group-427 item in category 4: no item or group rule, so the category's wins.
+        assert_eq!(
+            resolve(&rules, PriceRule::SellFivePercent, 25_232, 427, 4),
+            (
+                RuleValue::Market(PriceRule::SellMedian),
+                PricedBy::Category(4)
+            )
+        );
+        // PAU: no rule over it, so the app-wide price prices it.
+        assert_eq!(
+            resolve(&rules, PriceRule::HighestBuy, 12_612, 100, 18),
+            (RuleValue::Market(PriceRule::HighestBuy), PricedBy::AppWide)
+        );
+    }
+
+    #[test]
+    fn an_item_rule_beats_its_group_even_when_the_group_rule_is_later() {
+        let (_dir, _path, mut store) = open_temp();
+        store
+            .set_price_rule(
+                RuleTarget::Item(11_551),
+                Some(RuleValue::Fixed(isk(29_000_000))),
+                1_000_000_000,
+            )
+            .expect("item");
+        store
+            .set_price_rule(
+                RuleTarget::Group(873),
+                Some(RuleValue::Market(PriceRule::WalkSell)),
+                1_001_728_000,
+            )
+            .expect("group later");
+        let rules = store.price_rules_at(1_001_728_000).expect("at");
+        assert_eq!(
+            resolve(&rules, PriceRule::SellFivePercent, 11_551, 873, 17),
+            (RuleValue::Fixed(isk(29_000_000)), PricedBy::Item)
+        );
+    }
+
+    #[test]
+    fn value_price_is_sell_five_percent_until_saved_and_survives_reopen() {
+        let (_dir, path, mut store) = open_temp();
+        assert_eq!(
+            store.value_price().expect("default"),
+            PriceRule::SellFivePercent
+        );
+        store.set_value_price(PriceRule::BuyMedian).expect("save");
+        assert_eq!(store.value_price().expect("saved"), PriceRule::BuyMedian);
+        drop(store);
+        let reopened = Store::open(&path, 2_000).expect("reopen").store;
+        assert_eq!(
+            reopened.value_price().expect("reopened"),
+            PriceRule::BuyMedian
+        );
+    }
+
+    #[test]
+    fn a_value_price_that_is_not_a_known_code_is_bad_data() {
+        let (_dir, _path, mut store) = open_temp();
+        store.set_setting("value_price", "x").expect("save");
+        assert!(matches!(store.value_price(), Err(StoreError::BadData(_))));
+        // A number that names no rule is the same bad-code error.
+        store.set_setting("value_price", "9").expect("save");
+        assert!(matches!(store.value_price(), Err(StoreError::BadData(_))));
     }
 }
