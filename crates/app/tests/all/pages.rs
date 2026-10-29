@@ -1536,6 +1536,17 @@ mod tests {
             .any(|label| label.starts_with(prefix))
     }
 
+    /// Every shown text in the frame, in drawing order.
+    fn labels(harness: &Harness<'_, App>) -> Vec<String> {
+        harness
+            .query_all_by_label_contains("")
+            .filter_map(|node| {
+                let node = node.accesskit_node();
+                node.label().or_else(|| node.value())
+            })
+            .collect()
+    }
+
     #[test]
     fn the_today_net_worth_block_shows_the_total_its_change_and_the_basis() {
         let env = nw_env();
@@ -1560,6 +1571,28 @@ mod tests {
         );
         assert!(shown(&harness, "+7.71 M"), "the change shows");
         assert!(shown(&harness, "since 2 Sep"), "the earlier day shows");
+        assert!(
+            shown(&harness, "Price moves +192 K, everything else +7.52 M"),
+            "the change splits into price moves and everything else"
+        );
+        let labels = labels(&harness);
+        let position = |text: &str| {
+            labels
+                .iter()
+                .position(|label| label == text)
+                .unwrap_or_else(|| panic!("{text:?} is not shown: {labels:?}"))
+        };
+        assert!(position("18.31 M ISK") < position("+7.71 M"));
+        assert!(position("+7.71 M") < position("since 2 Sep"));
+        assert!(position("since 2 Sep") < position("Price moves +192 K, everything else +7.52 M"));
+        assert_eq!(
+            labels
+                .iter()
+                .filter(|label| label.starts_with("Price moves "))
+                .count(),
+            1,
+            "the split is one new line: {labels:?}"
+        );
         assert!(!shown(
             &harness,
             "No net worth points yet. Refresh your characters to record the first one."
@@ -1585,6 +1618,10 @@ mod tests {
         assert!(
             !shown_starting(&harness, "since "),
             "a single point has no change line"
+        );
+        assert!(
+            !shown_starting(&harness, "Price moves "),
+            "a single point has no split line"
         );
         assert!(shown(
             &harness,
@@ -1643,6 +1680,10 @@ mod tests {
         assert!(shown(&harness, "11.40 M ISK"), "the changed total shows");
         assert!(shown(&harness, "+804 K"), "the change shows");
         assert!(shown(&harness, "since yesterday"));
+        assert!(
+            shown(&harness, "Price moves +192 K, everything else +612 K"),
+            "the change splits into price moves and everything else"
+        );
     }
 
     #[test]

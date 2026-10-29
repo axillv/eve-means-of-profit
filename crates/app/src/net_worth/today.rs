@@ -57,6 +57,8 @@ struct Lines {
     hover: String,
     /// The change and the day it is since, with the colour its size asks for.
     change: Option<(String, String, Sign)>,
+    /// The change split into price moves and everything else, when there is a change to split.
+    split: Option<String>,
     /// How many item types have no price, when there are any.
     unpriced: Option<String>,
 }
@@ -199,6 +201,13 @@ fn loaded_body(cx: &mut Shared, loaded: &Loaded, price: PriceRule) -> Body {
             sign(amount),
         )
     });
+    let split = summary.and_then(|summary| summary.since).map(|since| {
+        format!(
+            "Price moves {}, everything else {}",
+            since.price_moves.format_isk_short_signed(),
+            since.everything_else.format_isk_short_signed(),
+        )
+    });
     let unpriced = (!last.unpriced.is_empty()).then(|| {
         format!(
             "{} item types have no price at this basis and are not counted.",
@@ -210,6 +219,7 @@ fn loaded_body(cx: &mut Shared, loaded: &Loaded, price: PriceRule) -> Body {
         total,
         hover,
         change,
+        split,
         unpriced,
     })
 }
@@ -246,6 +256,9 @@ fn show(ui: &mut Ui, cx: &Shared, body: &Body) {
                     ui.add_space(4.0);
                     ui.colored_label(cx.style.mute, since);
                 });
+            }
+            if let Some(split) = &lines.split {
+                ui.colored_label(cx.style.mute, split);
             }
             if let Some(unpriced) = &lines.unpriced {
                 ui.colored_label(cx.style.stale, unpriced);
