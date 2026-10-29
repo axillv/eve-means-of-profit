@@ -5,18 +5,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use egui::text::{LayoutJob, TextFormat};
-use egui::{Checkbox, DragValue, Id, Label, RichText, Sense, TextStyle, Ui};
+use egui::{Checkbox, ComboBox, DragValue, Id, Label, RichText, Sense, TextStyle, Ui};
 use mop_core::format::group_thousands;
 use mop_core::industry::{Activity, JobSplit, Recipe, RecipeBook, TypeId};
+use mop_core::invention::AttemptRule;
 use mop_core::make_or_buy::{Choice, Decision};
 use mop_core::plan::{BuyLine, Plan, PlanProduct, Step};
 use mop_core::reserve;
 use mop_sde::Sde;
-use mop_store::PlanRecord;
+use mop_store::{InventionChoice, PlanRecord};
 
 use super::costs::{self, Costs, InventionShown, PENDING};
 use super::prices::age_text;
-use super::state::{BuildPage, NO_REACTIONS, me_of, push_error, type_name};
+use super::state::{BuildPage, NO_REACTIONS, me_with, push_error, type_name};
 use crate::status::Notice;
 use crate::table::Table;
 use crate::table::model::{Cell, Column, ColumnKind, Row};
@@ -32,6 +33,8 @@ const SKILLS_HINT: &str =
 enum Edit {
     Build(TypeId, bool),
     Me(TypeId, u8),
+    Invent(TypeId, bool),
+    Decryptor(TypeId, Option<TypeId>),
 }
 
 /// One type of the chain, with its step or its bought line.
@@ -60,6 +63,8 @@ struct View<'a> {
     decide: Figure,
     /// The invention of the part this row builds, when the plan invents it.
     invention: Option<&'a InventionShown>,
+    /// The saved choice of that part, when it has an invention entry.
+    choice: Option<InventionChoice>,
 }
 
 /// The text of a Job cost or Make or buy cell, its tone, its hover, and the change a click asks for.
@@ -114,35 +119,15 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
     };
     let running = running_by_type(plan, &assigned);
     let costs = costs::compute(ui, page, record, plan, cx, now);
-    let mut names = BTreeMap::new();
-    let steps = costs
-        .jobs
-        .values()
-        .filter_map(|outcome| outcome.as_ref().ok());
-    for step in steps {
-        for &type_id in &step.missing_prices {
-            names
-                .entry(type_id)
-                .or_insert_with(|| type_name(type_id, cx.sde.as_ref(), &mut cx.notices));
-        }
-    }
+    let names = missing_names(&costs, cx.sde.as_ref(), &mut cx.notices);
     let lines = tree(plan, &page.recipes, &page.products);
-    let inventions = &costs.inventions.parts;
     let views: BTreeMap<u64, View<'_>> = lines
         .iter()
         .map(|line| {
             let units = running.get(&line.type_id).copied().unwrap_or(0);
             (
                 u64::from(line.type_id),
-                view(
-                    line,
-                    record,
-                    &page.products,
-                    &costs,
-                    &names,
-                    units,
-                    inventions,
-                ),
+                view(line, record, &page.products, &costs, &names, units, page),
             )
         })
         .collect();
@@ -156,6 +141,7 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
                 units,
                 cx.sde.as_ref(),
                 &mut cx.notices,
+                costs.inventions.rule,
             )
         })
         .collect();
@@ -163,6 +149,8 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
     let columns = columns();
     let mut edits = Vec::new();
     let style = cx.style;
+    let rule = costs.inventions.rule;
+    let sde = cx.sde.as_ref();
     let mut draw = |ui: &mut Ui, key: u64, column: &'static str| -> bool {
         let Some(view) = views.get(&key) else {
             return false;
@@ -170,16 +158,25 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
         match column {
             "build" => build_tick(ui, view, &mut edits),
             "me" => me_box(ui, view, &mut edits),
+            "invent" => invent_tick(ui, view, &mut edits),
+            "decryptor" => decryptor_box(ui, view, sde, &mut cx.notices, &mut edits),
             "own" => own_cell(ui, view),
             "jobs" => jobs_label(ui, view),
             "cost" => figure_cell(ui, &view.cost, &style, &mut edits),
             "decide" => figure_cell(ui, &view.decide, &style, &mut edits),
+            "decided" => figure_cell(
+                ui,
+                &decided_figure(view, rule, sde, &mut cx.notices),
+                &style,
+                &mut edits,
+            ),
             _ => invention_index(column).is_some_and(|index| invention_cell(ui, view, index)),
         }
     };
+    let density = cx.density;
     let response = Table::new(Id::new(super::BuildPanel::Steps.title()), &columns)
         .icons("item", &|key| u32::try_from(key).ok())
-        .show_with(ui, &cx.style, cx.density, &rows, None, &mut draw);
+        .show_with(ui, &style, density, &rows, None, &mut draw);
     if let Some(key) = response.clicked
         && let Ok(type_id) = TypeId::try_from(key)
     {
@@ -187,6 +184,27 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
     }
     total_line(ui, &costs, &cx.style);
     edits
+}
+
+/// The names of the types whose adjusted prices are missing, for the Job cost cell's hover.
+fn missing_names(
+    costs: &Costs,
+    sde: Option<&Sde>,
+    notices: &mut Vec<Notice>,
+) -> BTreeMap<TypeId, String> {
+    let mut names = BTreeMap::new();
+    for step in costs
+        .jobs
+        .values()
+        .filter_map(|outcome| outcome.as_ref().ok())
+    {
+        for &type_id in &step.missing_prices {
+            names
+                .entry(type_id)
+                .or_insert_with(|| type_name(type_id, sde, notices));
+        }
+    }
+    names
 }
 
 /// The lines above the table: the cost error, and the hint that invention skills are not set.
@@ -323,6 +341,107 @@ fn build_tick(ui: &mut Ui, view: &View, edits: &mut Vec<Edit>) -> bool {
     true
 }
 
+/// The Invent tick: drawn for rows whose part has an invention entry. Returns whether it drew the
+/// cell.
+fn invent_tick(ui: &mut Ui, view: &View, edits: &mut Vec<Edit>) -> bool {
+    if view.invention.is_none() {
+        return false;
+    }
+    let mut invent = view.choice.unwrap_or_default().invent;
+    if ui.add(Checkbox::without_text(&mut invent)).changed() {
+        edits.push(Edit::Invent(view.type_id, invent));
+    }
+    true
+}
+
+/// The Decryptor drop-down: `None` and every decryptor by name, read only while the list is open.
+/// Drawn while the part is invented. Returns whether it drew the cell.
+fn decryptor_box(
+    ui: &mut Ui,
+    view: &View,
+    sde: Option<&Sde>,
+    notices: &mut Vec<Notice>,
+    edits: &mut Vec<Edit>,
+) -> bool {
+    let Some(choice) = view.choice else {
+        return false;
+    };
+    if !choice.invent {
+        return false;
+    }
+    let current = choice.decryptor;
+    let selected = current.map_or_else(
+        || "None".to_owned(),
+        |type_id| type_name(type_id, sde, notices),
+    );
+    let mut picked = None;
+    ComboBox::from_id_salt(("build_decryptor", view.type_id))
+        .width(150.0)
+        .selected_text(selected)
+        .show_ui(ui, |ui| {
+            if ui.selectable_label(current.is_none(), "None").clicked() {
+                picked = Some(None);
+            }
+            let Some(sde) = sde else {
+                return;
+            };
+            match sde.decryptors() {
+                Ok(decryptors) => {
+                    for decryptor in decryptors {
+                        let name = type_name(decryptor.type_id, Some(sde), notices);
+                        if ui
+                            .selectable_label(current == Some(decryptor.type_id), name)
+                            .clicked()
+                        {
+                            picked = Some(Some(decryptor.type_id));
+                        }
+                    }
+                }
+                Err(error) => {
+                    push_error(notices, format!("Could not read the decryptors: {error}"));
+                }
+            }
+        });
+    if let Some(decryptor) = picked {
+        edits.push(Edit::Decryptor(view.type_id, decryptor));
+    }
+    true
+}
+
+/// Who decided the invention of a shown part, and the hover that says why.
+fn decided_figure(
+    view: &View,
+    rule: AttemptRule,
+    sde: Option<&Sde>,
+    notices: &mut Vec<Notice>,
+) -> Figure {
+    if view.invention.is_none() {
+        return Figure::default();
+    }
+    let choice = view.choice.unwrap_or_default();
+    let text = if !choice.invent {
+        "You: not invented, you have the copies".to_owned()
+    } else if let Some(type_id) = choice.decryptor {
+        format!("You: invented with {}", type_name(type_id, sde, notices))
+    } else {
+        "App: invented, no decryptor".to_owned()
+    };
+    let hover = match rule {
+        AttemptRule::Expected => {
+            "App: attempts are enough for the expected number of copies.".to_owned()
+        }
+        AttemptRule::Confidence(rate) => format!(
+            "You: attempts are enough to be {}% sure of every copy (set in Settings).",
+            rate.ppm() / 10_000
+        ),
+    };
+    Figure {
+        text,
+        hover,
+        ..Figure::default()
+    }
+}
+
 /// The ME box: drawn for built manufacturing rows, `—` otherwise.
 fn me_box(ui: &mut Ui, view: &View, edits: &mut Vec<Edit>) -> bool {
     let Some(mut me) = view.me else {
@@ -358,22 +477,47 @@ fn jobs_label(ui: &mut Ui, view: &View) -> bool {
 }
 
 fn apply(page: &mut BuildPage, cx: &mut Shared, edits: &[Edit]) {
+    let mut plan_edit = false;
+    let mut choices = Vec::new();
     if let Some(record) = page.record.as_mut() {
         for edit in edits {
             match *edit {
                 Edit::Build(id, true) => {
                     record.build.insert(id);
+                    plan_edit = true;
                 }
                 Edit::Build(id, false) => {
                     record.build.remove(&id);
+                    plan_edit = true;
                 }
                 Edit::Me(id, me) => {
                     record.me.insert(id, me);
+                    plan_edit = true;
+                }
+                Edit::Invent(id, invent) => {
+                    let current = page.invention.get(&id).copied().unwrap_or_default();
+                    choices.push((
+                        id,
+                        InventionChoice {
+                            invent,
+                            decryptor: if invent { current.decryptor } else { None },
+                        },
+                    ));
+                }
+                Edit::Decryptor(id, decryptor) => {
+                    let mut choice = page.invention.get(&id).copied().unwrap_or_default();
+                    choice.decryptor = decryptor;
+                    choices.push((id, choice));
                 }
             }
         }
     }
-    page.edited(cx);
+    for (part, choice) in choices {
+        page.set_invention(cx, part, choice);
+    }
+    if plan_edit {
+        page.edited(cx);
+    }
 }
 
 /// The chain as a tree, in the order the rows show: each product at depth 0 in the page's order,
@@ -499,10 +643,10 @@ fn view<'a>(
     line: &Line,
     record: &PlanRecord,
     products: &[PlanProduct],
-    costs: &Costs,
+    costs: &'a Costs,
     names: &BTreeMap<TypeId, String>,
     running: u64,
-    inventions: &'a BTreeMap<TypeId, InventionShown>,
+    page: &'a BuildPage,
 ) -> View<'a> {
     let is_product = is_product(products, line.type_id);
     let reaction = line
@@ -510,9 +654,12 @@ fn view<'a>(
         .is_some_and(|recipe| recipe.activity == Activity::Reaction);
     let reactions_picked = record.reactions.is_some();
     let me = match (line.recipe, line.step) {
-        (Some(recipe), Some(_)) if recipe.activity == Activity::Manufacturing => {
-            Some(me_of(record, line.type_id, recipe.made_by_invention))
-        }
+        (Some(recipe), Some(_)) if recipe.activity == Activity::Manufacturing => Some(me_with(
+            record,
+            line.type_id,
+            recipe.made_by_invention,
+            &page.copy_mes,
+        )),
         _ => None,
     };
     let own = line
@@ -525,6 +672,13 @@ fn view<'a>(
             "{} in hangars, {running} from running jobs",
             own.saturating_sub(running)
         )
+    });
+    let invention = costs.inventions.parts.get(&line.type_id);
+    let choice = invention.map(|_| {
+        page.invention
+            .get(&line.type_id)
+            .copied()
+            .unwrap_or_default()
     });
     View {
         type_id: line.type_id,
@@ -545,7 +699,8 @@ fn view<'a>(
             .unwrap_or_default(),
         cost: cost_figure(line, costs, names),
         decide: decide_figure(line, products, costs),
-        invention: inventions.get(&line.type_id),
+        invention,
+        choice,
     }
 }
 
@@ -682,6 +837,7 @@ fn row(
     running: u64,
     sde: Option<&Sde>,
     notices: &mut Vec<Notice>,
+    rule: AttemptRule,
 ) -> Row {
     let me = match view.and_then(|view| view.me) {
         Some(me) => Cell::int(i128::from(me), me.to_string()),
@@ -713,7 +869,24 @@ fn row(
     }
     cells.push(Cell::text(""));
     cells.push(Cell::text(""));
+    let choice = view.and_then(|view| view.choice);
+    cells.push(match choice {
+        Some(choice) if choice.invent => Cell::text("Yes"),
+        Some(_) => Cell::text("No"),
+        None => Cell::text(""),
+    });
+    cells.push(match choice {
+        Some(choice) if choice.invent => choice.decryptor.map_or_else(
+            || Cell::text(""),
+            |type_id| Cell::text(type_name(type_id, sde, notices)),
+        ),
+        Some(_) | None => Cell::text(""),
+    });
     cells.extend(invention_cells(view.and_then(|view| view.invention)));
+    let decided = view.map_or_else(Figure::default, |view| {
+        decided_figure(view, rule, sde, notices)
+    });
+    cells.push(Cell::text(decided.text));
     Row {
         key: u64::from(line.type_id),
         depth: line.depth,
@@ -841,6 +1014,8 @@ fn columns() -> Vec<Column> {
         column("spare", "Spare", ColumnKind::Number, 90.0),
         column("cost", "Job cost", ColumnKind::Number, 150.0),
         column("decide", "Make or buy", ColumnKind::Text, 330.0),
+        column("invent", "Invent", ColumnKind::Text, 60.0),
+        column("decryptor", "Decryptor", ColumnKind::Text, 170.0),
         column("chance", "Chance", ColumnKind::Number, 90.0),
         column("copies", "Copies", ColumnKind::Number, 120.0),
         column("attempts", "Attempts", ColumnKind::Number, 90.0),
@@ -848,6 +1023,7 @@ fn columns() -> Vec<Column> {
         column("per_copy", "Per copy", ColumnKind::Money, 120.0),
         column("carried", "Carried", ColumnKind::Money, 120.0),
         column("invention", "Invention", ColumnKind::Text, 330.0),
+        column("decided", "Decided", ColumnKind::Text, 330.0),
     ]
 }
 
@@ -1064,18 +1240,17 @@ mod tests {
         let costs = Costs::default();
         let names = BTreeMap::new();
         let record = record();
-        let inventions = BTreeMap::new();
-        let tritanium_view = view(
-            tritanium,
-            &record,
-            &products,
-            &costs,
-            &names,
-            0,
-            &inventions,
-        );
+        let page = BuildPage::default();
+        let tritanium_view = view(tritanium, &record, &products, &costs, &names, 0, &page);
         let mut notices = Vec::new();
-        let tritanium_row = row(tritanium, Some(&tritanium_view), 0, None, &mut notices);
+        let tritanium_row = row(
+            tritanium,
+            Some(&tritanium_view),
+            0,
+            None,
+            &mut notices,
+            AttemptRule::Expected,
+        );
         assert_eq!(
             tritanium_row.cells[3..=4]
                 .iter()
@@ -1171,14 +1346,14 @@ mod tests {
         let record = record();
         let book = game_book();
         let lines = tree(&plan, &book, &products);
-        let inventions = BTreeMap::new();
+        let page = BuildPage::default();
 
         for product in &products {
             let line = lines
                 .iter()
                 .find(|line| line.type_id == product.type_id)
                 .expect("the product's row");
-            let view = view(line, &record, &products, &costs, &names, 0, &inventions);
+            let view = view(line, &record, &products, &costs, &names, 0, &page);
             assert!(view.has_recipe);
             assert!(!view.ticked);
             assert!(!view.tick_enabled);
@@ -1189,7 +1364,123 @@ mod tests {
             .iter()
             .find(|line| line.type_id == ROBOTICS)
             .expect("a material with a recipe");
-        let view = view(material, &record, &products, &costs, &names, 0, &inventions);
+        let view = view(material, &record, &products, &costs, &names, 0, &page);
         assert!(view.tick_enabled);
+    }
+
+    fn shown_view(invention: &InventionShown, choice: InventionChoice) -> View<'_> {
+        View {
+            type_id: HOBGOBLIN_II,
+            has_recipe: true,
+            ticked: false,
+            tick_enabled: true,
+            tick_hover: None,
+            me: None,
+            own: 0,
+            own_hover: None,
+            jobs_text: String::new(),
+            jobs_hover: String::new(),
+            cost: Figure::default(),
+            decide: Figure::default(),
+            invention: Some(invention),
+            choice: Some(choice),
+        }
+    }
+
+    #[test]
+    fn decided_says_who_made_the_invention_choice() {
+        let mut notices = Vec::new();
+        let not = InventionShown::Not;
+        let off = InventionChoice {
+            invent: false,
+            decryptor: None,
+        };
+        assert_eq!(
+            decided_figure(
+                &shown_view(&not, off),
+                AttemptRule::Expected,
+                None,
+                &mut notices
+            )
+            .text,
+            "You: not invented, you have the copies"
+        );
+        let counted = InventionShown::Unavailable("no skills".to_owned());
+        let default = InventionChoice::default();
+        assert_eq!(
+            decided_figure(
+                &shown_view(&counted, default),
+                AttemptRule::Expected,
+                None,
+                &mut notices
+            )
+            .text,
+            "App: invented, no decryptor"
+        );
+        let with_decryptor = InventionChoice {
+            invent: true,
+            decryptor: Some(34_202),
+        };
+        assert_eq!(
+            decided_figure(
+                &shown_view(&counted, with_decryptor),
+                AttemptRule::Expected,
+                None,
+                &mut notices
+            )
+            .text,
+            "You: invented with type 34202"
+        );
+    }
+
+    #[test]
+    fn decided_hover_says_how_the_attempts_were_chosen() {
+        let mut notices = Vec::new();
+        let counted = InventionShown::Unavailable("no skills".to_owned());
+        let view = shown_view(&counted, InventionChoice::default());
+        assert_eq!(
+            decided_figure(&view, AttemptRule::Expected, None, &mut notices).hover,
+            "App: attempts are enough for the expected number of copies."
+        );
+        assert_eq!(
+            decided_figure(
+                &view,
+                AttemptRule::Confidence(mop_core::money::Rate::from_ppm(900_000)),
+                None,
+                &mut notices
+            )
+            .hover,
+            "You: attempts are enough to be 90% sure of every copy (set in Settings)."
+        );
+    }
+
+    #[test]
+    fn a_row_without_an_invention_has_no_decided_text() {
+        let priced = BuildPage::default();
+        let costs = Costs::default();
+        let names = BTreeMap::new();
+        let record = record();
+        let book = game_book();
+        let plan = products_plan();
+        let products = products();
+        let lines = tree(&plan, &book, &products);
+        let line = lines
+            .iter()
+            .find(|line| line.type_id == TRITANIUM)
+            .expect("the Tritanium line");
+        let view = view(line, &record, &products, &costs, &names, 0, &priced);
+        assert!(view.invention.is_none());
+        assert!(view.choice.is_none());
+        let mut notices = Vec::new();
+        let row = row(
+            line,
+            Some(&view),
+            0,
+            None,
+            &mut notices,
+            AttemptRule::Expected,
+        );
+        assert_eq!(row.cells.len(), columns().len());
+        assert_eq!(row.cells[22].text, "");
     }
 }

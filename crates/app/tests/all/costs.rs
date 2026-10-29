@@ -568,9 +568,14 @@ mod tests {
         let env = make_env(&Setup::standard());
         let mut harness = start(&env);
         open_with(&mut harness, II_COST);
-        // Make or buy is the last column; empty, so the Job cost is the row's last text.
+        // Decided is now the last column, so the Job cost is no longer the row's last text.
         let row = cells(&harness, "Hobgoblin II");
-        assert_eq!(row.last().map(String::as_str), Some(II_COST), "{row:?}");
+        assert!(row.iter().any(|cell| cell == II_COST), "{row:?}");
+        assert_eq!(
+            row.last().map(String::as_str),
+            Some("App: invented, no decryptor"),
+            "{row:?}"
+        );
         hover_cell(&mut harness, "Hobgoblin II", II_COST);
         assert!(shown(
             &harness,

@@ -14,6 +14,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    use egui::accesskit::Role;
     use egui::vec2;
     use egui_kittest::kittest::{Queryable, by};
     use egui_kittest::{Harness, SnapshotResults};
@@ -22,13 +23,14 @@ mod tests {
     use eve_means_of_profit::{App, AppConfig};
     use flate2::Compression;
     use flate2::write::GzEncoder;
+    use mop_core::invention::AttemptRule;
     use mop_core::money::{Money, Rate};
     use mop_esi::industry::{CostIndices, IndustryData, MarketPrice, save_industry};
     use mop_market::book::PriceRule;
     use mop_market::error::MarketError;
     use mop_market::fuzzwork::{BytesHttp, BytesResponse};
     use mop_sde::{Facility, Fetch, FetchError, Security, import};
-    use mop_store::{FacilityCosts, PlanRecord, Store};
+    use mop_store::{FacilityCosts, InventionChoice, PlanRecord, Store};
     use tempfile::TempDir;
 
     const NOW: i64 = 1_000_000;
@@ -38,6 +40,7 @@ mod tests {
         "what,weightedaverage,maxval,minval,stddev,median,volume,numorders,fivepercent,orderSet";
     const HOBGOBLIN_I: u32 = 2454;
     const HOBGOBLIN_II: u32 = 2456;
+    const ATTAINMENT: u32 = 34_202;
     const PLAN: &str = "Invention";
     const HINT: &str =
         "Invention skills not set: type them in Settings or read them from a character.";
@@ -82,6 +85,7 @@ mod tests {
             (38, "800.00"),
             (20_418, "50000.00"),
             (20_419, "43750.00"),
+            (ATTAINMENT, "1200000.00"),
         ]
     }
 
@@ -290,6 +294,10 @@ mod tests {
     }
 
     fn start(env: &Env) -> Harness<'static, App> {
+        start_sized(env, vec2(3600.0, 800.0))
+    }
+
+    fn start_sized(env: &Env, size: egui::Vec2) -> Harness<'static, App> {
         let config = AppConfig {
             data_dir: env.data.clone(),
             cache_dir: env.cache.clone(),
@@ -299,7 +307,7 @@ mod tests {
             market: Box::new(crate::offline::Offline),
         };
         let mut harness = Harness::builder()
-            .with_size(vec2(3600.0, 800.0))
+            .with_size(size)
             .with_max_steps(crate::SETTLE_STEPS)
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
         crate::ui::no_images(&mut harness);
@@ -408,18 +416,19 @@ mod tests {
     }
 
     /// The visible texts of the seven invention cells of `row`, left to right, once the table is
-    /// scrolled to them. Empty cells are empty strings.
+    /// scrolled to them. Empty cells are empty strings. The range is the columns from Chance up to
+    /// Decided, which the table draws after the invention cells.
     fn invention_cells(harness: &Harness<'_, App>, row: &str) -> Vec<String> {
         let y = steps_y(harness, row);
         let mut found: Vec<(f32, String)> = Vec::new();
-        let edge = steps_edge(harness) - 20.0;
-        let left = steps_left(harness);
+        let chance = harness.get_by_label("Chance").rect().min.x - 1.0;
+        let decided = harness.get_by_label("Decided").rect().min.x - 1.0;
         for node in harness.query_all(by().predicate(|node| node.bounding_box().is_some())) {
             let rect = node.rect();
             if (rect.center().y - y).abs() >= 0.5 {
                 continue;
             }
-            if rect.min.x < left || rect.min.x >= edge {
+            if rect.min.x < chance || rect.min.x >= decided {
                 continue;
             }
             found.push((rect.min.x, node.value().unwrap_or_default()));
@@ -430,7 +439,129 @@ mod tests {
             cells.len() >= 7,
             "the seven invention cells of {row} are not in view: {cells:?}"
         );
-        cells[cells.len() - 7..].to_vec()
+        cells[..7].to_vec()
+    }
+
+    /// The id of the plan the test saves.
+    fn plan_id(harness: &mut Harness<'_, App>) -> i64 {
+        harness
+            .state_mut()
+            .shared_mut()
+            .store
+            .plans()
+            .expect("the plans read")
+            .first()
+            .expect("a saved plan")
+            .id
+    }
+
+    /// The stored invention choice of `part`, or `None` while it is the default.
+    fn saved_choice(harness: &mut Harness<'_, App>, part: u32) -> Option<InventionChoice> {
+        let id = plan_id(harness);
+        harness
+            .state_mut()
+            .shared_mut()
+            .store
+            .plan_invention(id)
+            .expect("the invention choices read")
+            .get(&part)
+            .copied()
+    }
+
+    /// The checkboxes on the row labelled `row`, left to right. Invent is the last one.
+    fn row_checkboxes<'a>(harness: &'a Harness<'_, App>, row: &str) -> Vec<egui_kittest::Node<'a>> {
+        let edge = steps_edge(harness);
+        let y = steps_y(harness, row);
+        harness
+            .get_all_by_role(Role::CheckBox)
+            .filter(|node| node.rect().min.x < edge && (node.rect().center().y - y).abs() < 4.0)
+            .collect()
+    }
+
+    /// Scrolls the Steps table sideways until the `column` header is in view.
+    fn scroll_to_column(harness: &mut Harness<'_, App>, column: &str) {
+        for _ in 0..40 {
+            let rect = harness.get_by_label(column).rect();
+            let left = steps_left(harness);
+            let edge = steps_edge(harness);
+            if rect.min.x >= left - 1.0 && rect.max.x <= edge + 1.0 {
+                return;
+            }
+            let delta = if rect.min.x < left { 300.0 } else { -300.0 };
+            harness.hover_at(egui::pos2(left + 100.0, rect.center().y));
+            harness.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: vec2(delta, 0.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            });
+            for _ in 0..20 {
+                harness.step();
+            }
+        }
+        panic!("the {column} column never came into view");
+    }
+
+    /// Ticks or unticks the Invent box on the row labelled `row`.
+    fn click_invent(harness: &mut Harness<'_, App>, row: &str) {
+        scroll_to_column(harness, "Invent");
+        row_checkboxes(harness, row)
+            .last()
+            .expect("an Invent box on the row")
+            .click();
+        harness.run();
+    }
+
+    /// Picks `name` in the Decryptor drop-down of the row labelled `row`.
+    fn pick_decryptor(harness: &mut Harness<'_, App>, row: &str, name: &str) {
+        scroll_to_column(harness, "Decryptor");
+        let edge = steps_edge(harness);
+        let left = steps_left(harness);
+        let y = steps_y(harness, row);
+        harness
+            .get_all_by_role(Role::ComboBox)
+            .rfind(|node| {
+                node.rect().min.x >= left
+                    && node.rect().min.x < edge
+                    && (node.rect().center().y - y).abs() < 4.0
+            })
+            .expect("a Decryptor drop-down on the row")
+            .click();
+        harness.run();
+        wait_for(harness, "the decryptor list", |harness| {
+            shown(harness, name)
+        });
+        click(harness, name);
+    }
+
+    /// The text in the ME box of the row labelled `row`.
+    fn me_value(harness: &Harness<'_, App>, row: &str) -> String {
+        let edge = steps_edge(harness);
+        let y = steps_y(harness, row);
+        harness
+            .get_all_by_role(Role::SpinButton)
+            .rfind(|node| node.rect().min.x < edge && (node.rect().center().y - y).abs() < 4.0)
+            .expect("an ME box on the row")
+            .value()
+            .unwrap_or_default()
+    }
+
+    /// Hovers the Decided cell of the row labelled `row`, which reads `text`.
+    fn hover_decided(harness: &mut Harness<'_, App>, row: &str, text: &str) {
+        scroll_to_column(harness, "Decided");
+        let edge = steps_edge(harness);
+        let left = steps_left(harness);
+        let y = steps_y(harness, row);
+        harness
+            .query_all_by_label(text)
+            .find(|node| {
+                node.rect().min.x >= left
+                    && node.rect().min.x < edge
+                    && (node.rect().center().y - y).abs() < 4.0
+            })
+            .expect("the Decided cell on the row")
+            .hover();
+        harness.run();
     }
 
     #[test]
@@ -530,6 +661,189 @@ mod tests {
             let cells = invention_cells(&harness, row);
             assert!(cells.iter().all(String::is_empty), "{row}: {cells:?}");
         }
+    }
+
+    #[test]
+    fn picking_the_attainment_decryptor_changes_the_row_and_is_saved() {
+        let env = make_env(&Setup::standard());
+        let mut harness = start(&env);
+        open(&mut harness, "46.47%");
+        pick_decryptor(&mut harness, "Hobgoblin II", "Attainment Decryptor");
+        wait_for(&mut harness, "the decryptor numbers", |harness| {
+            shown(harness, "83.64%")
+        });
+        assert_eq!(
+            invention_cells(&harness, "Hobgoblin II"),
+            [
+                "83.64%",
+                "1 × 14 runs",
+                "2",
+                "89.00",
+                "1,546,914.16",
+                "883,950.95",
+                "6 runs left on the copy",
+            ]
+        );
+        assert_eq!(me_value(&harness, "Hobgoblin II"), "1");
+        assert!(shown(&harness, "You: invented with Attainment Decryptor"));
+        assert!(
+            harness
+                .query_all(by().label_contains("(unsaved)"))
+                .next()
+                .is_none()
+        );
+        assert_eq!(
+            saved_choice(&mut harness, HOBGOBLIN_II),
+            Some(InventionChoice {
+                invent: true,
+                decryptor: Some(ATTAINMENT),
+            })
+        );
+
+        // A second app on the same data folder shows the same choice and row.
+        let mut second = start(&env);
+        let id = plan_id(&mut second);
+        open(&mut second, "83.64%");
+        assert_eq!(invention_cells(&second, "Hobgoblin II")[0], "83.64%");
+        assert_eq!(
+            second
+                .state_mut()
+                .shared_mut()
+                .store
+                .plan_invention(id)
+                .expect("the invention choices read")
+                .get(&HOBGOBLIN_II)
+                .copied(),
+            Some(InventionChoice {
+                invent: true,
+                decryptor: Some(ATTAINMENT),
+            })
+        );
+    }
+
+    #[test]
+    fn unticking_invent_stores_not_invented_and_clears_the_decryptor() {
+        let env = make_env(&Setup::standard());
+        let mut harness = start(&env);
+        open(&mut harness, "46.47%");
+        pick_decryptor(&mut harness, "Hobgoblin II", "Attainment Decryptor");
+        wait_for(&mut harness, "the decryptor numbers", |harness| {
+            shown(harness, "83.64%")
+        });
+
+        click_invent(&mut harness, "Hobgoblin II");
+        wait_for(&mut harness, "the not invented cells", |harness| {
+            shown(harness, "Not invented: you have the copies.")
+        });
+        assert_eq!(
+            invention_cells(&harness, "Hobgoblin II"),
+            [
+                "—",
+                "—",
+                "—",
+                "—",
+                "—",
+                "—",
+                "Not invented: you have the copies.",
+            ]
+        );
+        assert_eq!(me_value(&harness, "Hobgoblin II"), "2");
+        assert!(shown(&harness, "You: not invented, you have the copies"));
+        assert_eq!(
+            saved_choice(&mut harness, HOBGOBLIN_II),
+            Some(InventionChoice {
+                invent: false,
+                decryptor: None,
+            })
+        );
+
+        click_invent(&mut harness, "Hobgoblin II");
+        wait_for(&mut harness, "the default cells", |harness| {
+            shown(harness, "App: invented, no decryptor")
+        });
+        assert_eq!(invention_cells(&harness, "Hobgoblin II")[0], "46.47%");
+        assert_eq!(saved_choice(&mut harness, HOBGOBLIN_II), None);
+    }
+
+    #[test]
+    fn the_decided_hover_says_how_the_attempts_were_chosen() {
+        let env = make_env(&Setup::standard());
+        let mut harness = start(&env);
+        open(&mut harness, "46.47%");
+        hover_decided(&mut harness, "Hobgoblin II", "App: invented, no decryptor");
+        assert!(shown(
+            &harness,
+            "App: attempts are enough for the expected number of copies."
+        ));
+
+        harness
+            .state_mut()
+            .shared_mut()
+            .store
+            .set_attempt_rule(AttemptRule::Confidence(Rate::from_ppm(900_000)))
+            .expect("the attempts rule saves");
+        harness.run();
+        wait_for(&mut harness, "the 90% numbers", |harness| {
+            shown(harness, "201,949.07")
+        });
+        let cells = invention_cells(&harness, "Hobgoblin II");
+        assert_eq!(cells[2], "4", "{cells:?}");
+        assert_eq!(cells[4], "201,949.07", "{cells:?}");
+
+        hover_decided(&mut harness, "Hobgoblin II", "App: invented, no decryptor");
+        assert!(shown(
+            &harness,
+            "You: attempts are enough to be 90% sure of every copy (set in Settings)."
+        ));
+    }
+
+    #[test]
+    fn a_deleted_plan_keeps_the_tick_and_the_cells_and_says_why() {
+        let env = make_env(&Setup::standard());
+        let mut harness = start(&env);
+        open(&mut harness, "46.47%");
+        let id = plan_id(&mut harness);
+        harness
+            .state_mut()
+            .shared_mut()
+            .store
+            .delete_plan(id)
+            .expect("the plan is deleted");
+        harness.run();
+
+        click_invent(&mut harness, "Hobgoblin II");
+        wait_for(&mut harness, "the save error", |harness| {
+            shown(harness, "Could not save the invention choice: not found")
+        });
+        assert!(shown(&harness, "App: invented, no decryptor"));
+        assert_eq!(invention_cells(&harness, "Hobgoblin II")[0], "46.47%");
+        assert_eq!(me_value(&harness, "Hobgoblin II"), "2");
+        assert_eq!(
+            harness
+                .state_mut()
+                .shared_mut()
+                .store
+                .plan_invention(id)
+                .expect("the invention choices read"),
+            BTreeMap::new()
+        );
+    }
+
+    #[test]
+    fn the_chosen_decryptor_matches_its_snapshot() {
+        let mut results = SnapshotResults::new();
+        let env = make_env(&Setup::standard());
+        // Wide enough for every steps column, so the shot shows the whole row: ME, the numbers and
+        // who decided the decryptor.
+        let mut harness = start_sized(&env, vec2(7000.0, 800.0));
+        open(&mut harness, "46.47%");
+        pick_decryptor(&mut harness, "Hobgoblin II", "Attainment Decryptor");
+        wait_for(&mut harness, "the decryptor numbers", |harness| {
+            shown(harness, "83.64%")
+        });
+        harness.snapshot("invention-steps");
+        results.extend_harness(&mut harness);
+        results.unwrap();
     }
 
     #[test]
