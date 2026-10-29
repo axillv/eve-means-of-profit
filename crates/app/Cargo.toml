@@ -21,6 +21,7 @@ egui-phosphor = "0.14.0"
 directories = "6.0.0"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
+rfd = "0.17.2"
 
 [dev-dependencies]
 egui_kittest = { version = "0.36.2", features = ["eframe", "wgpu", "snapshot"] }

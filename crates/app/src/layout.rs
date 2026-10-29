@@ -2,6 +2,7 @@
 //! conversion to and from the screen arrangement. No screen parts here.
 
 pub mod dock_convert;
+pub mod files;
 pub mod model;
 pub mod panels;
 pub mod saved;
