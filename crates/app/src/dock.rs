@@ -105,7 +105,7 @@ pub fn characters_layout() -> DockState<CharactersPanel> {
 }
 
 /// The Setup page: Facilities, Price history and Display stacked on the left; Freight services over
-/// Price rule over Structures, Fees and Invention on the right.
+/// Price rule and Value prices over Structures, Fees and Invention on the right.
 pub fn setup_layout() -> DockState<SetupPanel> {
     let mut dock = DockState::new(vec![SetupPanel::Facilities]);
     let surface = dock.main_surface_mut();
@@ -114,7 +114,11 @@ pub fn setup_layout() -> DockState<SetupPanel> {
     let [_facilities, history] =
         surface.split_below(facilities, 0.4, vec![SetupPanel::PriceHistory]);
     surface.split_below(history, 0.5, vec![SetupPanel::Display]);
-    let [_freight, price] = surface.split_below(freight, 0.5, vec![SetupPanel::PriceRule]);
+    let [_freight, price] = surface.split_below(
+        freight,
+        0.5,
+        vec![SetupPanel::PriceRule, SetupPanel::ValuePrices],
+    );
     surface.split_below(
         price,
         0.5,
@@ -369,11 +373,12 @@ mod tests {
     use egui_dock::Node;
     use tempfile::TempDir;
 
-    const SETUP_PANELS: [SetupPanel; 8] = [
+    const SETUP_PANELS: [SetupPanel; 9] = [
         SetupPanel::Facilities,
         SetupPanel::FreightServices,
         SetupPanel::PriceHistory,
         SetupPanel::PriceRule,
+        SetupPanel::ValuePrices,
         SetupPanel::Structures,
         SetupPanel::Fees,
         SetupPanel::Invention,
@@ -601,6 +606,21 @@ mod tests {
                 SetupPanel::Invention,
             ],
             "Invention is the tab after Fees and skills"
+        );
+    }
+
+    #[test]
+    fn value_prices_sits_in_the_price_rule_node_right_after_it() {
+        let dock = setup_layout();
+        let price = dock
+            .iter_leaves()
+            .find(|(_, leaf)| leaf.tabs.contains(&SetupPanel::PriceRule))
+            .map(|(_, leaf)| leaf)
+            .expect("Price rule is in the layout");
+        assert_eq!(
+            price.tabs,
+            [SetupPanel::PriceRule, SetupPanel::ValuePrices],
+            "Value prices is the tab after Price rule"
         );
     }
 
