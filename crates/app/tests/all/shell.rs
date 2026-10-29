@@ -1063,7 +1063,7 @@ mod tests {
         until(&mut harness, "the setup panels", |h| shown(h, "Price rule"));
         harness.remove_cursor();
         harness.run();
-        harness.snapshot("shell-setup-empty");
+        crate::ui::picture(&mut harness, "shell-setup-empty");
         harness.get_by_label("Build").click();
         until(&mut harness, "the build pages again", build_page_shown);
         harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
