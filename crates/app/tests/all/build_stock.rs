@@ -449,7 +449,7 @@ mod tests {
     /// Makes the plan Hobgoblin II × 300 at the NPC station, pasted with R.A.M.- Robotics × 3, and
     /// saves it as `Hobgoblin 300`.
     fn make_plan(harness: &mut Harness<'_, App>) {
-        click(harness, "New");
+        click(harness, "New plan");
         harness
             .get_by(|node| node.role() == Role::TextInput && node.value().as_deref() == Some(""))
             .click();

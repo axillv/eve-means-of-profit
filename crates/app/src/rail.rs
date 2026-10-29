@@ -138,6 +138,10 @@ pub fn show(ui: &mut Ui, style: &Style, page: &mut Page) {
 /// Draws the rail, with either each entry's icon and label or, when `icons_only`, the icon alone
 /// and the label as hover text.
 pub fn show_with(ui: &mut Ui, style: &Style, page: &mut Page, icons_only: bool) {
+    // A page asked for by an empty state takes effect next frame, since the rail draws first.
+    if let Some(next) = crate::empty::take(ui.ctx()) {
+        *page = next;
+    }
     let width = if icons_only {
         style.rail_narrow
     } else {

@@ -627,7 +627,7 @@ mod tests {
     /// Makes a plan for Hobgoblin II, quantity `quantity`, freight on Jita → Kiainti, and opens its
     /// Buy list.
     fn buy_list_for_quantity(harness: &mut Harness<'_, App>, quantity: u32) {
-        click(harness, "New");
+        click(harness, "New plan");
         type_into(harness, "", "hobgoblin");
         click(harness, "Hobgoblin II");
         type_into(harness, "1", &quantity.to_string());
@@ -641,6 +641,17 @@ mod tests {
             .click();
         harness.run();
         click(harness, "Jita → Kiainti");
+    }
+
+    /// Picks the saved plan named `name` in the Plans list. The other panels' empty states also
+    /// offer a `New plan` button, so the first node with the label is the plan's row.
+    fn open_saved_plan(harness: &mut Harness<'_, App>, name: &str) {
+        harness
+            .get_all_by_label(name)
+            .next()
+            .unwrap_or_else(|| panic!("the plan {name:?} in the Plans list"))
+            .click();
+        harness.run();
     }
 
     /// The Buy list of the complete plan, once the prices are in.
@@ -699,7 +710,7 @@ mod tests {
         drop(harness);
         let mut harness = start_window(&env, world, size);
         harness.run();
-        click(&mut harness, "New plan");
+        open_saved_plan(&mut harness, "New plan");
         settle(&mut harness, "Oldest: 4m");
         lock_folders(world).push(env);
         harness
@@ -1436,7 +1447,7 @@ mod tests {
         drop(harness);
         let mut harness = start(&env, &world);
         harness.run();
-        click(&mut harness, "New plan");
+        open_saved_plan(&mut harness, "New plan");
         // The new app downloads the file at its start, so the price can arrive after the label.
         settle(&mut harness, "109,914.68");
         settle(&mut harness, "Cheapest (Alliance)");
@@ -1987,7 +1998,7 @@ mod tests {
 
         let mut harness = start(&env, &world);
         harness.run();
-        click(&mut harness, "New plan");
+        open_saved_plan(&mut harness, "New plan");
         settle(&mut harness, "Oldest: 4m");
         assert_row(&harness, "Robotics", &["1,000,000,000.00", "manual"]);
         let (left, y) = row_anchor(&harness, "Robotics");
@@ -2000,7 +2011,7 @@ mod tests {
 
         let mut harness = start(&env, &world);
         harness.run();
-        click(&mut harness, "New plan");
+        open_saved_plan(&mut harness, "New plan");
         settle(&mut harness, "Oldest: 4m");
         assert_row(&harness, "Robotics", &["39,990.00", "4m"]);
         assert!(!shown(&harness, "manual"));

@@ -14,10 +14,12 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    use egui::accesskit::Role;
     use egui::{OutputCommand, Rect, vec2};
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
     use eve_means_of_profit::build::prices::Prices;
+    use eve_means_of_profit::empty::{self, Fill};
     use eve_means_of_profit::rail::{self, Page};
     use eve_means_of_profit::session::{EveAccess, PendingLogin};
     use eve_means_of_profit::theme::Style;
@@ -826,6 +828,79 @@ mod tests {
         harness.get_by_label("Net worth").click();
         harness.run();
         assert_eq!(*harness.state(), Page::NetWorth);
+    }
+
+    #[test]
+    fn an_empty_panel_draws_its_why_what_and_one_button_and_a_pageless_click_is_the_callers() {
+        let style = Style::eve_dense();
+        let mut harness = Harness::builder()
+            .with_size(vec2(400.0, 800.0))
+            .build_ui_state(
+                move |ui, clicked: &mut bool| {
+                    style.apply(ui.ctx());
+                    *clicked |= empty::show(
+                        ui,
+                        &style,
+                        "Why it is empty.",
+                        "What to do about it.",
+                        Some(Fill {
+                            label: "Fill it",
+                            page: None,
+                        }),
+                    );
+                },
+                false,
+            );
+        harness.run();
+        assert!(crate::ui::shown(&harness, "Why it is empty."));
+        assert!(crate::ui::shown(&harness, "What to do about it."));
+        assert_eq!(harness.get_all_by_role(Role::Button).count(), 1);
+        harness.get_by_label("Fill it").click();
+        harness.run();
+        assert!(*harness.state(), "the click reaches the caller");
+        assert_eq!(
+            empty::take(&harness.ctx),
+            None,
+            "a fill without a page stores nothing"
+        );
+    }
+
+    #[test]
+    fn a_fill_with_a_page_makes_the_next_rail_frame_draw_it_and_stores_nothing_after() {
+        let style = Style::eve_dense();
+        let mut harness = Harness::builder()
+            .with_size(vec2(400.0, 800.0))
+            .build_ui_state(
+                move |ui, page: &mut Page| {
+                    style.apply(ui.ctx());
+                    rail::show_with(ui, &style, page, false);
+                    empty::show(
+                        ui,
+                        &style,
+                        "Why it is empty.",
+                        "What to do about it.",
+                        Some(Fill {
+                            label: "Go",
+                            page: Some(Page::Characters),
+                        }),
+                    );
+                },
+                Page::Today,
+            );
+        harness.run();
+        assert_eq!(*harness.state(), Page::Today);
+        harness.get_by_label("Go").click();
+        harness.run();
+        assert_eq!(
+            *harness.state(),
+            Page::Characters,
+            "the next rail frame shows Characters"
+        );
+        assert_eq!(
+            empty::take(&harness.ctx),
+            None,
+            "the rail takes the page once"
+        );
     }
 
     #[test]

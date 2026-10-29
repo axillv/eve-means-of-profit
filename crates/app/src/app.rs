@@ -9,6 +9,7 @@ pub mod build;
 pub mod characters;
 pub mod claims;
 pub mod dock;
+pub mod empty;
 pub mod first_run;
 pub mod history;
 pub mod item_panel;
