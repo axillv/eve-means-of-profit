@@ -596,6 +596,7 @@ mod tests {
     fn the_fees_picture_is_taken_for_the_owner() {
         let folders = Folders::new();
         let mut harness = start_at(&folders, vec2(1280.0, 800.0));
+        crate::ui::hide_database_size(&harness);
         open_fees(&mut harness);
         click_combo(&mut harness, "0", 0);
         click_nth(&mut harness, "4", 0);

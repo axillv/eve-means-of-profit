@@ -166,6 +166,17 @@ pub(crate) fn coloured<S>(harness: &mut Harness<'_, S>, area: egui::Rect) -> boo
     })
 }
 
+/// Leaves the database file size out of the price history footer, so a picture does not change
+/// with the number of tables and rows.
+pub(crate) fn hide_database_size<S>(harness: &Harness<'_, S>) {
+    harness.ctx.data_mut(|data| {
+        data.insert_temp(
+            egui::Id::NULL,
+            eve_means_of_profit::setup::history::HideDatabaseSize,
+        );
+    });
+}
+
 /// Takes a snapshot named `name`, with no hover highlight: the pointer is removed and frames run.
 pub(crate) fn snapshot<S>(harness: &mut Harness<'_, S>, name: &str) {
     harness.remove_cursor();

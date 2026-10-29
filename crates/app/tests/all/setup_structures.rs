@@ -379,6 +379,7 @@ mod tests {
         folders.write_places();
         folders.type_names();
         let mut harness = start(&folders);
+        crate::ui::hide_database_size(&harness);
         assert!(shown(&harness, "Structures"), "the Structures panel shows");
         harness.snapshot("setup_structures");
 

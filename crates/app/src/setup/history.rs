@@ -63,6 +63,11 @@ struct Snapshot {
     at: i64,
 }
 
+/// Put in the egui context's temporary memory (under `Id::NULL`) to leave the database file size
+/// out of the footer line. The snapshot tests use it: the size changes with every schema change.
+#[derive(Debug, Clone, Copy)]
+pub struct HideDatabaseSize;
+
 /// What the panel keeps between frames, in the window's temporary memory.
 #[derive(Debug, Clone, Default)]
 struct Panel {
@@ -174,10 +179,15 @@ fn draw(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
         .iter()
         .try_fold(0u64, |sum, usage| sum.checked_add(usage.estimated_bytes));
     let total = total.map_or(NO_VALUE.to_owned(), format_bytes);
-    ui.label(format!(
-        "Total {total} estimated · database file {}",
-        format_bytes(snapshot.database)
-    ));
+    let hidden = ui.data(|data| data.get_temp::<HideDatabaseSize>(Id::NULL).is_some());
+    if hidden {
+        ui.label(format!("Total {total} estimated"));
+    } else {
+        ui.label(format!(
+            "Total {total} estimated · database file {}",
+            format_bytes(snapshot.database)
+        ));
+    }
     ui.label(net_worth_prices_text(snapshot.copies.0, snapshot.copies.1));
     ui.colored_label(cx.style.mute, KEPT_FOR_GOOD);
 }
