@@ -5,6 +5,7 @@
 //! trimmed and unique ignoring case. Money, volumes and rates are whole numbers.
 
 pub mod blueprints;
+pub mod changes;
 pub mod costs;
 pub mod error;
 pub mod facilities;

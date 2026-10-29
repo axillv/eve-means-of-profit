@@ -367,11 +367,14 @@ fn start_refresh(inner: &mut Inner, cx: &mut Shared, ctx: &Context, ids: &[u64])
     });
     let eve = cx.session.eve();
     let names: StructureNames = cx.session.structures().clone();
+    let data_dir = cx.data_dir.clone();
     let now = (cx.clock)();
     let tx = inner.tx.clone();
     let ctx = ctx.clone();
     queue(inner, cx, move || {
-        refresh::run(&eve, targets, names, now, &|msg| send(&tx, &ctx, msg));
+        refresh::run(&eve, targets, names, &data_dir, now, &|msg| {
+            send(&tx, &ctx, msg);
+        });
     });
 }
 

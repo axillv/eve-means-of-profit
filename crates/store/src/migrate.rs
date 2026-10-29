@@ -364,6 +364,51 @@ CREATE TABLE wallet_transactions (
     PRIMARY KEY (character_id, transaction_id)
 ) WITHOUT ROWID;
 CREATE INDEX wallet_transactions_by_at ON wallet_transactions (character_id, at);
+CREATE TABLE asset_state (
+    character_id INTEGER NOT NULL CHECK (character_id >= 0),
+    item_id INTEGER NOT NULL CHECK (item_id >= 1),
+    type_id INTEGER NOT NULL CHECK (type_id >= 0),
+    quantity INTEGER NOT NULL CHECK (quantity >= 0),
+    location_id INTEGER NOT NULL CHECK (location_id >= 1),
+    flag TEXT,
+    singleton INTEGER NOT NULL CHECK (singleton IN (0, 1)),
+    PRIMARY KEY (character_id, item_id)
+) WITHOUT ROWID;
+CREATE TABLE order_state (
+    character_id INTEGER NOT NULL CHECK (character_id >= 0),
+    order_id INTEGER NOT NULL CHECK (order_id >= 1),
+    type_id INTEGER NOT NULL CHECK (type_id >= 0),
+    location_id INTEGER NOT NULL CHECK (location_id >= 1),
+    is_buy INTEGER NOT NULL CHECK (is_buy IN (0, 1)),
+    price INTEGER NOT NULL CHECK (price >= 0),
+    volume_remain INTEGER NOT NULL CHECK (volume_remain >= 0),
+    PRIMARY KEY (character_id, order_id)
+) WITHOUT ROWID;
+CREATE TABLE job_state (
+    character_id INTEGER NOT NULL CHECK (character_id >= 0),
+    job_id INTEGER NOT NULL CHECK (job_id >= 1),
+    type_id INTEGER NOT NULL CHECK (type_id >= 0),
+    runs INTEGER NOT NULL CHECK (runs >= 0),
+    facility_id INTEGER NOT NULL CHECK (facility_id >= 1),
+    state TEXT NOT NULL,
+    cost INTEGER CHECK (cost IS NULL OR cost >= 0),
+    PRIMARY KEY (character_id, job_id)
+) WITHOUT ROWID;
+CREATE TABLE change_list (
+    seq INTEGER PRIMARY KEY,
+    character_id INTEGER NOT NULL CHECK (character_id >= 0),
+    kind INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 2),
+    entity_id INTEGER NOT NULL CHECK (entity_id >= 1),
+    at INTEGER NOT NULL CHECK (at >= 0),
+    event INTEGER NOT NULL CHECK (event BETWEEN 0 AND 2),
+    type_id INTEGER NOT NULL CHECK (type_id >= 0),
+    quantity INTEGER NOT NULL CHECK (quantity >= 0),
+    place INTEGER NOT NULL CHECK (place >= 0),
+    price INTEGER CHECK (price IS NULL OR price >= 0),
+    state TEXT
+);
+CREATE INDEX change_list_by_character_time ON change_list (character_id, at);
+CREATE INDEX change_list_by_kind_id_time ON change_list (kind, entity_id, at);
 ";
 
 /// An open database. Every method on it runs in one transaction.
