@@ -14,29 +14,25 @@ pub mod stock;
 
 use egui::Ui;
 
-use crate::{Shared, item_panel};
+use crate::Shared;
 
 pub use state::BuildPage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildPanel {
     Plans,
-    PastedStock,
     Plan,
     Steps,
     BuyList,
-    Item,
 }
 
 impl BuildPanel {
     pub fn title(self) -> &'static str {
         match self {
             Self::Plans => "Plans",
-            Self::PastedStock => "Pasted stock",
             Self::Plan => "Plan",
             Self::Steps => "Steps",
             Self::BuyList => "Buy list",
-            Self::Item => "Item",
         }
     }
 }
@@ -45,10 +41,8 @@ impl BuildPanel {
 pub fn show(page: &mut BuildPage, panel: BuildPanel, ui: &mut Ui, cx: &mut Shared) {
     match panel {
         BuildPanel::Plans => plans::show(page, ui, cx),
-        BuildPanel::PastedStock => stock::show(page, ui, cx),
         BuildPanel::Plan => inputs::show(page, ui, cx),
         BuildPanel::Steps => steps::show(page, ui, cx),
         BuildPanel::BuyList => buy_list::show(page, ui, cx),
-        BuildPanel::Item => item_panel::show(ui, cx),
     }
 }

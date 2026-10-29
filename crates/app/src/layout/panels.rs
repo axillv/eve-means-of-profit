@@ -9,11 +9,6 @@ const PANELS: &[PanelInfo] = &[
         follows: Follows::Nothing,
     },
     PanelInfo {
-        key: "build.pasted_stock",
-        name: "Pasted stock",
-        follows: Follows::Plan,
-    },
-    PanelInfo {
         key: "build.plan",
         name: "Plan",
         follows: Follows::Plan,

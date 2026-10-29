@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use egui::{Button, Checkbox, ComboBox, Grid, Key, RichText, TextEdit, Ui};
+use egui::{Button, Checkbox, ComboBox, Id, Key, RichText, TextEdit, Ui};
 use mop_core::format::group_thousands;
 use mop_core::industry::{Activity, TypeId};
 use mop_core::plan::PlanProduct;
@@ -17,6 +17,7 @@ use mop_store::reservations::PlanStock;
 use mop_store::{PlanRecord, StoreError};
 
 use super::state::{BuildPage, push_error, report, type_name};
+use super::stock;
 use crate::Shared;
 use crate::session::Source;
 use crate::status::Notice;
@@ -43,19 +44,47 @@ pub fn show(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
     if header(page, ui, cx) {
         page.save(cx);
     }
-    Grid::new("build_plan_inputs")
-        .num_columns(2)
-        .spacing([12.0, 6.0])
-        .show(ui, |ui| {
-            product_row(page, ui, cx);
-            quantity_row(page, ui, cx);
-            more_rows(page, ui, cx);
-            facility_row(page, ui, cx, Activity::Manufacturing);
-            facility_row(page, ui, cx, Activity::Reaction);
-            price_row(page, ui, cx);
-            freight_row(page, ui, cx);
-            stock_row(page, ui, cx);
-        });
+    let mut matches = Vec::new();
+    let mut enter = false;
+    ui.horizontal_wrapped(|ui| {
+        product_strip(page, ui, cx, &mut matches, &mut enter);
+        quantity_strip(page, ui, cx);
+        more_rows(page, ui, cx);
+        facility_strip(page, ui, cx, Activity::Manufacturing);
+        facility_strip(page, ui, cx, Activity::Reaction);
+        price_strip(page, ui, cx);
+        freight_strip(page, ui, cx);
+        stock_strip(page, ui, cx);
+    });
+    let mut picked = None;
+    if enter {
+        picked = matches.first().map(|(id, _)| *id);
+    }
+    for (id, name) in &matches {
+        if ui.button(name.as_str()).clicked() {
+            picked = Some(*id);
+        }
+    }
+    if let Some(id) = picked {
+        page.add_product(id, cx);
+        page.product_query.clear();
+    }
+    stock_details(page, ui, cx);
+    pasted_stock_window(page, ui, cx);
+}
+
+/// The width a combo box reserves in the strip, so the wrapped layout knows where it ends. A combo
+/// box lays itself out in a child row and would otherwise reach past the strip's right edge.
+const COMBO_WIDTH: f32 = 170.0;
+
+/// Draws `add` in a slot of [`COMBO_WIDTH`] so the strip wraps before the slot, not inside it.
+fn combo_slot<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.allocate_ui_with_layout(
+        egui::vec2(COMBO_WIDTH, ui.spacing().interact_size.y),
+        egui::Layout::left_to_right(egui::Align::Center),
+        add,
+    )
+    .inner
 }
 
 /// The heading and the Save button. Returns whether Save was clicked.
@@ -93,31 +122,22 @@ pub(crate) fn header_text(page: &BuildPage, cx: &mut Shared) -> String {
     text
 }
 
-fn product_row(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
+/// The Product search in the strip. The matches are kept for the rows under the strip.
+fn product_strip(
+    page: &mut BuildPage,
+    ui: &mut Ui,
+    cx: &mut Shared,
+    matches: &mut Vec<(TypeId, String)>,
+    enter: &mut bool,
+) {
     ui.label("Product");
-    let mut picked = None;
-    ui.vertical(|ui| {
-        let search = ui.add(
-            TextEdit::singleline(&mut page.product_query)
-                .hint_text("Search for a product")
-                .desired_width(260.0),
-        );
-        let matches = product_matches(&page.product_query, page, cx);
-        let enter = search.has_focus() && ui.input(|input| input.key_pressed(Key::Enter));
-        if enter {
-            picked = matches.first().map(|(id, _)| *id);
-        }
-        for (id, name) in &matches {
-            if ui.button(name.as_str()).clicked() {
-                picked = Some(*id);
-            }
-        }
-    });
-    if let Some(id) = picked {
-        page.add_product(id, cx);
-        page.product_query.clear();
-    }
-    ui.end_row();
+    let search = ui.add(
+        TextEdit::singleline(&mut page.product_query)
+            .hint_text("Search for a product")
+            .desired_width(200.0),
+    );
+    *enter = search.has_focus() && ui.input(|input| input.key_pressed(Key::Enter));
+    *matches = product_matches(&page.product_query, page, cx);
 }
 
 /// Types with a recipe that match the search, at most [`MATCHES`] of them, in search order.
@@ -150,14 +170,13 @@ pub(crate) fn product_matches(
         .collect()
 }
 
-fn quantity_row(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
+fn quantity_strip(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
     ui.label("Quantity");
-    ui.vertical(|ui| quantity_field(page, ui, cx, 0));
-    ui.end_row();
+    quantity_field(page, ui, cx, 0);
 }
 
-/// One grid row per product after the first: its name, its quantity field and a Remove button.
-/// A click removes one product, so the rows stop at the one removed.
+/// Each product after the first: its name, its quantity field and a Remove button, all in the
+/// strip. A click removes one product, so the loop stops at the one removed.
 fn more_rows(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
     let rows = page.products.len();
     for row in 1..rows {
@@ -166,19 +185,12 @@ fn more_rows(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
         };
         let name = type_name(product.type_id, cx.sde.as_ref(), &mut cx.notices);
         ui.label(name);
-        let mut removed = false;
-        ui.horizontal(|ui| {
-            quantity_field(page, ui, cx, row);
-            if ui
-                .add_enabled(page.can_remove(row), Button::new("Remove"))
-                .clicked()
-            {
-                page.remove_product(row, cx);
-                removed = true;
-            }
-        });
-        ui.end_row();
-        if removed {
+        quantity_field(page, ui, cx, row);
+        if ui
+            .add_enabled(page.can_remove(row), Button::new("Remove"))
+            .clicked()
+        {
+            page.remove_product(row, cx);
             break;
         }
     }
@@ -199,7 +211,7 @@ fn quantity_field(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared, row: usize
     }
 }
 
-fn facility_row(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared, activity: Activity) {
+fn facility_strip(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared, activity: Activity) {
     let (label, none, salt) = match activity {
         Activity::Manufacturing => (
             "Manufacturing",
@@ -214,13 +226,12 @@ fn facility_row(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared, activity: Ac
         Activity::Reaction => record.reactions,
     });
     let options = facility_options(cx, activity, none);
-    if let Some(choice) = choose(ui, salt, current, &options) {
+    if let Some(choice) = combo_slot(ui, |ui| choose(ui, salt, current, &options)) {
         edit(page, cx, |record| match activity {
             Activity::Manufacturing => record.manufacturing = choice,
             Activity::Reaction => record.reactions = choice,
         });
     }
-    ui.end_row();
 }
 
 /// The first option is `none`; then each saved facility that allows `activity`.
@@ -264,7 +275,7 @@ fn security_text(security: mop_sde::Security) -> &'static str {
     }
 }
 
-fn price_row(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
+fn price_strip(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
     ui.label("Price");
     let current = page.record.as_ref().map(|record| record.price_rule);
     if let Some(current) = current {
@@ -279,11 +290,10 @@ fn price_row(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
             .into_iter()
             .map(|rule| (rule, price_text(rule).to_owned()))
             .collect();
-        if let Some(rule) = choose(ui, "build_price", shown, &options) {
+        if let Some(rule) = combo_slot(ui, |ui| choose(ui, "build_price", shown, &options)) {
             edit(page, cx, |record| record.price_rule = rule);
         }
     }
-    ui.end_row();
 }
 
 pub(crate) fn price_text(rule: PriceRule) -> &'static str {
@@ -299,14 +309,13 @@ pub(crate) fn price_text(rule: PriceRule) -> &'static str {
     }
 }
 
-fn freight_row(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
+fn freight_strip(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
     ui.label("Freight");
     let current = page.record.as_ref().and_then(|record| record.route);
     let options = route_options(cx);
-    if let Some(choice) = choose(ui, "build_freight", current, &options) {
+    if let Some(choice) = combo_slot(ui, |ui| choose(ui, "build_freight", current, &options)) {
         edit(page, cx, |record| record.route = choice);
     }
-    ui.end_row();
 }
 
 /// `No freight`, then each saved route as `<from> → <to>`.
@@ -343,22 +352,50 @@ fn system_name(id: u32, sde: Option<&Sde>, notices: &mut Vec<Notice>) -> String 
     }
 }
 
-/// The Stock row: where the plan's stock comes from, and for characters which ones and places.
-fn stock_row(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
+/// The Stock part of the strip: where the plan's stock comes from and the button that opens the
+/// pasted text in a window.
+fn stock_strip(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
     ui.label("Stock");
-    ui.vertical(|ui| {
-        stock_choice(page, ui, cx);
-        reserve_tick(page, ui, cx);
-        if let PlanStock::Characters(scope) = page.stock.clone() {
-            character_ticks(page, ui, cx, &scope);
-            place_ticks(page, ui, cx, &scope);
-        }
-        if let Some(text) = page.stock_error.clone() {
-            ui.label(RichText::new(text).color(cx.style.neg));
-        }
-        claimed_line(page, ui, cx);
-    });
-    ui.end_row();
+    stock_choice(page, ui, cx);
+    if ui.button("Pasted stock…").clicked() {
+        ui.data_mut(|data| data.insert_temp(pasted_stock_open(), true));
+    }
+}
+
+/// The stock details under the strip: the Reserve tick, and for characters which ones and places.
+fn stock_details(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
+    if !matches!(page.stock, PlanStock::Characters(_)) {
+        ui.label(RichText::new("materials and freight only").color(cx.style.mute));
+    }
+    reserve_tick(page, ui, cx);
+    if let PlanStock::Characters(scope) = page.stock.clone() {
+        character_ticks(page, ui, cx, &scope);
+        place_ticks(page, ui, cx, &scope);
+    }
+    if let Some(text) = page.stock_error.clone() {
+        ui.label(RichText::new(text).color(cx.style.neg));
+    }
+    claimed_line(page, ui, cx);
+}
+
+/// The egui data key that says whether the pasted stock window is open.
+fn pasted_stock_open() -> Id {
+    Id::new("build.pasted_stock_open")
+}
+
+/// The pasted stock window, drawn while its opening flag is set. The close button writes the flag
+/// back, so the window stays shut once the player closes it.
+fn pasted_stock_window(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
+    let id = pasted_stock_open();
+    let mut open = ui.data(|data| data.get_temp::<bool>(id)).unwrap_or(false);
+    if !open {
+        return;
+    }
+    egui::Window::new("Pasted stock")
+        .open(&mut open)
+        .default_size(egui::vec2(520.0, 420.0))
+        .show(ui.ctx(), |ui| stock::show(page, ui, cx));
+    ui.data_mut(|data| data.insert_temp(id, open));
 }
 
 const RESERVE_HOVER: &str =
@@ -412,27 +449,27 @@ fn stock_choice(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
         "Pasted"
     };
     let mut picked = None;
-    ComboBox::from_id_salt("build_stock")
-        .selected_text(shown)
-        .show_ui(ui, |ui| {
-            if ui.selectable_label(!from_characters, "Pasted").clicked() {
-                picked = Some(false);
-            }
-            let option = ui.add_enabled(
-                has_characters,
-                Button::selectable(from_characters, "From characters"),
-            );
-            if option.on_disabled_hover_text(NO_CHARACTERS).clicked() {
-                picked = Some(true);
-            }
-        });
+    combo_slot(ui, |ui| {
+        ComboBox::from_id_salt("build_stock")
+            .width(COMBO_WIDTH)
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(!from_characters, "Pasted").clicked() {
+                    picked = Some(false);
+                }
+                let option = ui.add_enabled(
+                    has_characters,
+                    Button::selectable(from_characters, "From characters"),
+                );
+                if option.on_disabled_hover_text(NO_CHARACTERS).clicked() {
+                    picked = Some(true);
+                }
+            });
+    });
     match picked {
         Some(true) if !from_characters => choose_characters(page, cx),
         Some(false) if from_characters => save_stock(page, cx, PlanStock::Pasted),
         _ => {}
-    }
-    if !from_characters {
-        ui.label(RichText::new("materials and freight only").color(cx.style.mute));
     }
 }
 
@@ -766,6 +803,7 @@ fn choose<T: Copy + PartialEq>(
         );
     let mut picked = None;
     ComboBox::from_id_salt(salt)
+        .width(COMBO_WIDTH)
         .selected_text(shown)
         .show_ui(ui, |ui| {
             for (value, text) in options {

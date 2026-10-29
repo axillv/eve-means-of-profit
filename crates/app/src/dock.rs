@@ -20,9 +20,8 @@ use crate::table::{copy_request, has_table};
 use crate::theme::Style;
 
 /// The Build panels the Panels menu lists. The Item inspector floats outside the dock.
-pub const BUILD_PANELS: [BuildPanel; 5] = [
+pub const BUILD_PANELS: [BuildPanel; 4] = [
     BuildPanel::Plans,
-    BuildPanel::PastedStock,
     BuildPanel::Plan,
     BuildPanel::Steps,
     BuildPanel::BuyList,
@@ -54,14 +53,13 @@ pub const SETUP_PANELS: [SetupPanel; 8] = [
     SetupPanel::Display,
 ];
 
-/// The Build page: Plans over Pasted stock on the left; Plan on top, then Steps and Buy list side
-/// by side below it.
+/// The Build page: a narrow Plans list on the left; Plan on top, then Steps and Buy list side by
+/// side below it.
 pub fn build_layout() -> DockState<BuildPanel> {
     let mut dock = DockState::new(vec![BuildPanel::Plans]);
     let surface = dock.main_surface_mut();
-    let [plans, plan] = surface.split_right(NodeIndex::root(), 0.4, vec![BuildPanel::Plan]);
-    surface.split_below(plans, 0.5, vec![BuildPanel::PastedStock]);
-    let [_plan, lower] = surface.split_below(plan, 0.45, vec![BuildPanel::Steps]);
+    let [_plans, plan] = surface.split_right(NodeIndex::root(), 0.2, vec![BuildPanel::Plan]);
+    let [_plan, lower] = surface.split_below(plan, 0.35, vec![BuildPanel::Steps]);
     surface.split_right(lower, 0.5, vec![BuildPanel::BuyList]);
     dock
 }
@@ -425,7 +423,7 @@ mod tests {
         let mut dock = build_layout();
         assert!(toggle(&mut dock, BuildPanel::BuyList), "Buy list closes");
         let open = tabs(&dock);
-        assert_eq!(open.len(), 4, "four tabs are left");
+        assert_eq!(open.len(), 3, "three tabs are left");
         assert!(!open.contains(&BuildPanel::BuyList), "Buy list is gone");
 
         let mut orders = DockState::new(vec![OrdersPanel::Orders]);
@@ -498,24 +496,68 @@ mod tests {
             tabs(&default),
             [
                 BuildPanel::Plans,
-                BuildPanel::PastedStock,
                 BuildPanel::Plan,
                 BuildPanel::Steps,
                 BuildPanel::BuyList,
             ],
             "without a setting the page keeps its default layout"
         );
+
+        store
+            .set_setting("panels.build", "Plans,Pasted stock,Plan,Steps,Buy list")
+            .expect("an old panel list saves");
+        let old = with_saved(
+            &store,
+            "build",
+            build_layout(),
+            &BUILD_PANELS,
+            BuildPanel::title,
+        )
+        .expect("the old panel list reads");
+        assert_eq!(
+            tabs(&old),
+            [
+                BuildPanel::Plans,
+                BuildPanel::Plan,
+                BuildPanel::Steps,
+                BuildPanel::BuyList,
+            ],
+            "a saved Pasted stock closes nothing"
+        );
+    }
+
+    #[test]
+    fn the_build_layout_holds_four_tabs_in_order_with_its_fractions() {
+        let dock = build_layout();
+        assert_eq!(
+            tabs(&dock),
+            [
+                BuildPanel::Plans,
+                BuildPanel::Plan,
+                BuildPanel::Steps,
+                BuildPanel::BuyList,
+            ]
+        );
+        let tree = dock.main_surface();
+        let Node::Horizontal(root) = &tree[NodeIndex::root()] else {
+            panic!("the Plans list splits the root horizontally");
+        };
+        assert_eq!(root.fraction, 0.2);
+        let plan = NodeIndex::root().right();
+        let Node::Vertical(split) = &tree[plan] else {
+            panic!("Plan sits above Steps and Buy list");
+        };
+        assert_eq!(split.fraction, 0.35);
+        let Node::Horizontal(lower) = &tree[plan.right()] else {
+            panic!("Steps and Buy list split below Plan");
+        };
+        assert_eq!(lower.fraction, 0.5);
     }
 
     #[test]
     fn closing_the_last_panel_is_refused_and_an_empty_list_keeps_one() {
         let mut dock = build_layout();
-        for panel in [
-            BuildPanel::Plans,
-            BuildPanel::PastedStock,
-            BuildPanel::Plan,
-            BuildPanel::BuyList,
-        ] {
+        for panel in [BuildPanel::Plans, BuildPanel::Plan, BuildPanel::BuyList] {
             assert!(toggle(&mut dock, panel), "{} closes", panel.title());
         }
         assert_eq!(

@@ -558,11 +558,25 @@ mod tests {
     }
 
     /// The cell texts of the Buy list row labelled `row`, left to right, empty cells left out. The
-    /// Steps panel has a row of the same name; the Buy list's row is the one to the right of it.
+    /// Steps panel has a row of the same name and its table can reach under the Buy list, so only
+    /// nodes under the Buy list's own tab are counted.
     fn cells(harness: &Harness<'_, App>, row: &str) -> Vec<String> {
-        let anchor = row_anchor(harness, row);
-        let mut found: Vec<(f32, String)> = harness
-            .query_all(by().predicate(|node| node.bounding_box().is_some()))
+        let anchor_node = harness
+            .get_all_by_label(row)
+            .max_by(|a, b| a.rect().min.x.total_cmp(&b.rect().min.x))
+            .expect("the row");
+        let anchor = (anchor_node.rect().min.x, anchor_node.rect().center().y);
+        let title_id = harness.get_by_label("Buy list").accesskit_node().id();
+        let mut panel = anchor_node;
+        while !panel
+            .children_recursive()
+            .any(|node| node.accesskit_node().id() == title_id)
+        {
+            panel = panel.parent().expect("the Buy list tab above the row");
+        }
+        let mut found: Vec<(f32, String)> = panel
+            .children_recursive()
+            .filter(|node| node.accesskit_node().bounding_box().is_some())
             .filter(|node| (node.rect().center().y - anchor.1).abs() < 4.0)
             .filter(|node| node.rect().min.x >= anchor.0 - 1.0)
             // A text box's own text is a child node of the same value; the box is the one to count.
@@ -738,12 +752,15 @@ mod tests {
         harness
     }
 
-    /// Pastes `text` into the pasted stock box.
+    /// Opens the pasted stock window from the Stock row, then pastes `text` into its box.
     fn paste(harness: &mut Harness<'_, App>, text: &str) {
+        click(harness, "Pasted stock…");
         harness
             .get_by(|node| node.role() == Role::MultilineTextInput)
             .click();
         harness.event(Event::Paste(text.to_owned()));
+        harness.run();
+        harness.get_by_label("Close window").click();
         harness.run();
     }
 
@@ -1070,7 +1087,10 @@ mod tests {
         // The wider list wraps the footer so the incomplete label starts on a later line than
         // the label's own rect centre; hover the run of text itself.
         let incomplete = harness
-            .query_all_by_value("incomplete")
+            .query_all(by().predicate(|node| {
+                node.value()
+                    .is_some_and(|value| value.trim() == "incomplete")
+            }))
             .next()
             .expect("the incomplete label")
             .rect();

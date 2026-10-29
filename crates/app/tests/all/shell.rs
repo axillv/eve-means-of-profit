@@ -303,7 +303,7 @@ mod tests {
     }
 
     fn build_page_shown(harness: &Harness<'_, App>) -> bool {
-        ["Plans", "Pasted stock", "Plan", "Steps", "Buy list"]
+        ["Plans", "Plan", "Steps", "Buy list"]
             .iter()
             .all(|panel| shown(harness, panel))
     }
@@ -463,7 +463,7 @@ mod tests {
         folders.set_last_check(990_000);
         let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
         until(&mut harness, "the build pages", build_page_shown);
-        for panel in ["Plans", "Pasted stock", "Plan", "Steps", "Buy list"] {
+        for panel in ["Plans", "Plan", "Steps", "Buy list"] {
             assert_eq!(harness.query_all_by_label(panel).count(), 1, "{panel}");
         }
         harness.get_by_label(Page::Setup.label()).click();

@@ -507,7 +507,6 @@ mod tests {
             names,
             [
                 "Plans",
-                "Pasted stock",
                 "Plan",
                 "Steps",
                 "Buy list",
@@ -521,7 +520,6 @@ mod tests {
             keys,
             [
                 "build.plans",
-                "build.pasted_stock",
                 "build.plan",
                 "build.steps",
                 "build.buy_list",

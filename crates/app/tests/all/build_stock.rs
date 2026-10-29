@@ -360,12 +360,15 @@ mod tests {
         click(harness, option);
     }
 
-    /// Pastes `text` into the pasted stock box.
+    /// Opens the pasted stock window from the Stock row, then pastes `text` into its box.
     fn paste(harness: &mut Harness<'_, App>, text: &str) {
+        click(harness, "Pasted stock…");
         harness
             .get_by(|node| node.role() == Role::MultilineTextInput)
             .click();
         harness.event(Event::Paste(text.to_owned()));
+        harness.run();
+        harness.get_by_label("Close window").click();
         harness.run();
     }
 
@@ -507,6 +510,69 @@ mod tests {
         );
         make_plan(&mut harness);
         assert_own_buy(&harness, "3", "297");
+    }
+
+    #[test]
+    fn the_pasted_stock_window_opens_from_the_stock_row_and_closes() {
+        let env = make_env();
+        let mut harness = start(
+            &env,
+            FakeEve {
+                characters: vec![],
+                jeve: None,
+            },
+        );
+        make_plan(&mut harness);
+        // The paste helper closes the window, so the fresh page has only the Stock row button.
+        assert!(!shown(&harness, "Pasted stock"), "the window is closed");
+        assert_eq!(
+            harness
+                .query_all(
+                    egui_kittest::kittest::by()
+                        .predicate(|node| { node.role() == Role::MultilineTextInput })
+                )
+                .count(),
+            0,
+            "no pasted stock box is drawn"
+        );
+        assert!(
+            shown(&harness, "Pasted stock…"),
+            "the Stock row keeps the button"
+        );
+
+        click(&mut harness, "Pasted stock…");
+        assert_eq!(
+            harness.query_all_by_label("Pasted stock").count(),
+            1,
+            "one window is drawn"
+        );
+        assert_eq!(
+            harness
+                .query_all(
+                    egui_kittest::kittest::by()
+                        .predicate(|node| { node.role() == Role::MultilineTextInput })
+                )
+                .count(),
+            1,
+            "the window holds one box"
+        );
+
+        harness.get_by_label("Close window").click();
+        harness.run();
+        assert!(
+            !shown(&harness, "Pasted stock"),
+            "the title goes with the window"
+        );
+        assert_eq!(
+            harness
+                .query_all(
+                    egui_kittest::kittest::by()
+                        .predicate(|node| { node.role() == Role::MultilineTextInput })
+                )
+                .count(),
+            0,
+            "the box goes with the window"
+        );
     }
 
     #[test]
@@ -675,11 +741,16 @@ mod tests {
         let mut harness = start(&env, eve);
         make_plan(&mut harness);
         pick(&mut harness, "Pasted", "From characters");
+        click(&mut harness, "Pasted stock…");
         assert!(shown(
             &harness,
             "This plan uses stock from characters. The pasted text is kept but not used."
         ));
-        paste(&mut harness, "Tritanium\t9");
+        harness
+            .get_by(|node| node.role() == Role::MultilineTextInput)
+            .click();
+        harness.event(Event::Paste("Tritanium\t9".to_owned()));
+        harness.run();
         assert!(!has_value(&harness, "Tritanium\t9"));
         assert!(has_value(&harness, "R.A.M.- Robotics\t3"));
     }

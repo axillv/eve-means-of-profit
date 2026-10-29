@@ -616,10 +616,7 @@ mod tests {
         loaded(&mut harness);
         let pages: [(&str, &[&str]); 8] = [
             ("Today", &["Today"]),
-            (
-                "Build",
-                &["Plans", "Pasted stock", "Plan", "Steps", "Buy list"],
-            ),
+            ("Build", &["Plans", "Plan", "Steps", "Buy list"]),
             ("Industry jobs", &["Industry jobs"]),
             ("Orders", &["Orders"]),
             ("Assets", &["Places", "Assets"]),
@@ -652,7 +649,7 @@ mod tests {
             }
         }
         rail(&mut harness, "Build");
-        for panel in ["Plans", "Pasted stock", "Plan", "Steps", "Buy list"] {
+        for panel in ["Plans", "Plan", "Steps", "Buy list"] {
             assert_eq!(harness.query_all_by_label(panel).count(), 1, "{panel}");
         }
     }

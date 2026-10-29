@@ -257,6 +257,10 @@ mod tests {
     }
 
     fn start(env: &Env) -> Harness<'static, App> {
+        start_sized(env, vec2(1900.0, 800.0))
+    }
+
+    fn start_sized(env: &Env, size: egui::Vec2) -> Harness<'static, App> {
         let config = AppConfig {
             data_dir: env.data.clone(),
             cache_dir: env.cache.clone(),
@@ -266,7 +270,7 @@ mod tests {
             market: Box::new(crate::offline::Offline),
         };
         let mut harness = Harness::builder()
-            .with_size(vec2(1900.0, 800.0))
+            .with_size(size)
             .with_max_steps(crate::SETTLE_STEPS)
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
         harness.state_mut().shared_mut().market = Arc::new(Prices::new(Box::new(EmptyForge)));
@@ -313,12 +317,15 @@ mod tests {
         harness.run();
     }
 
-    /// Pastes `text` into the pasted stock box.
+    /// Opens the pasted stock window from the Stock row, then pastes `text` into its box.
     fn paste(harness: &mut Harness<'_, App>, text: &str) {
+        click(harness, "Pasted stock…");
         harness
             .get_by(|node| node.role() == Role::MultilineTextInput)
             .click();
         harness.event(Event::Paste(text.to_owned()));
+        harness.run();
+        harness.get_by_label("Close window").click();
         harness.run();
     }
 
@@ -626,6 +633,7 @@ mod tests {
             &mut harness,
             "Particle Accelerator Unit\t4\nTritanium\t1,000\nNo Such Thing\t4\nRifter\t2",
         );
+        click(&mut harness, "Pasted stock…");
         assert!(shown(&harness, "Left out, could not be read:"));
         assert!(shown(
             &harness,
@@ -777,10 +785,13 @@ mod tests {
             stored_rule(&env, "Hobgoblin 10"),
             PriceRule::SellFivePercent
         );
+        click(&mut restarted, "Pasted stock…");
         assert!(has_value(
             &restarted,
             "Particle Accelerator Unit\t4\nTritanium\t1,000"
         ));
+        restarted.get_by_label("Close window").click();
+        restarted.run();
 
         type_into(&mut restarted, "10", "11");
         assert!(shown(&restarted, "PLAN  Hobgoblin II × 11 (unsaved)"));
@@ -802,6 +813,34 @@ mod tests {
         assert!(shown(&harness, "Save changes to New plan?"));
         click(&mut harness, "Cancel");
         assert!(shown(&harness, "PLAN  Hobgoblin II × 10 (unsaved)"));
+    }
+
+    #[test]
+    fn the_plan_strip_at_1280_by_720_reads_across_and_matches_its_snapshot() {
+        let env = make_env(&standard_facilities());
+        let mut harness = start_sized(&env, vec2(1280.0, 720.0));
+        harness.run();
+        hobgoblin_ii_plan(&mut harness);
+
+        let centre_y = |label: &str| harness.get_by_label(label).rect().center().y;
+        let (product, quantity, manufacturing) = (
+            centre_y("Product"),
+            centre_y("Quantity"),
+            centre_y("Manufacturing"),
+        );
+        assert!(
+            (product - quantity).abs() <= 2.0 && (quantity - manufacturing).abs() <= 2.0,
+            "Product, Quantity and Manufacturing share a line"
+        );
+        assert!(
+            harness.get_by_label("Manufacturing").rect().min.x
+                > harness.get_by_label("Quantity").rect().min.x,
+            "Manufacturing is right of Quantity"
+        );
+
+        harness.remove_cursor();
+        harness.run();
+        harness.snapshot("build-1280x720");
     }
 
     #[test]
