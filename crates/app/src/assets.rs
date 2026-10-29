@@ -4,12 +4,11 @@
 use egui::Ui;
 
 use crate::Shared;
-use crate::{dock, item_panel};
+use crate::item_panel;
 
 mod name_dialog;
+mod table;
 mod tree;
-// The tree now prices from the held file; M1-164 deletes the old saved-day pricing here.
-#[expect(dead_code, reason = "M1-164 deletes the old saved-day prices")]
 mod value;
 pub mod worth;
 
@@ -38,6 +37,6 @@ pub fn show(_page: &mut AssetsPage, panel: AssetsPanel, ui: &mut Ui, cx: &mut Sh
     match panel {
         AssetsPanel::Item => item_panel::show(ui, cx),
         AssetsPanel::Places => tree::show(ui, cx),
-        AssetsPanel::Assets => dock::placeholder(ui, cx),
+        AssetsPanel::Assets => table::show(ui, cx),
     }
 }
