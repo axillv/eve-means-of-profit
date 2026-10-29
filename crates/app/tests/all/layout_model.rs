@@ -507,12 +507,30 @@ mod tests {
             names,
             [
                 "Plans",
+                "Pasted stock",
                 "Plan",
                 "Steps",
                 "Buy list",
                 "Facilities",
                 "Freight services",
                 "Price rule",
+                "Item",
+                "Places",
+                "Assets",
+                "Net worth",
+                "By character",
+                "Right now",
+                "Orders",
+                "Industry jobs",
+                "Characters",
+                "jEve data",
+                "Price history",
+                "Structures",
+                "Fees and skills",
+                "Invention skills",
+                "Display",
+                "Stockpiles",
+                "Contents",
             ]
         );
         let keys: Vec<&str> = list.iter().map(|info| info.key).collect();
@@ -520,18 +538,99 @@ mod tests {
             keys,
             [
                 "build.plans",
+                "build.pasted_stock",
                 "build.plan",
                 "build.steps",
                 "build.buy_list",
                 "setup.facilities",
                 "setup.freight_services",
                 "setup.price_rule",
+                "item",
+                "assets.places",
+                "assets.assets",
+                "net_worth.net_worth",
+                "net_worth.by_character",
+                "net_worth.right_now",
+                "orders.orders",
+                "jobs.industry_jobs",
+                "characters.characters",
+                "characters.jeve_data",
+                "setup.price_history",
+                "setup.structures",
+                "setup.fees",
+                "setup.invention",
+                "setup.display",
+                "stockpiles.stockpiles",
+                "stockpiles.contents",
             ]
         );
         let mut lowered: Vec<String> = names.iter().map(|name| name.to_lowercase()).collect();
         lowered.sort();
         lowered.dedup();
         assert_eq!(lowered.len(), names.len());
+    }
+
+    #[test]
+    fn panel_list_follows_the_selection_kind_of_each_page() {
+        let follows: Vec<(&str, Follows)> = panels()
+            .iter()
+            .map(|info| (info.key, info.follows.clone()))
+            .collect();
+        assert_eq!(
+            follows,
+            [
+                ("build.plans", Follows::Nothing),
+                ("build.pasted_stock", Follows::Plan),
+                ("build.plan", Follows::Plan),
+                ("build.steps", Follows::Plan),
+                ("build.buy_list", Follows::Plan),
+                ("setup.facilities", Follows::Nothing),
+                ("setup.freight_services", Follows::Nothing),
+                ("setup.price_rule", Follows::Nothing),
+                ("item", Follows::Item),
+                ("assets.places", Follows::Nothing),
+                ("assets.assets", Follows::Place),
+                ("net_worth.net_worth", Follows::Nothing),
+                ("net_worth.by_character", Follows::Nothing),
+                ("net_worth.right_now", Follows::Nothing),
+                ("orders.orders", Follows::Nothing),
+                ("jobs.industry_jobs", Follows::Nothing),
+                ("characters.characters", Follows::Nothing),
+                ("characters.jeve_data", Follows::Nothing),
+                ("setup.price_history", Follows::Nothing),
+                ("setup.structures", Follows::Nothing),
+                ("setup.fees", Follows::Nothing),
+                ("setup.invention", Follows::Nothing),
+                ("setup.display", Follows::Nothing),
+                ("stockpiles.stockpiles", Follows::Nothing),
+                ("stockpiles.contents", Follows::Stockpile),
+            ]
+        );
+    }
+
+    #[test]
+    fn saved_layouts_reach_the_later_pages_panels_and_their_pins() {
+        let text = "EVE Means of Profit layout 1\nname: S\nsplit right 50%\n  Stockpiles\n  Contents [pinned stockpile 3]\n";
+        let parsed = parse_saved(text, panels()).expect("both panels are known");
+        assert_eq!(parsed.unknown, Vec::<String>::new());
+        assert_eq!(
+            parsed.layout.root,
+            Some(split(
+                Dir::Right,
+                50,
+                panel("stockpiles.stockpiles"),
+                Node::Panel(pinned("stockpiles.contents", Binding::PinStockpile(3))),
+            ))
+        );
+    }
+
+    #[test]
+    fn a_later_page_panel_that_cannot_take_the_pin_is_refused() {
+        let text = "EVE Means of Profit layout 1\nname: S\nsplit right 50%\n  Stockpiles\n  Assets [pinned plan 1]\n";
+        assert_eq!(
+            parse_saved(text, panels()).unwrap_err().to_string(),
+            "Line 5: \"Assets\" cannot be pinned."
+        );
     }
 
     #[test]
