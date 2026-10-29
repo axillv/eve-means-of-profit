@@ -13,6 +13,7 @@ use crate::build::inputs::{PRICE_RULES, price_text};
 use crate::dock;
 use crate::status::Notice;
 
+pub mod chart;
 pub mod data;
 pub mod record;
 pub mod summary;
