@@ -762,6 +762,27 @@ mod tests {
     }
 
     #[test]
+    fn with_stock_and_game_data_the_panels_draw_no_empty_state() {
+        let env = test_env();
+        let jeve = jeve_profile();
+        let (mut harness, _) = start(&env, &jeve, Vec::new(), CountingForge::all_rows());
+        harness.run();
+
+        let (_, ram) = table_row(&harness, "R.A.M.- Robotics");
+        assert!(!ram.is_empty(), "the assets table shows");
+        for text in [
+            "No characters yet.",
+            "No assets yet.",
+            "The game data is not in yet.",
+            "No character picked.",
+            "Add character",
+            "Refresh a character",
+        ] {
+            assert!(!shown(&harness, text), "{text:?} is not drawn");
+        }
+    }
+
+    #[test]
     fn the_assets_table_matches_its_snapshot() {
         let env = test_env();
         let jeve = jeve_profile();
