@@ -186,6 +186,7 @@ pub fn show(page: &mut NetWorthPage, panel: NetWorthPanel, ui: &mut Ui, cx: &mut
             controls(page, ui, cx);
             view::show_headline(ui, cx, &page.view, &page.choices);
             plot::show(ui, cx, &page.view, &page.choices);
+            view::show_leave_out(ui, cx, &mut page.view);
         }
         NetWorthPanel::ByCharacter => {
             tables::show_by_character(ui, cx, &page.view, &page.choices);

@@ -5,11 +5,13 @@ use std::collections::BTreeSet;
 
 use egui::{RichText, Ui};
 use mop_core::industry::TypeId;
+use mop_core::net_worth::CharacterKey;
 use mop_core::price_history::day_of;
 
 use crate::Shared;
 use crate::build::inputs::price_text;
 use crate::net_worth::Choices;
+use crate::net_worth::chart;
 use crate::net_worth::data::ValuedPoint;
 use crate::net_worth::data::load::{Loaded, load};
 use crate::net_worth::data::pricer::PriceSource;
@@ -43,6 +45,8 @@ pub struct View {
     last_loaded: Option<i64>,
     /// The login characters and their revisions at the last load.
     revisions: Vec<(u64, u64)>,
+    /// The characters ticked to leave out of the chart. Session only, never saved.
+    left_out: BTreeSet<CharacterKey>,
 }
 
 impl View {
@@ -75,7 +79,6 @@ impl View {
         self.invalid = false;
         self.revisions = revisions;
         self.last_loaded = Some(now);
-        let left_out = BTreeSet::new();
         let loaded = load(
             &mut cx.store,
             cx.sde.as_ref(),
@@ -83,7 +86,7 @@ impl View {
             now,
             &choices.shown,
             choices.show_plex,
-            &left_out,
+            &self.left_out,
         );
         match loaded {
             Ok(loaded) => {
@@ -139,6 +142,38 @@ fn login_revisions(cx: &Shared) -> Vec<(u64, u64)> {
         .iter()
         .map(|character| (character.id, cx.session.revision(character.id)))
         .collect()
+}
+
+/// The ticks that leave a carried character out of the chart. A key stays listed after the load
+/// no longer carries it, so a ticked character can be brought back.
+pub(super) fn show_leave_out(ui: &mut Ui, cx: &Shared, view: &mut View) {
+    let Some(shown) = view.shown() else {
+        return;
+    };
+    let Some(latest) = shown.loaded.points.last() else {
+        return;
+    };
+    let mut keys: BTreeSet<CharacterKey> = chart::carried_names(latest)
+        .into_iter()
+        .map(|(key, _age)| key)
+        .collect();
+    keys.extend(view.left_out.iter().cloned());
+
+    for key in keys {
+        let mut ticked = view.left_out.contains(&key);
+        let name = chart::character_name(&key, cx.session.characters());
+        if ui
+            .checkbox(&mut ticked, format!("Leave out {name}"))
+            .changed()
+        {
+            if ticked {
+                view.left_out.insert(key);
+            } else {
+                view.left_out.remove(&key);
+            }
+            view.invalidate();
+        }
+    }
 }
 
 /// Draws the total and the changes of the last point.
@@ -359,6 +394,7 @@ mod tests {
     fn a_fresh_view_has_nothing_and_invalidate_asks_for_a_read() {
         let mut view = View::default();
         assert!(view.shown().is_none());
+        assert!(view.left_out.is_empty());
         view.invalidate();
         assert!(view.invalid);
     }

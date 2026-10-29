@@ -676,6 +676,15 @@ mod tests {
         find(&harness.root(), value)
     }
 
+    /// Whether any drawn label starts with `prefix`.
+    fn labelled_with_prefix(harness: &Harness<'static, App>, prefix: &str) -> bool {
+        harness
+            .root()
+            .children_recursive()
+            .filter_map(|node| node.accesskit_node().label())
+            .any(|label| label.starts_with(prefix))
+    }
+
     /// Whether the checkbox labelled `label` is ticked.
     fn ticked(harness: &Harness<'static, App>, label: &str) -> bool {
         harness
@@ -696,6 +705,14 @@ mod tests {
     }
 
     fn click_checkbox(harness: &mut Harness<'static, App>, label: &str) {
+        {
+            let target = harness
+                .query_all_by_label(label)
+                .find(|node| node.accesskit_node().role() == Role::CheckBox)
+                .unwrap_or_else(|| panic!("no checkbox labelled {label}"));
+            target.scroll_to_me();
+        }
+        harness.run();
         {
             let target = harness
                 .query_all_by_label(label)
@@ -2251,6 +2268,34 @@ mod tests {
         panic!("the chart tooltip did not show");
     }
 
+    /// The tooltip of the chart's dot of day `k` of the thirty-day scenario, counting from the
+    /// latest day as 0. The plot's width holds the 29 steps between the first and last points.
+    fn hover_day(harness: &mut Harness<'static, App>, k: i64) -> Vec<String> {
+        harness.run();
+        let plot = harness
+            .query_all_by_label("Net worth chart")
+            .next()
+            .expect("the chart")
+            .rect();
+        let days = u16::try_from(29 - k).expect("a day of the thirty-day scenario");
+        let x = plot.min.x + plot.width() * f32::from(days) / 29.0;
+        hover_at(harness, pos2(x, plot.center().y))
+    }
+
+    /// Whether the tooltip `lines` shows the exact line `text`.
+    fn has_line(lines: &[String], text: &str) -> bool {
+        lines
+            .iter()
+            .any(|entry| entry.lines().any(|line| line == text))
+    }
+
+    /// Whether the tooltip `lines` shows any line of the carried characters.
+    fn partial(lines: &[String]) -> bool {
+        lines
+            .iter()
+            .any(|entry| entry.lines().any(|line| line.starts_with("Partial:")))
+    }
+
     #[test]
     fn the_thirty_day_chart_draws_its_stack_and_names_the_day_on_hover() {
         let dir = TempDir::new().expect("a temp folder");
@@ -2315,6 +2360,94 @@ mod tests {
         assert_eq!(hover_chart(&mut harness), vec![lines.join("\n")]);
         assert!(shown(&harness, "Alt: last data 8d ago"));
         snapshot(&mut harness, "networth-partial");
+    }
+
+    /// The thirty-day chart with Alt's one record eight days before `NOW`: its data is a week or
+    /// more old at the first two days of the range.
+    fn start_with_carried_alt(dir: &TempDir) -> Harness<'static, App> {
+        let mut harness = start_with_characters(
+            dir,
+            Box::new(EmptyForge),
+            vec![character(MAIN, "Main"), character(ALT, "Alt")],
+        );
+        {
+            let store = &mut harness.state_mut().shared_mut().store;
+            add_thirty_days(store);
+            store
+                .add_record(&load_record(
+                    ALT,
+                    NOW - 691_200,
+                    load_seen(Some("500,000.00"), &[], None, None, &[]),
+                ))
+                .expect("the alt record is written");
+        }
+        harness
+    }
+
+    #[test]
+    fn a_carried_character_can_be_left_out_with_a_tick() {
+        let dir = TempDir::new().expect("a temp folder");
+        let mut harness = start_with_carried_alt(&dir);
+        open_net_worth(&mut harness);
+
+        assert!(shown(&harness, "Leave out Alt"));
+        assert!(!ticked(&harness, "Leave out Alt"));
+        assert!(shown(&harness, "Alt: last data 8d ago"));
+        let tip = hover_day(&mut harness, 0);
+        assert!(has_line(&tip, "Total 12,550,000.00 ISK"), "{tip:?}");
+        let tip = hover_day(&mut harness, 1);
+        assert!(has_line(&tip, "Total 12,500,000.00 ISK"), "{tip:?}");
+
+        click_checkbox(&mut harness, "Leave out Alt");
+        assert!(ticked(&harness, "Leave out Alt"));
+        assert!(!shown(&harness, "Alt: last data"));
+        let tip = hover_day(&mut harness, 0);
+        assert!(has_line(&tip, "Total 12,050,000.00 ISK"), "{tip:?}");
+        assert!(has_line(&tip, "Wallet 2,450,000.00"), "{tip:?}");
+        assert!(!partial(&tip), "{tip:?}");
+        let tip = hover_day(&mut harness, 1);
+        assert!(has_line(&tip, "Total 12,000,000.00 ISK"), "{tip:?}");
+        assert!(!partial(&tip), "{tip:?}");
+        let tip = hover_day(&mut harness, 2);
+        assert!(has_line(&tip, "Total 12,450,000.00 ISK"), "{tip:?}");
+        assert!(
+            has_line(&tip, "Partial: Alt carried from 6d before"),
+            "{tip:?}"
+        );
+
+        click_checkbox(&mut harness, "Leave out Alt");
+        assert!(!ticked(&harness, "Leave out Alt"));
+        let tip = hover_day(&mut harness, 0);
+        assert!(has_line(&tip, "Total 12,550,000.00 ISK"), "{tip:?}");
+    }
+
+    #[test]
+    fn a_left_out_character_stays_ticked_when_the_page_is_left_and_come_back_to() {
+        let dir = TempDir::new().expect("a temp folder");
+        let mut harness = start_with_carried_alt(&dir);
+        open_net_worth(&mut harness);
+        click_checkbox(&mut harness, "Leave out Alt");
+
+        harness.get_by_label("Orders").click();
+        harness.run();
+        open_net_worth(&mut harness);
+
+        assert!(ticked(&harness, "Leave out Alt"));
+        let tip = hover_day(&mut harness, 0);
+        assert!(has_line(&tip, "Total 12,050,000.00 ISK"), "{tip:?}");
+    }
+
+    #[test]
+    fn only_main_records_show_no_leave_out_tick_and_the_chart_as_before() {
+        let dir = TempDir::new().expect("a temp folder");
+        let mut harness = start(&dir);
+        add_thirty_days(&mut harness.state_mut().shared_mut().store);
+        open_net_worth(&mut harness);
+
+        assert!(!labelled_with_prefix(&harness, "Leave out"));
+        let tip = hover_day(&mut harness, 0);
+        assert!(has_line(&tip, "Total 12,050,000.00 ISK"), "{tip:?}");
+        assert!(!partial(&tip), "{tip:?}");
     }
 
     #[test]
