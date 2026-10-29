@@ -1,8 +1,9 @@
 //! Acceptance tests for the Places panel on the Assets page: the tree rows and their totals, the
-//! character filter, the clicks that pick a place, the price basis and the footer, the unpriced
-//! marker, blueprints, the name dialog of a structure, and the rule that the page sends no request.
-//! The game data is the build 3607705 fixture; the login and the market are fakes, and jEve's
-//! profile is a made-up file in a temp folder. The clock is fixed at 1,000,000 (day 11).
+//! character filter, the clicks that pick a place, the app-wide value price and the footer, the
+//! unpriced marker, blueprints, the name dialog of a structure, and the rule that the page sends
+//! no request. The game data is the build 3607705 fixture; the login and the market are fakes, and
+//! jEve's profile is a made-up file in a temp folder. The clock is fixed at 1,000,000, and the
+//! held market file was published at 992,800, two hours before it.
 #[cfg(test)]
 mod tests {
 
@@ -12,8 +13,10 @@ mod tests {
     use std::ops::ControlFlow;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex, PoisonError};
+    use std::thread;
+    use std::time::Duration;
 
-    use crate::ui::{click, find, shown, snapshot, until};
+    use crate::ui::{click, find, hover, shown, snapshot, until};
     use egui::{Event, Key, Modifiers, vec2};
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
@@ -23,23 +26,24 @@ mod tests {
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use mop_core::money::Money;
-    use mop_core::net_worth::{ItemPrices, PriceBasis};
     use mop_core::stock::{Asset, CharacterAssets};
     use mop_esi::character_data::{CharacterData, Fetched, Kind, OwnedAssets, Refreshed};
     use mop_esi::characters::{Character, Login};
     use mop_esi::error::EsiError;
     use mop_esi::places::{NamingReport, StructureNames};
     use mop_esi::saved;
+    use mop_market::book::PriceRule;
     use mop_market::error::MarketError;
     use mop_market::fuzzwork::{BytesHttp, BytesResponse};
     use mop_sde::{Fetch, FetchError, import};
     use mop_store::Store;
+    use mop_store::settings::{RuleTarget, RuleValue};
     use rusqlite::Connection;
     use tempfile::TempDir;
 
     const NOW: i64 = 1_000_000;
-    /// Today: 1,000,000 seconds is day 11.
-    const DAY: i64 = 11;
+    /// When the held market file was published: two hours before the clock.
+    const PUBLISHED_AT: i64 = 992_800;
     const FIXTURE: &str = "../sde/tests/fixtures/sde-3607705";
     const MAIN: u64 = 2_112_000_001;
     const JITA_4_4: i64 = 60_003_760;
@@ -53,10 +57,16 @@ mod tests {
     const RAM_IN_RIFTER: i64 = 9_002;
     const JITA_4_4_NAME: &str = "Jita IV - Moon 4 - Caldari Navy Assembly Plant";
     const REFUSED_NAME: &str = "Structure 1035466617999 (no access)";
-    /// The footer's text with the midpoint saved two hours before the clock.
-    const MIDPOINT_FOOTER: &str = "Prices: Forge midpoint · saved 13h ago";
-    const NO_PRICES: &str = "No saved prices yet. Refresh a character to save today's prices.";
+    /// The footer's text under the default value price.
+    const FOOTER: &str = "Prices: Forge sell, 5% price · file made 2h ago";
+    const NO_PRICES: &str = "No market prices yet.";
     const DASH: &str = "—";
+
+    /// The acceptance file's rows. R.A.M. sells at 480.00 and buys at 450.00; the Rifter sells at
+    /// 505,000.00 and has no buy row.
+    const RAM_SELL: &str = "10000002|11481|false,479.2,520,478.6,0,481,9000,12,480,1";
+    const RAM_BUY: &str = "10000002|11481|true,448,450,440,0,447,4000,6,449,1";
+    const RIFTER_SELL: &str = "10000002|587|false,503000,600000,500000,0,502000,20,4,505000,1";
 
     fn fixture() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE)
@@ -80,10 +90,35 @@ mod tests {
         }
     }
 
-    /// A market file with no rows, counting the requests made to it.
+    /// A market file with the given rows, counting the requests made to it.
     #[derive(Clone)]
     struct CountingForge {
         requests: Arc<Mutex<usize>>,
+        body: Arc<String>,
+    }
+
+    impl CountingForge {
+        fn with_rows(rows: &[&str]) -> Self {
+            let mut body = String::from(
+                "what,weightedaverage,maxval,minval,stddev,median,volume,numorders,fivepercent,orderSet\n",
+            );
+            for row in rows {
+                body.push_str(row);
+                body.push('\n');
+            }
+            Self {
+                requests: Arc::new(Mutex::new(0)),
+                body: Arc::new(body),
+            }
+        }
+
+        fn all_rows() -> Self {
+            Self::with_rows(&[RAM_SELL, RAM_BUY, RIFTER_SELL])
+        }
+
+        fn no_rows() -> Self {
+            Self::with_rows(&[])
+        }
     }
 
     impl BytesHttp for CountingForge {
@@ -93,10 +128,9 @@ mod tests {
             _if_none_match: Option<&str>,
         ) -> Result<BytesResponse, MarketError> {
             *self.requests.lock().unwrap_or_else(PoisonError::into_inner) += 1;
-            let header = "what,weightedaverage,maxval,minval,stddev,median,volume,numorders,fivepercent,orderSet\n";
             let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
             encoder
-                .write_all(header.as_bytes())
+                .write_all(self.body.as_bytes())
                 .map_err(|error| MarketError::Network(error.to_string()))?;
             let body = encoder
                 .finish()
@@ -104,7 +138,7 @@ mod tests {
             Ok(BytesResponse {
                 status: 200,
                 etag: Some("\"0\"".to_owned()),
-                last_modified: Some("Mon, 12 Jan 1970 13:46:40 GMT".to_owned()),
+                last_modified: Some("Mon, 12 Jan 1970 11:46:40 GMT".to_owned()),
                 retry_after: None,
                 body,
             })
@@ -291,41 +325,35 @@ mod tests {
         folder
     }
 
-    /// Saves the day's prices. Each pair is a type and its lowest sell and highest buy.
-    fn save_prices(env: &Env, prices: &[(u32, ItemPrices)]) {
+    /// Saves the app-wide `Value items at` price.
+    fn set_value_price(env: &Env, rule: PriceRule) {
         store_of(&env.data)
-            .save_prices(DAY, prices)
-            .expect("prices saved");
+            .set_value_price(rule)
+            .expect("the value price saved");
     }
 
-    /// RAM sells at 478.60 and buys at 450.00; the Rifter sells at 500,000.00 and buys at 400,000.00.
-    fn both_prices() -> Vec<(u32, ItemPrices)> {
-        vec![(RAM, ram_price()), (RIFTER, rifter_price())]
+    /// Saves a price rule in force at the clock.
+    fn set_price_rule(env: &Env, target: RuleTarget, value: RuleValue) {
+        store_of(&env.data)
+            .set_price_rule(target, Some(value), NOW)
+            .expect("the price rule saved");
     }
 
-    fn ram_price() -> ItemPrices {
-        ItemPrices {
-            lowest_sell: Some(Money::from_ten_thousandths(4_786_000)),
-            highest_buy: Some(Money::from_ten_thousandths(4_500_000)),
-            average: None,
+    /// Asks the market for the file and waits until the fake's file is held.
+    fn fetch_market(harness: &mut Harness<'static, App>) {
+        {
+            let shared = harness.state_mut().shared_mut();
+            let market = Arc::clone(&shared.market);
+            market.refresh(&shared.worker, NOW, true);
         }
-    }
-
-    fn rifter_price() -> ItemPrices {
-        ItemPrices {
-            lowest_sell: Some(Money::from_ten_thousandths(5_000_000_000)),
-            highest_buy: Some(Money::from_ten_thousandths(4_000_000_000)),
-            average: None,
+        for _ in 0..500 {
+            harness.run();
+            if harness.state_mut().shared_mut().market.held().published_at == Some(PUBLISHED_AT) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
         }
-    }
-
-    fn set_basis(env: &Env, basis: PriceBasis) {
-        let mut store = store_of(&env.data);
-        let mut settings = store.net_worth_settings().expect("net worth settings");
-        settings.basis = basis;
-        store
-            .save_net_worth_settings(&settings)
-            .expect("net worth settings saved");
+        panic!("the market file did not arrive");
     }
 
     /// Opens the app on the Assets page with the login and jEve data the tests above describe.
@@ -358,6 +386,7 @@ mod tests {
         until(&mut harness, "the saved data", |h| {
             !shown(h, "Loading character data…")
         });
+        fetch_market(&mut harness);
         click(&mut harness, "Assets");
         (harness, refreshes)
     }
@@ -405,15 +434,15 @@ mod tests {
     /// The rows the spec lists, in order: the label, the stacks and the value.
     fn expected_rows() -> Vec<(&'static str, &'static str, &'static str)> {
         vec![
-            ("All places", "7", "560,503.40"),
-            ("The Forge", "6", "559,110.50"),
-            ("Jita", "6", "559,110.50"),
-            ("Home Fort", "1", "55,716.00"),
-            (JITA_4_4_NAME, "5", "503,394.50"),
-            ("Rifter", "1", "4,643.00"),
-            ("Unknown region", "1", "1,392.90"),
-            ("Unknown system", "1", "1,392.90"),
-            (REFUSED_NAME, "1", "1,392.90"),
+            ("All places", "7", "619,240.00"),
+            ("The Forge", "6", "617,800.00"),
+            ("Jita", "6", "617,800.00"),
+            ("Home Fort", "1", "57,600.00"),
+            (JITA_4_4_NAME, "5", "560,200.00"),
+            ("Rifter", "1", "4,800.00"),
+            ("Unknown region", "1", "1,440.00"),
+            ("Unknown system", "1", "1,440.00"),
+            (REFUSED_NAME, "1", "1,440.00"),
         ]
     }
 
@@ -421,10 +450,7 @@ mod tests {
     fn the_tree_lists_each_place_with_its_stacks_and_value_in_order() {
         let env = env();
         let jeve = jeve_profile();
-        save_prices(&env, &both_prices());
-        let forge = CountingForge {
-            requests: Arc::new(Mutex::new(0)),
-        };
+        let forge = CountingForge::all_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
 
@@ -437,8 +463,8 @@ mod tests {
             assert_eq!(cells.get(1).map(String::as_str), Some(value), "{label}");
         }
         assert!(
-            shown(&harness, MIDPOINT_FOOTER),
-            "the footer names the basis and age"
+            shown(&harness, FOOTER),
+            "the footer names the value price and the file's age"
         );
     }
 
@@ -446,10 +472,7 @@ mod tests {
     fn unticking_alt_takes_its_assets_out_and_unticking_all_shows_no_tree() {
         let env = env();
         let jeve = jeve_profile();
-        save_prices(&env, &both_prices());
-        let forge = CountingForge {
-            requests: Arc::new(Mutex::new(0)),
-        };
+        let forge = CountingForge::all_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
 
@@ -460,10 +483,10 @@ mod tests {
         assert!(shown(&harness, "Characters: 2 of 3"), "the dropdown counts");
         let jita = row(&mut harness, JITA_4_4_NAME).1;
         assert_eq!(jita.first().map(String::as_str), Some("4"));
-        assert_eq!(jita.get(1).map(String::as_str), Some("475,536.50"));
+        assert_eq!(jita.get(1).map(String::as_str), Some("531,400.00"));
         let all = row(&mut harness, "All places").1;
         assert_eq!(all.first().map(String::as_str), Some("6"));
-        assert_eq!(all.get(1).map(String::as_str), Some("532,645.40"));
+        assert_eq!(all.get(1).map(String::as_str), Some("590,440.00"));
 
         click(&mut harness, "Characters: 2 of 3");
         click(&mut harness, "Hauler (jEve)");
@@ -481,10 +504,7 @@ mod tests {
     fn a_click_on_a_row_picks_that_place_and_all_places_picks_none() {
         let env = env();
         let jeve = jeve_profile();
-        save_prices(&env, &both_prices());
-        let forge = CountingForge {
-            requests: Arc::new(Mutex::new(0)),
-        };
+        let forge = CountingForge::all_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
 
@@ -501,14 +521,11 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_basis_changes_the_values_and_the_footer() {
+    fn a_value_price_changes_the_values_and_the_footer() {
         let env = env();
         let jeve = jeve_profile();
-        save_prices(&env, &both_prices());
-        set_basis(&env, PriceBasis::HighestBuy);
-        let forge = CountingForge {
-            requests: Arc::new(Mutex::new(0)),
-        };
+        set_value_price(&env, PriceRule::HighestBuy);
+        let forge = CountingForge::all_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
 
@@ -516,37 +533,77 @@ mod tests {
             row(&mut harness, "Home Fort").1.get(1).map(String::as_str),
             Some("54,000.00")
         );
-        assert!(shown(&harness, "Prices: Forge highest buy · saved 13h ago"));
+        let (_, cells) = row(&mut harness, JITA_4_4_NAME);
+        assert_eq!(cells.get(1).map(String::as_str), Some("51,750.00"));
+        assert_eq!(
+            cells.get(2).map(String::as_str),
+            Some(" +"),
+            "the Rifter has no buy row"
+        );
+        // The Places panel is narrow at the test's window size, which clips the Value column; a
+        // wider window shows the marker so its tooltip can be read.
+        harness.set_size(vec2(3200.0, 800.0));
+        harness.run();
+        let tip = hover(&mut harness, " +");
+        assert!(
+            tip.iter().any(|text| text == "1 item type not priced"),
+            "the marker names the unpriced type: {tip:?}"
+        );
+        assert!(shown(
+            &harness,
+            "Prices: Forge buy, highest · file made 2h ago"
+        ));
     }
 
     #[test]
-    fn a_type_without_a_price_shows_a_plus_after_its_value() {
+    fn a_type_without_a_row_shows_a_plus_after_its_value() {
         let env = env();
         let jeve = jeve_profile();
-        save_prices(&env, &[(RAM, ram_price())]);
-        let forge = CountingForge {
-            requests: Arc::new(Mutex::new(0)),
-        };
+        let forge = CountingForge::with_rows(&[RAM_SELL, RAM_BUY]);
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
 
         let (_, cells) = row(&mut harness, JITA_4_4_NAME);
-        assert_eq!(cells.get(1).map(String::as_str), Some("53,394.50"));
+        assert_eq!(cells.get(1).map(String::as_str), Some("55,200.00"));
         assert_eq!(
             cells.get(2).map(String::as_str),
             Some(" +"),
             "the marker follows the value"
         );
-        assert!(shown(&harness, MIDPOINT_FOOTER));
+        assert!(shown(&harness, FOOTER));
     }
 
     #[test]
-    fn with_no_saved_prices_every_value_is_a_dash_and_the_footer_says_so() {
+    fn an_item_rule_prices_the_rifter_and_leaves_its_stack_alone() {
         let env = env();
         let jeve = jeve_profile();
-        let forge = CountingForge {
-            requests: Arc::new(Mutex::new(0)),
-        };
+        set_price_rule(
+            &env,
+            RuleTarget::Item(RIFTER),
+            RuleValue::Fixed(Money::parse_isk("400,000.00").expect("a test price")),
+        );
+        let forge = CountingForge::all_rows();
+        let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
+        harness.run();
+
+        assert_eq!(
+            row(&mut harness, JITA_4_4_NAME)
+                .1
+                .get(1)
+                .map(String::as_str),
+            Some("455,200.00")
+        );
+        assert_eq!(
+            row(&mut harness, "Rifter").1.get(1).map(String::as_str),
+            Some("4,800.00")
+        );
+    }
+
+    #[test]
+    fn with_no_market_rows_every_value_is_a_dash_and_the_footer_says_so() {
+        let env = env();
+        let jeve = jeve_profile();
+        let forge = CountingForge::no_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
 
@@ -561,17 +618,14 @@ mod tests {
     fn a_blueprint_is_counted_but_not_valued_or_marked() {
         let env = env();
         let jeve = jeve_profile();
-        save_prices(&env, &both_prices());
-        let forge = CountingForge {
-            requests: Arc::new(Mutex::new(0)),
-        };
+        let forge = CountingForge::all_rows();
         let blueprint = asset(9_100, BLUEPRINT, JITA_4_4, "Hangar", 1, true);
         let (mut harness, _) = start(&env, &jeve, vec![blueprint], forge);
         harness.run();
 
         let (_, cells) = row(&mut harness, JITA_4_4_NAME);
         assert_eq!(cells.first().map(String::as_str), Some("6"));
-        assert_eq!(cells.get(1).map(String::as_str), Some("503,394.50"));
+        assert_eq!(cells.get(1).map(String::as_str), Some("560,200.00"));
         assert!(!shown(&harness, " +"), "no type is unpriced");
     }
 
@@ -579,10 +633,7 @@ mod tests {
     fn a_structure_is_named_and_cleared_from_its_menu() {
         let env = env();
         let jeve = jeve_profile();
-        save_prices(&env, &both_prices());
-        let forge = CountingForge {
-            requests: Arc::new(Mutex::new(0)),
-        };
+        let forge = CountingForge::all_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
 
@@ -639,10 +690,7 @@ mod tests {
     fn a_name_of_a_hundred_and_one_characters_is_refused_and_the_window_stays() {
         let env = env();
         let jeve = jeve_profile();
-        save_prices(&env, &both_prices());
-        let forge = CountingForge {
-            requests: Arc::new(Mutex::new(0)),
-        };
+        let forge = CountingForge::all_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
 
@@ -681,10 +729,7 @@ mod tests {
     fn the_menu_is_not_offered_on_a_station_row() {
         let env = env();
         let jeve = jeve_profile();
-        save_prices(&env, &both_prices());
-        let forge = CountingForge {
-            requests: Arc::new(Mutex::new(0)),
-        };
+        let forge = CountingForge::all_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
 
@@ -696,10 +741,7 @@ mod tests {
     fn the_page_sends_no_request_while_it_is_shown() {
         let env = env();
         let jeve = jeve_profile();
-        save_prices(&env, &both_prices());
-        let forge = CountingForge {
-            requests: Arc::new(Mutex::new(0)),
-        };
+        let forge = CountingForge::all_rows();
         let counted = Arc::clone(&forge.requests);
         let (mut harness, refreshes) = start(&env, &jeve, Vec::new(), forge);
         for _ in 0..10 {
@@ -707,17 +749,15 @@ mod tests {
         }
 
         assert_eq!(*refreshes.lock().unwrap_or_else(PoisonError::into_inner), 0);
-        assert_eq!(*counted.lock().unwrap_or_else(PoisonError::into_inner), 0);
+        // The setup fetched the file once; the tree must not ask for another.
+        assert_eq!(*counted.lock().unwrap_or_else(PoisonError::into_inner), 1);
     }
 
     #[test]
     fn the_assets_tree_matches_its_snapshot() {
         let env = env();
         let jeve = jeve_profile();
-        save_prices(&env, &both_prices());
-        let forge = CountingForge {
-            requests: Arc::new(Mutex::new(0)),
-        };
+        let forge = CountingForge::all_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
         click(&mut harness, JITA_4_4_NAME);

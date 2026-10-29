@@ -11,14 +11,16 @@ use egui::{Color32, Id, Label, RichText, Sense, Ui};
 use mop_core::format::group_thousands;
 use mop_core::industry::TypeId;
 use mop_core::money::Money;
-use mop_core::net_worth::PriceBasis;
 use mop_core::stock::{CharacterAssets, ItemId, LocationId, ResolvedAsset, resolve};
 use mop_esi::places::FIRST_STRUCTURE_ID;
+use mop_market::book::PriceRule;
 use mop_sde::{Sde, SdeError};
+use mop_store::settings::{RuleTarget, RuleValue};
 
 use super::name_dialog::{self, Dialog};
-use super::value::{Prices, basis_label};
+use super::worth::Worth;
 use crate::Shared;
+use crate::build::inputs::price_text;
 use crate::build::prices::age_text;
 use crate::dock;
 use crate::session::{Session, Source};
@@ -40,7 +42,7 @@ const PLACE: u64 = 3;
 const CONTAINER: u64 = 4;
 
 /// The category of blueprints: their stacks are not valued.
-const CATEGORY_BLUEPRINT: u32 = 9;
+pub(super) const CATEGORY_BLUEPRINT: u32 = 9;
 /// The id ranges of the stations and the solar systems in the game data.
 const FIRST_STATION: LocationId = 60_000_000;
 const LAST_STATION: LocationId = 63_999_999;
@@ -48,7 +50,6 @@ const FIRST_SYSTEM: LocationId = 30_000_000;
 const LAST_SYSTEM: LocationId = 32_999_999;
 /// The saved setting of the character filter: the ids of the characters left out, joined by `,`.
 const FILTER_KEY: &str = "assets.characters";
-const DAY: i64 = 86_400;
 
 /// Where a place is in the game data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,9 +229,13 @@ struct Key {
     /// A hash of jEve's assets: jEve's data is replaced whole, and any change in it changes this.
     jeve_hash: u64,
     unticked: BTreeSet<i64>,
-    basis: PriceBasis,
+    /// The app-wide `Value items at` price.
+    rule: PriceRule,
+    /// The price rules in force when the tree is built.
+    rules: BTreeMap<RuleTarget, RuleValue>,
     typed: BTreeMap<i64, String>,
-    today: i64,
+    /// When the held market file was published; a new file changes it.
+    published_at: Option<i64>,
 }
 
 /// The built tree and what the footer and the clicks need of it.
@@ -241,11 +246,12 @@ struct Built {
     rows: Vec<Row>,
     /// The entry index by row key.
     index: HashMap<u64, usize>,
-    newest_day: Option<i64>,
+    /// When the market published the held file, if it has rows.
+    published_at: Option<i64>,
 }
 
 impl Built {
-    fn new(key: Key, tree: Result<Tree, TreeError>, newest_day: Option<i64>) -> Self {
+    fn new(key: Key, tree: Result<Tree, TreeError>, published_at: Option<i64>) -> Self {
         let rows = tree.as_ref().map(rows).unwrap_or_default();
         let index = tree.as_ref().map_or_else(
             |_| HashMap::new(),
@@ -262,7 +268,7 @@ impl Built {
             tree,
             rows,
             index,
-            newest_day,
+            published_at,
         }
     }
 }
@@ -347,7 +353,7 @@ fn draw(state: &mut State, ui: &mut Ui, cx: &mut Shared) {
         }
     }
     let now = (cx.clock)();
-    ui.label(footer(built.key.basis, built.newest_day, now));
+    ui.label(footer(built.key.rule, built.published_at, now));
     name_dialog::show(&mut state.dialog, ui.ctx(), cx);
 }
 
@@ -454,16 +460,13 @@ fn unpriced_text(count: usize) -> String {
     format!("{count} item {noun} not priced")
 }
 
-/// The footer: the basis and the age of the newest saved day used.
-fn footer(basis: PriceBasis, newest_day: Option<i64>, now: i64) -> String {
-    let Some(day) = newest_day else {
-        return "No saved prices yet. Refresh a character to save today's prices.".to_owned();
+/// The footer: the app-wide price and the age of the held market file.
+fn footer(rule: PriceRule, published_at: Option<i64>, now: i64) -> String {
+    let Some(published_at) = published_at else {
+        return "No market prices yet.".to_owned();
     };
-    let saved = day
-        .checked_mul(DAY)
-        .and_then(|start| now.checked_sub(start))
-        .map_or_else(|| "at an unknown time".to_owned(), age_text);
-    format!("Prices: {} · saved {} ago", basis_label(basis), saved)
+    let age = age_text(now.saturating_sub(published_at));
+    format!("Prices: {} · file made {age} ago", price_text(rule))
 }
 
 /// The character filter: a dropdown with a tick per stock character.
@@ -510,7 +513,7 @@ fn filter(ui: &mut Ui, cx: &mut Shared, stock: &[CharacterAssets], unticked: &BT
 }
 
 /// The ids of the characters the player left out, as saved. A saved value that does not read is an error.
-fn unticked(cx: &mut Shared) -> Result<BTreeSet<i64>, String> {
+pub(super) fn unticked(cx: &mut Shared) -> Result<BTreeSet<i64>, String> {
     let saved = cx
         .store
         .setting(FILTER_KEY)
@@ -529,7 +532,7 @@ fn unticked(cx: &mut Shared) -> Result<BTreeSet<i64>, String> {
 }
 
 /// The owner's name for a stock character, as the Item panel names it.
-fn owner_name(session: &Session, character: i64) -> String {
+pub(super) fn owner_name(session: &Session, character: i64) -> String {
     if let Ok(id) = u64::try_from(character)
         && matches!(session.source(id), Some(Source::Login))
         && let Some(login) = session.characters().iter().find(|saved| saved.id == id)
@@ -554,12 +557,12 @@ fn current(
     unticked: &BTreeSet<i64>,
     picked: &BTreeSet<i64>,
 ) -> Result<Arc<Built>, String> {
-    let today = (cx.clock)().div_euclid(DAY);
-    let key = cache_key(cx, stock, unticked, today)?;
+    let now = (cx.clock)();
+    let key = cache_key(cx, stock, unticked, now)?;
     if let Some(built) = state.built.as_ref().filter(|built| built.key == key) {
         return Ok(Arc::clone(built));
     }
-    let built = Arc::new(build_for(cx, stock, picked, key)?);
+    let built = Arc::new(build_for(cx, stock, picked, key, now)?);
     state.built = Some(Arc::clone(&built));
     Ok(built)
 }
@@ -568,13 +571,17 @@ fn cache_key(
     cx: &mut Shared,
     stock: &[CharacterAssets],
     unticked: &BTreeSet<i64>,
-    today: i64,
+    now: i64,
 ) -> Result<Key, String> {
-    let basis = cx
+    let rule = cx
         .store
-        .net_worth_settings()
-        .map_err(|error| format!("Could not read the price basis: {error}"))?
-        .basis;
+        .value_price()
+        .map_err(|error| format!("Could not read the value price: {error}"))?;
+    let rules = cx
+        .store
+        .price_rules_at(now)
+        .map_err(|error| format!("Could not read the price rules: {error}"))?;
+    let published_at = cx.market.held().published_at;
     let typed = cx
         .store
         .structure_names()
@@ -608,18 +615,20 @@ fn cache_key(
         characters,
         jeve_hash,
         unticked: unticked.clone(),
-        basis,
+        rule,
+        rules,
         typed,
-        today,
+        published_at,
     })
 }
 
-/// Reads the game data and the saved prices, and builds the tree of the picked characters' assets.
+/// Reads the game data and the held market file, and builds the tree of the picked characters' assets.
 fn build_for(
     cx: &mut Shared,
     stock: &[CharacterAssets],
     picked: &BTreeSet<i64>,
     key: Key,
+    now: i64,
 ) -> Result<Built, String> {
     let Some(sde) = cx.sde.as_ref() else {
         return Err("The game data is not in yet.".to_owned());
@@ -645,13 +654,13 @@ fn build_for(
         .filter(|(_, _, valued)| *valued)
         .map(|(type_id, _, _)| *type_id)
         .collect();
-    let prices = Prices::load(&mut cx.store, &valued, key.today)
-        .map_err(|error| format!("Could not read the saved prices: {error}"))?;
-    let newest_day = prices.newest_day(valued.iter().copied());
+    let held = cx.market.held();
+    let worth = Worth::load(&cx.store, &held, sde, &valued, now)?;
+    let published_at = worth.published_at();
     let types: HashMap<TypeId, TypeFacts> = named
         .into_iter()
         .map(|(type_id, name, valued)| {
-            let price = if valued { prices.price(type_id) } else { None };
+            let price = if valued { worth.price(type_id) } else { None };
             (
                 type_id,
                 TypeFacts {
@@ -678,16 +687,20 @@ fn build_for(
         cx.notices
             .push(Notice::error(TreeError::ValueTooLarge.to_string()));
     }
-    Ok(Built::new(key, tree, newest_day))
+    Ok(Built::new(key, tree, published_at))
 }
 
-fn game_data_error(error: &SdeError) -> String {
+pub(super) fn game_data_error(error: &SdeError) -> String {
     format!("Could not read the game data: {error}")
 }
 
 /// Where a place is: its system and region, from the game data for a station or a system, and from
 /// the structure's entry for a structure. `None` when the game data does not know its system.
-fn geo_of(sde: &Sde, session: &Session, place: LocationId) -> Result<Option<Geo>, SdeError> {
+pub(super) fn geo_of(
+    sde: &Sde,
+    session: &Session,
+    place: LocationId,
+) -> Result<Option<Geo>, SdeError> {
     let system = if (FIRST_SYSTEM..=LAST_SYSTEM).contains(&place) {
         u32::try_from(place).ok()
     } else if (FIRST_STATION..=LAST_STATION).contains(&place) {

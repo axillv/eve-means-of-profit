@@ -8,6 +8,8 @@ use crate::{dock, item_panel};
 
 mod name_dialog;
 mod tree;
+// The tree now prices from the held file; M1-164 deletes the old saved-day pricing here.
+#[expect(dead_code, reason = "M1-164 deletes the old saved-day prices")]
 mod value;
 pub mod worth;
 
