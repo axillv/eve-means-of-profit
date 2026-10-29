@@ -6,6 +6,8 @@ use egui::Ui;
 use crate::Shared;
 use crate::dock;
 
+pub mod record;
+
 #[derive(Debug, Default)]
 pub struct NetWorthPage;
 

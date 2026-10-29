@@ -9,6 +9,7 @@ mod item_panel;
 mod jobs;
 mod layout_model;
 mod names;
+mod net_worth;
 mod offline;
 mod orders;
 mod pages;

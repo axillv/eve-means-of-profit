@@ -27,6 +27,7 @@ pub mod theme;
 pub mod today;
 pub mod worker;
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
 use std::ops::ControlFlow;
@@ -216,6 +217,8 @@ pub struct App {
     assets_dock: DockState<AssetsPanel>,
     net_worth_page: NetWorthPage,
     net_worth_dock: DockState<NetWorthPanel>,
+    net_worth_seen: BTreeMap<u64, u64>,
+    net_worth_started: bool,
     orders_page: OrdersPage,
     orders_dock: DockState<OrdersPanel>,
     jobs_page: JobsPage,
@@ -318,6 +321,8 @@ impl App {
             assets_dock: dock::assets_layout(),
             net_worth_page: NetWorthPage,
             net_worth_dock: dock::net_worth_layout(),
+            net_worth_seen: BTreeMap::new(),
+            net_worth_started: false,
             orders_page: OrdersPage,
             orders_dock: dock::orders_layout(),
             jobs_page: JobsPage,
@@ -355,6 +360,11 @@ impl App {
         self.drain_events();
         history::background_refresh(&mut self.shared, &mut self.history_checked);
         self.refresh_industry_when_due();
+        net_worth::record::tick(
+            &mut self.shared,
+            &mut self.net_worth_seen,
+            &mut self.net_worth_started,
+        );
         for error in self.recorder.take_errors() {
             self.shared.notices.push(Notice::error(error));
         }
