@@ -1,12 +1,18 @@
-//! Settings the user chose: the default price rule, the market density and the last game-data check.
-//! They are named values in the user database, with an open list of other named values beside them.
+//! Settings the user chose: the default price rule, the market density and the last game-data
+//! check, plus the dated price rules by item, group or category. The settings are named values in
+//! the user database, with an open list of other named values beside them.
 
+use std::collections::BTreeMap;
+
+use mop_core::industry::TypeId;
+use mop_core::money::Money;
 use mop_market::book::PriceRule;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{Result, StoreError};
 use crate::migrate::Store;
 use crate::plans;
+use crate::{bad_code, from_stored};
 
 /// How many market orders the user expects to see per item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +68,127 @@ pub struct Settings {
     pub rail_icons_only: bool,
     /// Unix time of the last game-data check; `None` until one has run.
     pub last_sde_check: Option<i64>,
+}
+
+/// What a price rule is about: one item, every item in a group, or every group in a category.
+///
+/// Ordered items first, then groups, then categories, each by id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RuleTarget {
+    Item(TypeId),
+    Group(u32),
+    Category(u32),
+}
+
+impl RuleTarget {
+    /// The target kind and id the database stores it under.
+    fn stored(self) -> (i64, i64) {
+        match self {
+            RuleTarget::Item(id) => (0, i64::from(id)),
+            RuleTarget::Group(id) => (1, i64::from(id)),
+            RuleTarget::Category(id) => (2, i64::from(id)),
+        }
+    }
+}
+
+/// What a price rule says: a market statistic, or a fixed price in ISK.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleValue {
+    Market(PriceRule),
+    Fixed(Money),
+}
+
+/// One change of a price rule: the rule it is about, what it became (`None` means the rule was
+/// removed) and the Unix time the change was made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PriceRuleChange {
+    pub target: RuleTarget,
+    pub value: Option<RuleValue>,
+    pub at: i64,
+}
+
+const TABLE: &str = "price_rule_changes";
+
+/// Every change, in time order and then by target.
+const READ_ALL_SQL: &str = "SELECT target_kind, target_id, at, kind, market_rule, fixed \
+     FROM price_rule_changes ORDER BY at, target_kind, target_id";
+
+/// Every change up to a time, by target and then time, so that reading the rows in order leaves
+/// each target at its latest change.
+const READ_AT_SQL: &str = "SELECT target_kind, target_id, at, kind, market_rule, fixed \
+     FROM price_rule_changes WHERE at <= ?1 ORDER BY target_kind, target_id, at";
+
+/// The target a stored (kind, id) pair names; a kind that names no target is bad data.
+fn target_from_stored(kind: i64, id: i64) -> Result<RuleTarget> {
+    let id: u32 = from_stored(id, TABLE, kind, "target_id")?;
+    match kind {
+        0 => Ok(RuleTarget::Item(id)),
+        1 => Ok(RuleTarget::Group(id)),
+        2 => Ok(RuleTarget::Category(id)),
+        _ => Err(bad_code(TABLE, kind, "target_kind", kind)),
+    }
+}
+
+/// A change whose `kind` names a value the matching column does not hold.
+fn empty_value_column(at: i64, column: &str) -> StoreError {
+    StoreError::BadData(format!(
+        "{TABLE} change at {at}: kind names a value but column {column} is empty"
+    ))
+}
+
+/// The value a stored (kind, market_rule, fixed) triple names; a `None` kind is a removal.
+fn value_from_stored(
+    kind: Option<i64>,
+    market_rule: Option<i64>,
+    fixed: Option<i64>,
+    at: i64,
+) -> Result<Option<RuleValue>> {
+    let Some(kind) = kind else {
+        return Ok(None);
+    };
+    match kind {
+        0 => {
+            let code = market_rule.ok_or_else(|| empty_value_column(at, "market_rule"))?;
+            let rule = plans::price_rule_from_code(code)
+                .ok_or_else(|| bad_code(TABLE, at, "market_rule", code))?;
+            Ok(Some(RuleValue::Market(rule)))
+        }
+        1 => {
+            let fixed = fixed.ok_or_else(|| empty_value_column(at, "fixed"))?;
+            Ok(Some(RuleValue::Fixed(Money::from_ten_thousandths(fixed))))
+        }
+        _ => Err(bad_code(TABLE, at, "kind", kind)),
+    }
+}
+
+/// The changes one of the `READ_*_SQL` queries returns, in the order the query lists them.
+fn read_changes(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> Result<Vec<PriceRuleChange>> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params, |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+            row.get::<_, Option<i64>>(4)?,
+            row.get::<_, Option<i64>>(5)?,
+        ))
+    })?;
+    let mut changes = Vec::new();
+    for (kind, id, at, value_kind, market_rule, fixed) in
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    {
+        changes.push(PriceRuleChange {
+            target: target_from_stored(kind, id)?,
+            value: value_from_stored(value_kind, market_rule, fixed, at)?,
+            at,
+        });
+    }
+    Ok(changes)
 }
 
 const KEY_PRICE_RULE: &str = "default_price_rule";
@@ -248,6 +375,57 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+
+    /// Records what the price rule for `target` became at the Unix time `at`. A change for the
+    /// same target at the same `at` replaces the earlier one; other changes are never deleted, so
+    /// a net worth point can use the rules that stood on its day. A `None` value removes the rule
+    /// from that time on. A negative fixed price fails the table's check and nothing is written.
+    pub fn set_price_rule(
+        &mut self,
+        target: RuleTarget,
+        value: Option<RuleValue>,
+        at: i64,
+    ) -> Result<()> {
+        let (kind, market_rule, fixed) = match value {
+            None => (None, None, None),
+            Some(RuleValue::Market(rule)) => (Some(0), Some(plans::price_rule_code(rule)), None),
+            Some(RuleValue::Fixed(price)) => (Some(1), None, Some(price.ten_thousandths())),
+        };
+        let (target_kind, target_id) = target.stored();
+        self.conn.execute(
+            "INSERT INTO price_rule_changes \
+                (target_kind, target_id, at, kind, market_rule, fixed) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT (target_kind, target_id, at) DO UPDATE SET \
+                kind = excluded.kind, \
+                market_rule = excluded.market_rule, \
+                fixed = excluded.fixed",
+            params![target_kind, target_id, at, kind, market_rule, fixed],
+        )?;
+        Ok(())
+    }
+
+    /// The rules in force at the Unix time `at`: for each target, its latest change at or before
+    /// `at`, leaving out targets whose latest such change was a removal.
+    pub fn price_rules_at(&self, at: i64) -> Result<BTreeMap<RuleTarget, RuleValue>> {
+        let mut rules = BTreeMap::new();
+        for change in read_changes(&self.conn, READ_AT_SQL, params![at])? {
+            match change.value {
+                Some(value) => {
+                    rules.insert(change.target, value);
+                }
+                None => {
+                    rules.remove(&change.target);
+                }
+            }
+        }
+        Ok(rules)
+    }
+
+    /// Every change, in time order and then by target.
+    pub fn price_rule_changes(&self) -> Result<Vec<PriceRuleChange>> {
+        read_changes(&self.conn, READ_ALL_SQL, [])
+    }
 }
 
 #[cfg(test)]
@@ -275,5 +453,212 @@ mod tests {
                 ("invention.skill.2".to_string(), "3".to_string()),
             ]
         );
+    }
+
+    fn open_temp() -> (tempfile::TempDir, std::path::PathBuf, Store) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eve.db");
+        let store = Store::open(&path, 1_000).expect("open").store;
+        (dir, path, store)
+    }
+
+    /// A whole ISK amount, as the database counts it.
+    fn isk(amount: i64) -> Money {
+        Money::from_ten_thousandths(amount * 10_000)
+    }
+
+    #[test]
+    fn targets_order_items_then_groups_then_categories_by_id() {
+        let mut targets = [
+            RuleTarget::Category(1),
+            RuleTarget::Group(10),
+            RuleTarget::Item(9),
+            RuleTarget::Category(4),
+            RuleTarget::Group(2),
+            RuleTarget::Item(1),
+        ];
+        targets.sort();
+        assert_eq!(
+            targets,
+            [
+                RuleTarget::Item(1),
+                RuleTarget::Item(9),
+                RuleTarget::Group(2),
+                RuleTarget::Group(10),
+                RuleTarget::Category(1),
+                RuleTarget::Category(4),
+            ]
+        );
+    }
+
+    #[test]
+    fn fixed_item_rule_follows_its_change_times() {
+        let (_dir, _path, mut store) = open_temp();
+        let plate = RuleTarget::Item(11_551);
+        store
+            .set_price_rule(
+                plate,
+                Some(RuleValue::Fixed(isk(29_000_000))),
+                1_000_000_000,
+            )
+            .expect("first");
+        store
+            .set_price_rule(
+                plate,
+                Some(RuleValue::Fixed(isk(31_000_000))),
+                1_001_728_000,
+            )
+            .expect("second");
+        assert!(
+            store
+                .price_rules_at(999_999_999)
+                .expect("before")
+                .is_empty()
+        );
+        assert_eq!(
+            store.price_rules_at(1_000_864_000).expect("between"),
+            BTreeMap::from([(plate, RuleValue::Fixed(isk(29_000_000)))])
+        );
+        assert_eq!(
+            store.price_rules_at(1_001_728_000).expect("after"),
+            BTreeMap::from([(plate, RuleValue::Fixed(isk(31_000_000)))])
+        );
+        assert_eq!(store.price_rule_changes().expect("changes").len(), 2);
+    }
+
+    #[test]
+    fn category_rule_is_removed_later_and_every_change_survives_reopen() {
+        let (_dir, path, mut store) = open_temp();
+        let plate = RuleTarget::Item(11_551);
+        let material = RuleTarget::Category(4);
+        store
+            .set_price_rule(
+                plate,
+                Some(RuleValue::Fixed(isk(29_000_000))),
+                1_000_000_000,
+            )
+            .expect("item");
+        store
+            .set_price_rule(
+                material,
+                Some(RuleValue::Market(PriceRule::BuyFivePercent)),
+                1_000_000_000,
+            )
+            .expect("category");
+        store
+            .set_price_rule(material, None, 1_000_086_400)
+            .expect("removal");
+        store
+            .set_price_rule(
+                plate,
+                Some(RuleValue::Fixed(isk(31_000_000))),
+                1_001_728_000,
+            )
+            .expect("item update");
+        assert_eq!(
+            store.price_rules_at(1_000_000_000).expect("at"),
+            BTreeMap::from([
+                (plate, RuleValue::Fixed(isk(29_000_000))),
+                (material, RuleValue::Market(PriceRule::BuyFivePercent)),
+            ])
+        );
+        assert_eq!(
+            store.price_rules_at(1_000_086_400).expect("after removal"),
+            BTreeMap::from([(plate, RuleValue::Fixed(isk(29_000_000)))])
+        );
+        let expected = vec![
+            PriceRuleChange {
+                target: plate,
+                value: Some(RuleValue::Fixed(isk(29_000_000))),
+                at: 1_000_000_000,
+            },
+            PriceRuleChange {
+                target: material,
+                value: Some(RuleValue::Market(PriceRule::BuyFivePercent)),
+                at: 1_000_000_000,
+            },
+            PriceRuleChange {
+                target: material,
+                value: None,
+                at: 1_000_086_400,
+            },
+            PriceRuleChange {
+                target: plate,
+                value: Some(RuleValue::Fixed(isk(31_000_000))),
+                at: 1_001_728_000,
+            },
+        ];
+        assert_eq!(store.price_rule_changes().expect("changes"), expected);
+        drop(store);
+        let reopened = Store::open(&path, 2_000).expect("reopen").store;
+        assert_eq!(reopened.price_rule_changes().expect("changes"), expected);
+    }
+
+    #[test]
+    fn a_change_at_the_same_time_is_replaced_and_walk_sell_is_kept() {
+        let (_dir, _path, mut store) = open_temp();
+        let minerals = RuleTarget::Group(1_002);
+        store
+            .set_price_rule(minerals, Some(RuleValue::Fixed(isk(1))), 1_000_000_000)
+            .expect("fixed");
+        store
+            .set_price_rule(
+                minerals,
+                Some(RuleValue::Market(PriceRule::SellMedian)),
+                1_000_000_000,
+            )
+            .expect("market");
+        let changes = store.price_rule_changes().expect("changes");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes[0].value,
+            Some(RuleValue::Market(PriceRule::SellMedian))
+        );
+        assert_eq!(
+            store.price_rules_at(1_000_000_000).expect("at"),
+            BTreeMap::from([(minerals, RuleValue::Market(PriceRule::SellMedian))])
+        );
+        store
+            .set_price_rule(
+                minerals,
+                Some(RuleValue::Market(PriceRule::WalkSell)),
+                1_000_086_400,
+            )
+            .expect("walk sell");
+        assert_eq!(
+            store.price_rules_at(1_000_086_400).expect("walk sell"),
+            BTreeMap::from([(minerals, RuleValue::Market(PriceRule::WalkSell))])
+        );
+    }
+
+    #[test]
+    fn a_negative_fixed_price_is_refused_and_keeps_no_change() {
+        let (_dir, _path, mut store) = open_temp();
+        let plate = RuleTarget::Item(11_551);
+        store
+            .set_price_rule(
+                plate,
+                Some(RuleValue::Fixed(isk(29_000_000))),
+                1_000_000_000,
+            )
+            .expect("kept");
+        let before = store.price_rule_changes().expect("changes");
+        assert!(matches!(
+            store.set_price_rule(
+                plate,
+                Some(RuleValue::Fixed(Money::from_ten_thousandths(-1))),
+                1_000_086_400,
+            ),
+            Err(StoreError::Sqlite(_))
+        ));
+        assert_eq!(store.price_rule_changes().expect("changes"), before);
+        store
+            .set_price_rule(
+                plate,
+                Some(RuleValue::Market(PriceRule::HighestBuy)),
+                1_000_086_400,
+            )
+            .expect("good change at the same time");
+        assert_eq!(store.price_rule_changes().expect("changes").len(), 2);
     }
 }

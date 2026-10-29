@@ -297,6 +297,15 @@ CREATE TABLE plex_counts (
     count INTEGER NOT NULL CHECK (count >= 0),
     PRIMARY KEY (account_id, at)
 ) WITHOUT ROWID;
+CREATE TABLE price_rule_changes (
+    target_kind INTEGER NOT NULL CHECK (target_kind BETWEEN 0 AND 2),
+    target_id INTEGER NOT NULL CHECK (target_id >= 0),
+    at INTEGER NOT NULL,
+    kind INTEGER CHECK (kind IN (0, 1)),
+    market_rule INTEGER,
+    fixed INTEGER CHECK (fixed >= 0),
+    PRIMARY KEY (target_kind, target_id, at)
+) WITHOUT ROWID;
 ";
 
 /// An open database. Every method on it runs in one transaction.
