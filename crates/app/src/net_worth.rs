@@ -6,6 +6,7 @@ use egui::Ui;
 use crate::Shared;
 use crate::dock;
 
+pub mod data;
 pub mod record;
 
 #[derive(Debug, Default)]
