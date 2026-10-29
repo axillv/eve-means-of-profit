@@ -9,6 +9,8 @@ pub struct Selection {
     pub item: Option<TypeId>,
     pub place: Option<LocationId>,
     pub character: Option<u64>,
+    /// The stockpile picked on the Stockpiles page.
+    pub stockpile: Option<i64>,
     /// Whether the Item window's pin keeps it open against Escape and the close button.
     pub item_pinned: bool,
 }

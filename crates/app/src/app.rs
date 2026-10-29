@@ -23,6 +23,7 @@ pub mod session;
 pub mod settings_window;
 pub mod setup;
 pub mod status;
+pub mod stockpiles;
 pub mod table;
 pub mod theme;
 pub mod today;
@@ -62,6 +63,7 @@ use selection::Selection;
 use session::{EveAccess, Loaded, Session};
 use setup::{SetupPage, SetupPanel};
 use status::{Action, Notice};
+use stockpiles::{StockpilesPage, StockpilesPanel};
 use theme::Style;
 use worker::{Job, Worker, lock};
 
@@ -211,7 +213,7 @@ fn save_panels(cx: &mut Shared, page: &str, text: Option<String>) {
     }
 }
 
-/// The seven page docks, each shaped by its saved panel list.
+/// The eight page docks, each shaped by its saved panel list.
 struct Docks {
     build: DockState<BuildPanel>,
     assets: DockState<AssetsPanel>,
@@ -219,6 +221,7 @@ struct Docks {
     orders: DockState<OrdersPanel>,
     jobs: DockState<JobsPanel>,
     characters: DockState<CharactersPanel>,
+    stockpiles: DockState<StockpilesPanel>,
     setup: DockState<SetupPanel>,
 }
 
@@ -267,6 +270,13 @@ fn saved_docks(store: &Store) -> Result<Docks, mop_store::StoreError> {
             &dock::CHARACTERS_PANELS,
             CharactersPanel::title,
         )?,
+        stockpiles: dock::with_saved(
+            store,
+            "stockpiles",
+            dock::stockpiles_layout(),
+            &dock::STOCKPILES_PANELS,
+            StockpilesPanel::title,
+        )?,
         setup: dock::with_saved(
             store,
             "setup",
@@ -310,6 +320,8 @@ pub struct App {
     jobs_dock: DockState<JobsPanel>,
     characters_page: CharactersPage,
     characters_dock: DockState<CharactersPanel>,
+    stockpiles_page: StockpilesPage,
+    stockpiles_dock: DockState<StockpilesPanel>,
     setup_page: SetupPage,
     setup_dock: DockState<SetupPanel>,
     /// The saved interface size, shown as the zoom factor.
@@ -417,6 +429,8 @@ impl App {
             jobs_dock: docks.jobs,
             characters_page: CharactersPage,
             characters_dock: docks.characters,
+            stockpiles_page: StockpilesPage::default(),
+            stockpiles_dock: docks.stockpiles,
             setup_page: SetupPage,
             setup_dock: docks.setup,
             interface_size: settings.interface_size,
@@ -603,6 +617,7 @@ impl App {
                 );
                 save_panels(&mut self.shared, "characters", text);
             }
+            Page::Stockpiles => self.show_stockpiles(ui, &style),
             Page::Setup => {
                 let text = dock::show_page(
                     ui,
@@ -617,9 +632,25 @@ impl App {
             }
         });
         // The inspector floats over the page, so it is drawn after the panels that fill it.
-        if matches!(self.page, Page::Build | Page::Assets) {
+        if matches!(self.page, Page::Build | Page::Assets | Page::Stockpiles) {
             item_panel::inspector(ui, &mut self.shared);
         }
+    }
+
+    fn show_stockpiles(&mut self, ui: &mut Ui, style: &Style) {
+        let text = dock::show_page(
+            ui,
+            style,
+            "stockpiles",
+            &dock::STOCKPILES_PANELS,
+            &mut self.stockpiles_dock,
+            StockpilesPanel::title,
+            |ui, panel| {
+                self.stockpiles_page.show(panel, ui, &mut self.shared);
+            },
+        );
+        save_panels(&mut self.shared, "stockpiles", text);
+        self.stockpiles_page.show_windows(ui, &mut self.shared);
     }
 
     fn first_run_screen(&mut self, ui: &mut Ui) {

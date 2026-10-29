@@ -16,6 +16,7 @@ const GROUP_SPACE: f32 = 8.0;
 pub enum Page {
     Today,
     Build,
+    Stockpiles,
     Assets,
     NetWorth,
     Orders,
@@ -25,9 +26,10 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 8] = [
+    pub const ALL: [Page; 9] = [
         Page::Today,
         Page::Build,
+        Page::Stockpiles,
         Page::Jobs,
         Page::Orders,
         Page::Assets,
@@ -40,6 +42,7 @@ impl Page {
         match self {
             Self::Today => "Today",
             Self::Build => "Build",
+            Self::Stockpiles => "Stockpiles",
             Self::Assets => "Assets",
             Self::NetWorth => "Net worth",
             Self::Orders => "Orders",
@@ -54,6 +57,7 @@ impl Page {
         match self {
             Self::Today => regular::SUN,
             Self::Build => regular::HAMMER,
+            Self::Stockpiles => regular::STACK,
             Self::Assets => regular::PACKAGE,
             Self::NetWorth => regular::CHART_LINE_UP,
             Self::Orders => regular::STOREFRONT,

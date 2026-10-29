@@ -16,6 +16,7 @@ use crate::jobs::JobsPanel;
 use crate::net_worth::NetWorthPanel;
 use crate::orders::OrdersPanel;
 use crate::setup::SetupPanel;
+use crate::stockpiles::StockpilesPanel;
 use crate::table::{copy_request, has_table};
 use crate::theme::Style;
 
@@ -40,6 +41,10 @@ pub const NET_WORTH_PANELS: [NetWorthPanel; 3] = [
 /// The Characters panels the Panels menu lists.
 pub const CHARACTERS_PANELS: [CharactersPanel; 2] =
     [CharactersPanel::Characters, CharactersPanel::JeveData];
+
+/// The Stockpiles panels the Panels menu lists. Item is the inspector and is never listed.
+pub const STOCKPILES_PANELS: [StockpilesPanel; 2] =
+    [StockpilesPanel::Stockpiles, StockpilesPanel::Contents];
 
 /// The Settings panels the Panels menu lists.
 pub const SETUP_PANELS: [SetupPanel; 8] = [
@@ -97,6 +102,14 @@ pub fn characters_layout() -> DockState<CharactersPanel> {
     let mut dock = DockState::new(vec![CharactersPanel::Characters]);
     dock.main_surface_mut()
         .split_below(NodeIndex::root(), 0.5, vec![CharactersPanel::JeveData]);
+    dock
+}
+
+/// The Stockpiles page: Stockpiles at 25%, Contents at 75%.
+pub fn stockpiles_layout() -> DockState<StockpilesPanel> {
+    let mut dock = DockState::new(vec![StockpilesPanel::Stockpiles]);
+    dock.main_surface_mut()
+        .split_right(NodeIndex::root(), 0.25, vec![StockpilesPanel::Contents]);
     dock
 }
 

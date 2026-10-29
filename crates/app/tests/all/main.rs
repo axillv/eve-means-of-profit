@@ -23,6 +23,7 @@ mod setup_read;
 mod setup_rules;
 mod setup_structures;
 mod shell;
+mod stockpiles;
 mod table;
 mod ui;
 

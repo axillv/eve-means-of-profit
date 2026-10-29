@@ -616,9 +616,10 @@ mod tests {
         let env = env();
         let mut harness = start(&env, FakeEve::new(Vec::new(), None), NOW);
         loaded(&mut harness);
-        let pages: [(&str, &[&str]); 8] = [
+        let pages: [(&str, &[&str]); 9] = [
             ("Today", &["Today"]),
             ("Build", &["Plans", "Plan", "Steps", "Buy list"]),
+            ("Stockpiles", &["Stockpiles", "Contents"]),
             ("Industry jobs", &["Industry jobs"]),
             ("Orders", &["Orders"]),
             ("Assets", &["Places", "Assets"]),
@@ -641,6 +642,7 @@ mod tests {
                     "Orders",
                     "Industry jobs",
                     "Characters",
+                    "Stockpiles",
                 ]
                 .contains(panel);
                 assert_eq!(
@@ -704,6 +706,7 @@ mod tests {
         let labels = [
             "Today",
             "Build",
+            "Stockpiles",
             "Industry jobs",
             "Orders",
             "Assets",
@@ -740,7 +743,7 @@ mod tests {
 
         let gap = |above: Rect, below: Rect| below.top() - above.bottom();
         let ordinary = gap(
-            rail_entry(&harness, "Build"),
+            rail_entry(&harness, "Stockpiles"),
             rail_entry(&harness, "Industry jobs"),
         );
         for (above, below) in [("Orders", "Assets"), ("Net worth", "Characters")] {
@@ -789,6 +792,7 @@ mod tests {
         let expected = [
             "Today",
             "Build",
+            "Stockpiles",
             "Industry jobs",
             "Orders",
             "Assets",
