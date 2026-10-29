@@ -10,7 +10,6 @@ use mop_store::{NetWorthSettings, StoreError};
 
 use crate::Shared;
 use crate::build::inputs::{PRICE_RULES, price_text};
-use crate::dock;
 use crate::status::Notice;
 
 pub mod chart;
@@ -18,6 +17,7 @@ pub mod data;
 pub mod plot;
 pub mod record;
 pub mod summary;
+pub mod tables;
 pub mod today;
 pub mod view;
 
@@ -159,13 +159,19 @@ pub fn show(page: &mut NetWorthPage, panel: NetWorthPanel, ui: &mut Ui, cx: &mut
     }
     page.view
         .update(cx, &page.choices, ui.ctx().cumulative_frame_nr());
-    if panel != NetWorthPanel::NetWorth {
-        dock::placeholder(ui, cx);
-        return;
+    match panel {
+        NetWorthPanel::NetWorth => {
+            controls(page, ui, cx);
+            view::show_headline(ui, cx, &page.view, &page.choices);
+            plot::show(ui, cx, &page.view, &page.choices);
+        }
+        NetWorthPanel::ByCharacter => {
+            tables::show_by_character(ui, cx, &page.view, &page.choices);
+        }
+        NetWorthPanel::RightNow => {
+            tables::show_right_now(ui, cx, &page.view, &page.choices);
+        }
     }
-    controls(page, ui, cx);
-    view::show_headline(ui, cx, &page.view, &page.choices);
-    plot::show(ui, cx, &page.view, &page.choices);
 }
 
 /// Reads the saved choices; any failed read leaves the defaults.
