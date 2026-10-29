@@ -1,3 +1,4 @@
+mod assets_table;
 mod assets_tree;
 mod build;
 mod build_stock;

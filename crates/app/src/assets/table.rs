@@ -7,19 +7,21 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use egui::text::LayoutJob;
-use egui::{Align, Id, Label, Rect, TextFormat, TextStyle, Ui, UiBuilder, pos2};
+use egui::{Align, Id, Label, Rect, RichText, TextFormat, TextStyle, Ui, UiBuilder, pos2};
 use mop_core::format::group_thousands;
 use mop_core::industry::TypeId;
 use mop_core::money::Money;
 use mop_core::stock::{Asset, CharacterAssets, ItemId, LocationId, ResolvedAsset, resolve};
 use mop_core::volume::Volume;
 use mop_market::book::PriceRule;
+use mop_market::fuzzwork::Side;
 use mop_store::settings::{RuleTarget, RuleValue};
 
 use super::tree::{self, CATEGORY_BLUEPRINT, Geo};
 use super::value::stack_value;
 use super::worth::Worth;
 use crate::Shared;
+use crate::build::prices::age_text;
 use crate::dock;
 use crate::status::Notice;
 use crate::table::Table;
@@ -29,14 +31,136 @@ const NO_CHARACTER: &str = "No character picked.";
 const NO_GAME_DATA: &str = "The game data is not in yet.";
 const VALUE_TOO_LARGE: &str = "Could not value the assets: a value is too large.";
 const BLUEPRINT_HOVER: &str = "Blueprints are not valued.";
+const GROUP_KEY: &str = "assets.group";
+const COLUMNS_KEY: &str = "assets.columns";
 
-/// What the table needs of a type: its name, whether its stacks are valued, its price, and the
-/// volumes one unit takes up unpackaged and hauled.
+/// How the table groups its stacks.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Group {
+    #[default]
+    Nothing,
+    Place,
+    Character,
+    Item,
+}
+
+impl Group {
+    const ALL: [Group; 4] = [Group::Nothing, Group::Place, Group::Character, Group::Item];
+
+    /// How the setting stores the choice.
+    fn setting(self) -> &'static str {
+        match self {
+            Self::Nothing => "nothing",
+            Self::Place => "place",
+            Self::Character => "character",
+            Self::Item => "item",
+        }
+    }
+
+    /// The choice a saved setting names; any other text is `Nothing`.
+    fn from_setting(text: &str) -> Group {
+        match text {
+            "place" => Self::Place,
+            "character" => Self::Character,
+            "item" => Self::Item,
+            _ => Self::Nothing,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Nothing => "Nothing",
+            Self::Place => "Place",
+            Self::Character => "Character",
+            Self::Item => "Item",
+        }
+    }
+}
+
+/// One optional price column.
+#[derive(Debug, Clone, Copy)]
+struct PriceColumn {
+    id: &'static str,
+    label: &'static str,
+}
+
+/// The optional price columns, in the order the setting stores them.
+const PRICE_COLUMNS: [PriceColumn; 3] = [
+    PriceColumn {
+        id: "forge_sell",
+        label: "Forge sell",
+    },
+    PriceColumn {
+        id: "forge_buy",
+        label: "Forge buy",
+    },
+    PriceColumn {
+        id: "sell_average",
+        label: "Sell average",
+    },
+];
+
+/// The optional price columns this session shows.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct PriceColumns {
+    forge_sell: bool,
+    forge_buy: bool,
+    sell_average: bool,
+}
+
+impl PriceColumns {
+    /// The ticked columns a saved setting names; ids it does not know are left out.
+    fn from_text(text: &str) -> Self {
+        let mut columns = Self::default();
+        for id in text.split(',') {
+            columns.set(id, true);
+        }
+        columns
+    }
+
+    /// The setting's text: the ticked ids in [`PRICE_COLUMNS`] order, joined by commas.
+    fn text(self) -> String {
+        PRICE_COLUMNS
+            .iter()
+            .filter(|column| self.shown(column.id))
+            .map(|column| column.id)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn shown(self, id: &str) -> bool {
+        match id {
+            "forge_sell" => self.forge_sell,
+            "forge_buy" => self.forge_buy,
+            "sell_average" => self.sell_average,
+            _ => false,
+        }
+    }
+
+    fn set(&mut self, id: &str, shown: bool) {
+        match id {
+            "forge_sell" => self.forge_sell = shown,
+            "forge_buy" => self.forge_buy = shown,
+            "sell_average" => self.sell_average = shown,
+            _ => {}
+        }
+    }
+
+    fn any(self) -> bool {
+        self.forge_sell || self.forge_buy || self.sell_average
+    }
+}
+
+/// What the table needs of a type: its name, whether its stacks are valued, its price, the optional
+/// Forge prices, and the volumes one unit takes up unpackaged and hauled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TypeFacts {
     name: String,
     valued: bool,
     price: Option<Money>,
+    forge_sell: Option<Money>,
+    forge_buy: Option<Money>,
+    sell_average: Option<Money>,
     volume: Option<Volume>,
     haul_volume: Option<Volume>,
 }
@@ -54,13 +178,18 @@ struct Entry {
     item_id: ItemId,
     type_id: TypeId,
     name: String,
+    character_id: i64,
     character_name: String,
+    place_id: LocationId,
     place_name: String,
     /// The flag, or the container's type name and the flag when the stack sits inside another stack.
     inside: Option<String>,
     quantity: u64,
     volume: Option<Volume>,
     value: Option<Money>,
+    forge_sell: Option<Money>,
+    forge_buy: Option<Money>,
+    sell_average: Option<Money>,
     /// The type is a blueprint: its stacks are not valued and not counted as unpriced.
     valued: bool,
     /// The type has no price.
@@ -142,34 +271,198 @@ impl Totals {
     }
 }
 
-/// The built table: its entries in the order they show, the rows drawn from them, and their totals.
+/// The built table: its entries, the rows drawn from them, the group rows' details, and their
+/// totals.
 #[derive(Debug, Clone, PartialEq)]
 struct TableData {
     entries: Vec<Entry>,
     rows: Vec<Row>,
-    /// The entry position by row key.
+    /// The entry position by row key, for the stack rows only.
     index: HashMap<u64, usize>,
+    /// The value and unpriced types of each group row, by its key.
+    groups: HashMap<u64, GroupDetail>,
     totals: Totals,
 }
 
+/// What a group row adds up beyond its cells.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GroupDetail {
+    value: Option<Money>,
+    /// The names of the types in the group with no price, by type.
+    unpriced: BTreeMap<TypeId, String>,
+}
+
+impl GroupDetail {
+    /// The hover text of the amber ` +`, or `None` when no type in the group is unpriced.
+    fn marker_hover(&self) -> Option<String> {
+        let count = self.unpriced.len();
+        if count == 0 {
+            return None;
+        }
+        let noun = if count == 1 { "type" } else { "types" };
+        Some(format!("{count} item {noun} not priced"))
+    }
+
+    /// What the value cell shows before the amber marker.
+    fn value_text(&self) -> String {
+        self.value.map_or_else(|| "—".to_owned(), Money::format_isk)
+    }
+}
+
 impl TableData {
-    fn new(mut entries: Vec<Entry>) -> Self {
+    fn new(mut entries: Vec<Entry>, group: Group, prices: PriceColumns) -> Self {
         sort_entries(&mut entries);
         let mut totals = Totals::new();
         for entry in &entries {
             totals.add(entry);
         }
-        let rows: Vec<Row> = entries.iter().map(row).collect();
-        let index = entries
-            .iter()
-            .enumerate()
-            .map(|(position, entry)| (key(entry), position))
-            .collect();
+        let (rows, index, groups) = match group {
+            Group::Nothing => {
+                let rows = entries.iter().map(|entry| row(entry, 0, prices)).collect();
+                let index = entries
+                    .iter()
+                    .enumerate()
+                    .map(|(position, entry)| (key(entry), position))
+                    .collect();
+                (rows, index, HashMap::new())
+            }
+            Group::Place | Group::Character | Group::Item => grouped_rows(&entries, group, prices),
+        };
         Self {
             entries,
             rows,
             index,
+            groups,
             totals,
+        }
+    }
+}
+
+/// The rows of a grouped table: the groups by name ignoring case, each stack under its group in
+/// the order the entries already have.
+fn grouped_rows(
+    entries: &[Entry],
+    group: Group,
+    prices: PriceColumns,
+) -> (Vec<Row>, HashMap<u64, usize>, HashMap<u64, GroupDetail>) {
+    // The groups in the order they first appear, so the stacks keep the entries' order.
+    let mut order: Vec<(u64, String, Vec<usize>)> = Vec::new();
+    let mut at: HashMap<u64, usize> = HashMap::new();
+    for (position, entry) in entries.iter().enumerate() {
+        let (key, label) = group_of(group, entry);
+        match at.get(&key) {
+            Some(&index) => {
+                if let Some(group) = order.get_mut(index) {
+                    group.2.push(position);
+                }
+            }
+            None => {
+                at.insert(key, order.len());
+                order.push((key, label, vec![position]));
+            }
+        }
+    }
+    order.sort_by(|a, b| {
+        a.1.to_lowercase()
+            .cmp(&b.1.to_lowercase())
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    let mut rows = Vec::with_capacity(entries.len().saturating_add(order.len()));
+    let mut index = HashMap::new();
+    let mut groups = HashMap::new();
+    for (group_key, label, members) in order {
+        let mut sum = GroupSum::new();
+        for &position in &members {
+            if let Some(entry) = entries.get(position) {
+                sum.add(entry);
+            }
+        }
+        rows.push(group_row(group_key, &label, &sum, group, prices));
+        let detail = GroupDetail {
+            value: sum.value,
+            unpriced: sum.unpriced,
+        };
+        groups.insert(group_key, detail);
+        for position in members {
+            if let Some(entry) = entries.get(position) {
+                index.insert(key(entry), position);
+                rows.push(row(entry, 1, prices));
+            }
+        }
+    }
+    (rows, index, groups)
+}
+
+/// The key and label of the group an entry belongs to.
+fn group_of(group: Group, entry: &Entry) -> (u64, String) {
+    match group {
+        Group::Place => (group_key("place", entry.place_id), entry.place_name.clone()),
+        Group::Character => (
+            group_key("character", entry.character_id),
+            entry.character_name.clone(),
+        ),
+        Group::Item => (group_key("item", entry.type_id), entry.name.clone()),
+        Group::Nothing => (0, String::new()),
+    }
+}
+
+/// A group's row key: a hash of what the group is by, kept out of the item ids' range.
+fn group_key(id: &str, value: impl Hash) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    id.hash(&mut hasher);
+    value.hash(&mut hasher);
+    hasher.finish() | (1 << 63)
+}
+
+/// What a group adds up.
+#[derive(Debug, Clone)]
+struct GroupSum {
+    volume: Option<Volume>,
+    /// The price of the priced stacks; `None` until one is priced.
+    value: Option<Money>,
+    /// The units of the stacks, for the `Item` grouping.
+    units: Option<u64>,
+    /// A priced value did not fit in money.
+    overflowed: bool,
+    /// The names of the types with no price, by type.
+    unpriced: BTreeMap<TypeId, String>,
+}
+
+impl GroupSum {
+    fn new() -> Self {
+        Self {
+            volume: Some(Volume::default()),
+            value: None,
+            units: Some(0),
+            overflowed: false,
+            unpriced: BTreeMap::new(),
+        }
+    }
+
+    fn add(&mut self, entry: &Entry) {
+        self.volume = match (self.volume, entry.volume) {
+            (Some(sum), Some(volume)) => sum.checked_add(volume),
+            _ => None,
+        };
+        if entry.too_large {
+            self.overflowed = true;
+            self.value = None;
+        } else if !self.overflowed
+            && let Some(value) = entry.value
+        {
+            self.value = match self.value {
+                Some(sum) => sum.checked_add(value),
+                None => Some(value),
+            };
+            if self.value.is_none() {
+                self.overflowed = true;
+            }
+        }
+        self.units = self
+            .units
+            .and_then(|units| units.checked_add(entry.quantity));
+        if entry.unpriced {
+            self.unpriced.insert(entry.type_id, entry.name.clone());
         }
     }
 }
@@ -177,6 +470,25 @@ impl TableData {
 /// The row key of a stack: its item id.
 fn key(entry: &Entry) -> u64 {
     u64::try_from(entry.item_id).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+fn build(
+    assets: &[ResolvedAsset],
+    types: &HashMap<TypeId, TypeFacts>,
+    places: &HashMap<LocationId, PlaceFacts>,
+    names: &HashMap<i64, String>,
+    filter: Option<LocationId>,
+) -> TableData {
+    build_grouped(
+        assets,
+        types,
+        places,
+        names,
+        filter,
+        Group::Nothing,
+        PriceColumns::default(),
+    )
 }
 
 /// Sorts the stacks by value, biggest first and unpriced last, then by name ignoring case and by
@@ -190,32 +502,81 @@ fn sort_entries(entries: &mut [Entry]) {
     });
 }
 
+/// A quantity drawn grouped to thousands, and copied and sorted by its number.
+fn units_cell(quantity: u64) -> Cell {
+    let units = i64::try_from(quantity).map_or_else(|_| quantity.to_string(), group_thousands);
+    Cell::int(i128::from(quantity), units)
+}
+
+/// A volume value drawn to two decimals, and copied and sorted by its ten-thousandths.
+fn volume_cell(volume: Volume) -> Cell {
+    Cell::int(i128::from(volume.ten_thousandths()), volume.format_m3())
+}
+
 /// The cells of one stack.
-fn row(entry: &Entry) -> Row {
-    let units =
-        i64::try_from(entry.quantity).map_or_else(|_| entry.quantity.to_string(), group_thousands);
+fn row(entry: &Entry, depth: u32, prices: PriceColumns) -> Row {
+    let mut cells = vec![
+        Cell::text(entry.name.clone()),
+        Cell::text(entry.character_name.clone()),
+        Cell::text(entry.place_name.clone()),
+        entry
+            .inside
+            .as_ref()
+            .map_or_else(Cell::missing, |inside| Cell::text(inside.clone())),
+        units_cell(entry.quantity),
+        entry.volume.map_or_else(Cell::missing, volume_cell),
+        entry.value.map_or_else(Cell::missing, Cell::money),
+    ];
+    if prices.forge_sell {
+        cells.push(entry.forge_sell.map_or_else(Cell::missing, Cell::money));
+    }
+    if prices.forge_buy {
+        cells.push(entry.forge_buy.map_or_else(Cell::missing, Cell::money));
+    }
+    if prices.sell_average {
+        cells.push(entry.sell_average.map_or_else(Cell::missing, Cell::money));
+    }
     Row {
         key: key(entry),
-        depth: 0,
-        cells: vec![
-            Cell::text(entry.name.clone()),
-            Cell::text(entry.character_name.clone()),
-            Cell::text(entry.place_name.clone()),
-            entry
-                .inside
-                .as_ref()
-                .map_or_else(Cell::missing, |inside| Cell::text(inside.clone())),
-            Cell::int(i128::from(entry.quantity), units),
-            entry.volume.map_or_else(Cell::missing, |volume| {
-                Cell::int(i128::from(volume.ten_thousandths()), volume.format_m3())
-            }),
-            entry.value.map_or_else(Cell::missing, Cell::money),
-        ],
+        depth,
+        cells,
     }
 }
 
-fn columns() -> Vec<Column> {
-    vec![
+/// The cells of a group row: the name, the summed volume and value, and for `Item` the summed
+/// units.
+fn group_row(key: u64, label: &str, sum: &GroupSum, group: Group, prices: PriceColumns) -> Row {
+    let units = if group == Group::Item {
+        sum.units.map_or_else(Cell::missing, units_cell)
+    } else {
+        Cell::missing()
+    };
+    let mut cells = vec![
+        Cell::text(label.to_owned()),
+        Cell::text(""),
+        Cell::text(""),
+        Cell::text(""),
+        units,
+        sum.volume.map_or_else(Cell::missing, volume_cell),
+        sum.value.map_or_else(Cell::missing, Cell::money),
+    ];
+    if prices.any() {
+        cells.extend(
+            [prices.forge_sell, prices.forge_buy, prices.sell_average]
+                .into_iter()
+                .filter(|shown| *shown)
+                .map(|_| Cell::missing()),
+        );
+    }
+    Row {
+        key,
+        depth: 0,
+        cells,
+    }
+}
+
+fn columns(prices: PriceColumns) -> Vec<Column> {
+    let mut columns = vec![
         column("item", "Item", ColumnKind::Text, 190.0),
         column("character", "Character", ColumnKind::Text, 120.0),
         column("place", "Place", ColumnKind::Text, 280.0),
@@ -223,7 +584,13 @@ fn columns() -> Vec<Column> {
         column("units", "Units", ColumnKind::Number, 80.0),
         column("volume", "m³", ColumnKind::Number, 100.0),
         column("value", "Value", ColumnKind::Money, 130.0),
-    ]
+    ];
+    for price in PRICE_COLUMNS {
+        if prices.shown(price.id) {
+            columns.push(column(price.id, price.label, ColumnKind::Money, 130.0));
+        }
+    }
+    columns
 }
 
 fn column(id: &'static str, label: &str, kind: ColumnKind, width: f32) -> Column {
@@ -237,12 +604,14 @@ fn column(id: &'static str, label: &str, kind: ColumnKind, width: f32) -> Column
 
 /// Builds the table from the resolved assets, their type and place facts, and the owners' names.
 /// `filter` keeps the stacks in one place, region, system or container.
-fn build(
+fn build_grouped(
     assets: &[ResolvedAsset],
     types: &HashMap<TypeId, TypeFacts>,
     places: &HashMap<LocationId, PlaceFacts>,
     names: &HashMap<i64, String>,
     filter: Option<LocationId>,
+    group: Group,
+    prices: PriceColumns,
 ) -> TableData {
     let by_item = by_item(assets);
     let mut entries = Vec::new();
@@ -258,10 +627,12 @@ fn build(
             item_id: asset.asset.item_id,
             type_id: asset.asset.type_id,
             name: facts.name,
+            character_id: asset.character_id,
             character_name: names
                 .get(&asset.character_id)
                 .cloned()
                 .unwrap_or_else(|| asset.character_id.to_string()),
+            place_id: asset.place,
             place_name: places
                 .get(&asset.place)
                 .map_or_else(|| asset.place.to_string(), |facts| facts.label.clone()),
@@ -269,12 +640,15 @@ fn build(
             quantity: asset.asset.quantity,
             volume,
             value,
+            forge_sell: facts.forge_sell,
+            forge_buy: facts.forge_buy,
+            sell_average: facts.sell_average,
             valued: facts.valued,
             unpriced,
             too_large,
         });
     }
-    TableData::new(entries)
+    TableData::new(entries, group, prices)
 }
 
 /// The index of each asset by its item id.
@@ -342,6 +716,9 @@ fn type_facts(types: &HashMap<TypeId, TypeFacts>, type_id: TypeId) -> TypeFacts 
         name: type_id.to_string(),
         valued: true,
         price: None,
+        forge_sell: None,
+        forge_buy: None,
+        sell_average: None,
         volume: None,
         haul_volume: None,
     })
@@ -396,6 +773,15 @@ fn inside_of(
 #[derive(Debug, Default, Clone)]
 struct State {
     built: Option<Arc<Built>>,
+    choices: Option<Choices>,
+}
+
+/// The choices the player made, and the settings that did not read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Choices {
+    group: Group,
+    prices: PriceColumns,
+    errors: Vec<String>,
 }
 
 /// What the panel reads. The table is rebuilt only when one of these changes.
@@ -415,6 +801,8 @@ struct Key {
     published_at: Option<i64>,
     /// The place, region, system or container picked.
     place: Option<LocationId>,
+    group: Group,
+    prices: PriceColumns,
 }
 
 /// The built table and the key it was built from.
@@ -463,34 +851,149 @@ fn draw(state: &mut State, ui: &mut Ui, cx: &mut Shared) {
         .map(|character| character.character_id)
         .filter(|id| !unticked.contains(id))
         .collect();
+    let mut choices = match state.choices.clone() {
+        Some(choices) => choices,
+        None => {
+            let choices = read_choices(cx);
+            state.choices = Some(choices.clone());
+            choices
+        }
+    };
+    for error in &choices.errors {
+        ui.colored_label(cx.style.neg, error);
+    }
     if let Some(message) = blank(!picked.is_empty(), cx.sde.is_some()) {
         ui.colored_label(cx.style.mute, message);
         return;
     }
-    let built = match current(state, cx, &stock, &unticked, &picked) {
+    let now = (cx.clock)();
+    let built = match current(
+        state,
+        cx,
+        &stock,
+        &unticked,
+        &picked,
+        now,
+        choices.group,
+        choices.prices,
+    ) {
         Ok(built) => built,
         Err(message) => {
             ui.colored_label(cx.style.neg, message);
             return;
         }
     };
+    let updates: Vec<Option<i64>> = stock
+        .iter()
+        .filter(|character| picked.contains(&character.character_id))
+        .map(|character| character.updated)
+        .collect();
+    let oldest = oldest_text(&updates, now);
 
-    let response = panel(ui, cx, &built);
+    let response = panel(ui, cx, &built, &mut choices, &oldest);
     if let Some(key) = response.clicked
         && let Some(&position) = built.data.index.get(&key)
         && let Some(entry) = built.data.entries.get(position)
     {
         cx.selection.item = Some(entry.type_id);
     }
+    state.choices = Some(choices);
+}
+
+/// The saved group and price columns, read on the first frame.
+fn read_choices(cx: &mut Shared) -> Choices {
+    let mut errors = Vec::new();
+    let group = match cx.store.setting(GROUP_KEY) {
+        Ok(Some(text)) => Group::from_setting(&text),
+        Ok(None) => Group::Nothing,
+        Err(error) => {
+            errors.push(format!("Could not read the settings: {error}"));
+            Group::Nothing
+        }
+    };
+    let prices = match cx.store.setting(COLUMNS_KEY) {
+        Ok(Some(text)) => PriceColumns::from_text(&text),
+        Ok(None) => PriceColumns::default(),
+        Err(error) => {
+            errors.push(format!("Could not read the settings: {error}"));
+            PriceColumns::default()
+        }
+    };
+    Choices {
+        group,
+        prices,
+        errors,
+    }
+}
+
+/// Saves the grouping; a failure is an ERROR notice.
+fn save_group(cx: &mut Shared, group: Group) {
+    if let Err(error) = cx.store.set_setting(GROUP_KEY, group.setting()) {
+        cx.notices.push(Notice::error(format!(
+            "Could not save the settings: {error}"
+        )));
+    }
+}
+
+/// Saves the price columns, clearing the setting when none is ticked; a failure is an ERROR notice.
+fn save_columns(cx: &mut Shared, prices: PriceColumns) {
+    let text = prices.text();
+    let result = if text.is_empty() {
+        cx.store.clear_setting(COLUMNS_KEY)
+    } else {
+        cx.store.set_setting(COLUMNS_KEY, &text)
+    };
+    if let Err(error) = result {
+        cx.notices.push(Notice::error(format!(
+            "Could not save the settings: {error}"
+        )));
+    }
+}
+
+/// The `Group by` dropdown and the `Columns` menu above the table.
+fn toolbar(ui: &mut Ui, cx: &mut Shared, choices: &mut Choices) {
+    ui.horizontal(|ui| {
+        let group_before = choices.group;
+        egui::ComboBox::from_id_salt("assets group by")
+            .selected_text(format!("Group by: {}", choices.group.label()))
+            .show_ui(ui, |ui| {
+                for group in Group::ALL {
+                    ui.selectable_value(&mut choices.group, group, group.label());
+                }
+            });
+        if choices.group != group_before {
+            save_group(cx, choices.group);
+        }
+        let prices_before = choices.prices;
+        ui.menu_button("Columns", |ui| {
+            for price in PRICE_COLUMNS {
+                let mut shown = choices.prices.shown(price.id);
+                if ui.checkbox(&mut shown, price.label).changed() {
+                    choices.prices.set(price.id, shown);
+                }
+            }
+        });
+        if choices.prices != prices_before {
+            save_columns(cx, choices.prices);
+        }
+    });
 }
 
 /// The table and its footer, with the footer kept at the bottom of the panel.
-fn panel(ui: &mut Ui, cx: &Shared, built: &Built) -> crate::table::TableResponse {
+fn panel(
+    ui: &mut Ui,
+    cx: &mut Shared,
+    built: &Built,
+    choices: &mut Choices,
+    oldest: &str,
+) -> crate::table::TableResponse {
     // A small gap under the panel header, so the rows do not start tight against it.
     let row = row_height(cx.density);
     ui.add_space(row / 2.0);
+    toolbar(ui, cx, choices);
     let rect = ui.available_rect_before_wrap();
-    let footer_height = row.max(20.0);
+    // The footer is two lines: the totals, then the age of the oldest data.
+    let footer_height = row.max(20.0) * 2.0;
     let split = (rect.max.y - footer_height).max(rect.min.y);
     let table_rect = Rect::from_min_max(rect.min, pos2(rect.max.x, split));
     let footer_rect = Rect::from_min_max(pos2(rect.min.x, split), rect.max);
@@ -505,33 +1008,65 @@ fn panel(ui: &mut Ui, cx: &Shared, built: &Built) -> crate::table::TableResponse
     ui.scope_builder(
         UiBuilder::new()
             .max_rect(footer_rect)
-            .layout(egui::Layout::left_to_right(Align::Center)),
-        |ui| footer(ui, cx, &built.data.totals),
+            .layout(egui::Layout::top_down(Align::LEFT)),
+        |ui| {
+            footer(ui, cx, &built.data.totals);
+            ui.colored_label(cx.style.mute, oldest);
+        },
     );
     response
 }
 
 fn table(ui: &mut Ui, cx: &Shared, built: &Built) -> crate::table::TableResponse {
-    let columns = columns();
+    let columns = columns(built.key.prices);
     let data = &built.data;
     let mut draw = |ui: &mut Ui, key: u64, column: &'static str| -> bool {
         if column != "value" {
             return false;
         }
-        let Some(&position) = data.index.get(&key) else {
-            return false;
-        };
-        let Some(entry) = data.entries.get(position) else {
-            return false;
-        };
-        if entry.valued {
-            return false;
+        if let Some(&position) = data.index.get(&key) {
+            let Some(entry) = data.entries.get(position) else {
+                return false;
+            };
+            if entry.valued {
+                return false;
+            }
+            ui.label("—").on_hover_text(BLUEPRINT_HOVER);
+            return true;
         }
-        ui.label("—").on_hover_text(BLUEPRINT_HOVER);
+        let Some(group) = data.groups.get(&key) else {
+            return false;
+        };
+        let Some(hover) = group.marker_hover() else {
+            return false;
+        };
+        // The Value column lays out right to left, so the row is pinned left to right: the marker
+        // follows the number.
+        ui.with_layout(egui::Layout::left_to_right(Align::Center), |ui| {
+            ui.label(group.value_text());
+            let marker = RichText::new(" +").color(cx.style.stale);
+            ui.add(Label::new(marker).selectable(false))
+                .on_hover_text(hover);
+        });
         true
     };
     Table::new(Id::new(super::AssetsPanel::Assets.title()), &columns)
         .show_with(ui, &cx.style, cx.density, &data.rows, None, &mut draw)
+}
+
+/// The age of the oldest data among the picked characters, or `never` when one has no time.
+fn oldest_text(updates: &[Option<i64>], now: i64) -> String {
+    let mut oldest = None;
+    for update in updates {
+        let Some(update) = *update else {
+            return "Oldest data: never".to_owned();
+        };
+        oldest = Some(oldest.map_or(update, |oldest: i64| oldest.min(update)));
+    }
+    match oldest {
+        Some(oldest) => format!("Oldest data: {}", age_text(now.saturating_sub(oldest))),
+        None => "Oldest data: never".to_owned(),
+    }
 }
 
 /// The footer: the stack count, the volume and the value, then in amber the types with no price.
@@ -567,15 +1102,21 @@ fn footer(ui: &mut Ui, cx: &Shared, totals: &Totals) {
 }
 
 /// The built table for the picked characters, from the state when nothing it reads has changed.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the cache key is the inputs the table reads, one argument each"
+)]
 fn current(
     state: &mut State,
     cx: &mut Shared,
     stock: &[CharacterAssets],
     unticked: &BTreeSet<i64>,
     picked: &BTreeSet<i64>,
+    now: i64,
+    group: Group,
+    prices: PriceColumns,
 ) -> Result<Arc<Built>, String> {
-    let now = (cx.clock)();
-    let key = cache_key(cx, stock, unticked, now)?;
+    let key = cache_key(cx, stock, unticked, now, group, prices)?;
     if let Some(built) = state.built.as_ref().filter(|built| built.key == key) {
         return Ok(Arc::clone(built));
     }
@@ -589,6 +1130,8 @@ fn cache_key(
     stock: &[CharacterAssets],
     unticked: &BTreeSet<i64>,
     now: i64,
+    group: Group,
+    prices: PriceColumns,
 ) -> Result<Key, String> {
     let rule = cx
         .store
@@ -637,6 +1180,8 @@ fn cache_key(
         typed,
         published_at,
         place: cx.selection.place,
+        group,
+        prices,
     })
 }
 
@@ -671,6 +1216,9 @@ fn build_for(
                     name: item.name,
                     valued: item.category_id != CATEGORY_BLUEPRINT,
                     price: None,
+                    forge_sell: None,
+                    forge_buy: None,
+                    sell_average: None,
                     volume: item.volume,
                     haul_volume,
                 }
@@ -679,6 +1227,9 @@ fn build_for(
                 name: type_id.to_string(),
                 valued: true,
                 price: None,
+                forge_sell: None,
+                forge_buy: None,
+                sell_average: None,
                 volume: None,
                 haul_volume: None,
             },
@@ -695,11 +1246,20 @@ fn build_for(
     let types: HashMap<TypeId, TypeFacts> = named
         .into_iter()
         .map(|(type_id, mut facts)| {
-            facts.price = if facts.valued {
-                worth.price(type_id)
+            if facts.valued {
+                facts.price = worth.price(type_id);
+                facts.forge_sell = held.rows.get(&(type_id, Side::Sell)).map(|row| row.min);
+                facts.forge_buy = held.rows.get(&(type_id, Side::Buy)).map(|row| row.max);
+                facts.sell_average = held
+                    .rows
+                    .get(&(type_id, Side::Sell))
+                    .map(|row| row.weighted_average);
             } else {
-                None
-            };
+                facts.price = None;
+                facts.forge_sell = None;
+                facts.forge_buy = None;
+                facts.sell_average = None;
+            }
             (type_id, facts)
         })
         .collect();
@@ -719,7 +1279,9 @@ fn build_for(
         .map(|&character| (character, tree::owner_name(&cx.session, character)))
         .collect();
 
-    let data = build(&assets, &types, &places, &names, key.place);
+    let data = build_grouped(
+        &assets, &types, &places, &names, key.place, key.group, key.prices,
+    );
     if data.totals.too_large {
         cx.notices.push(Notice::error(VALUE_TOO_LARGE));
     }
@@ -749,6 +1311,13 @@ mod tests {
     const RAM_BUY: i64 = 4_500_000;
     /// 505,000.00 in ten-thousandths.
     const RIFTER_PRICE: i64 = 5_050_000_000;
+    /// The Forge sell row's lowest price: 478.60 in ten-thousandths.
+    const RAM_FORGE_SELL: i64 = 4_786_000;
+    /// The Forge sell row's volume-weighted average: 479.20 in ten-thousandths.
+    const RAM_SELL_AVERAGE: i64 = 4_792_000;
+    /// The Rifter's Forge sell row: lowest 500,000.00 and average 503,000.00 in ten-thousandths.
+    const RIFTER_FORGE_SELL: i64 = 5_000_000_000;
+    const RIFTER_SELL_AVERAGE: i64 = 5_030_000_000;
 
     fn money(ten_thousandths: i64) -> Money {
         Money::from_ten_thousandths(ten_thousandths)
@@ -805,6 +1374,9 @@ mod tests {
             name: "R.A.M.- Robotics".to_owned(),
             valued: true,
             price,
+            forge_sell: Some(money(RAM_FORGE_SELL)),
+            forge_buy: Some(money(RAM_BUY)),
+            sell_average: Some(money(RAM_SELL_AVERAGE)),
             volume: Some(volume(400)),
             haul_volume: Some(volume(400)),
         }
@@ -815,6 +1387,9 @@ mod tests {
             name: "Rifter".to_owned(),
             valued: true,
             price,
+            forge_sell: Some(money(RIFTER_FORGE_SELL)),
+            forge_buy: None,
+            sell_average: Some(money(RIFTER_SELL_AVERAGE)),
             volume: Some(volume(272_890_000)),
             haul_volume: Some(volume(25_000_000)),
         }
@@ -825,6 +1400,9 @@ mod tests {
             name: "Rifter Blueprint".to_owned(),
             valued: false,
             price: None,
+            forge_sell: None,
+            forge_buy: None,
+            sell_average: None,
             volume: Some(volume(100)),
             haul_volume: Some(volume(100)),
         }
@@ -1156,5 +1734,227 @@ mod tests {
         assert_eq!(blank(true, false), Some("The game data is not in yet."));
         assert_eq!(blank(false, false), Some("No character picked."));
         assert_eq!(blank(true, true), None);
+    }
+
+    #[test]
+    fn grouping_by_character_puts_the_groups_in_name_order_and_keeps_the_stacks() {
+        let data = build_grouped(
+            &sample(),
+            &all_prices(),
+            &place_map(),
+            &names(),
+            None,
+            Group::Character,
+            PriceColumns::default(),
+        );
+        let groups: Vec<&Row> = data.rows.iter().filter(|row| row.depth == 0).collect();
+        assert_eq!(
+            groups
+                .iter()
+                .map(|row| row.cells[0].text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Alt (jEve)", "Hauler (jEve)", "Main"]
+        );
+        assert_eq!(
+            groups
+                .iter()
+                .map(|row| row.cells[6].text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["28,800.00", "2,400.00", "588,040.00"]
+        );
+        assert_eq!(groups[0].cells[4].text, "—", "only Item groups sum units");
+        assert_eq!(groups[0].cells[5].text, "2.40");
+
+        let main: Vec<&Row> = data
+            .rows
+            .iter()
+            .skip_while(|row| row.cells[0].text != "Main" || row.depth != 0)
+            .skip(1)
+            .take_while(|row| row.depth == 1)
+            .collect();
+        assert_eq!(main.len(), 5);
+        assert_eq!(
+            main.iter()
+                .map(|row| row.cells[0].text.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Rifter",
+                "R.A.M.- Robotics",
+                "R.A.M.- Robotics",
+                "R.A.M.- Robotics",
+                "R.A.M.- Robotics"
+            ]
+        );
+        assert_eq!(main[0].cells[6].text, "505,000.00");
+    }
+
+    #[test]
+    fn grouping_by_item_sums_units_and_value_and_a_missing_price_shows_a_dash() {
+        let data = build_grouped(
+            &sample(),
+            &all_prices(),
+            &place_map(),
+            &names(),
+            None,
+            Group::Item,
+            PriceColumns::default(),
+        );
+        let groups: Vec<&Row> = data.rows.iter().filter(|row| row.depth == 0).collect();
+        assert_eq!(
+            groups
+                .iter()
+                .map(|row| row.cells[0].text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["R.A.M.- Robotics", "Rifter"]
+        );
+        assert_eq!(
+            text(groups[0]),
+            vec!["R.A.M.- Robotics", "", "", "", "238", "9.52", "114,240.00"]
+        );
+        assert_eq!(
+            text(groups[1]),
+            vec!["Rifter", "", "", "", "1", "27,289.00", "505,000.00"]
+        );
+
+        let without_rifter = build_grouped(
+            &sample(),
+            &type_map(Some(money(RAM_PRICE)), None),
+            &place_map(),
+            &names(),
+            None,
+            Group::Item,
+            PriceColumns::default(),
+        );
+        let groups: Vec<&Row> = without_rifter
+            .rows
+            .iter()
+            .filter(|row| row.depth == 0)
+            .collect();
+        assert_eq!(groups[0].cells[6].text, "114,240.00");
+        assert_eq!(groups[1].cells[6].text, "—");
+    }
+
+    #[test]
+    fn optional_price_columns_show_the_forge_rows_per_unit() {
+        let prices = PriceColumns {
+            forge_sell: true,
+            forge_buy: true,
+            sell_average: true,
+        };
+        let data = build_grouped(
+            &sample(),
+            &all_prices(),
+            &place_map(),
+            &names(),
+            None,
+            Group::Nothing,
+            prices,
+        );
+        let ram = data
+            .entries
+            .iter()
+            .find(|entry| entry.type_id == RAM && entry.quantity == 120)
+            .expect("the 120 R.A.M. stack");
+        let row = data
+            .rows
+            .iter()
+            .find(|row| row.key == key(ram))
+            .expect("its row");
+        assert_eq!(
+            text(row),
+            vec![
+                "R.A.M.- Robotics",
+                "Main",
+                "Home Fort",
+                "Hangar",
+                "120",
+                "4.80",
+                "57,600.00",
+                "478.60",
+                "450.00",
+                "479.20",
+            ]
+        );
+        let rifter = data
+            .rows
+            .iter()
+            .find(|row| row.key == 9_001)
+            .expect("the Rifter row");
+        assert_eq!(
+            text(rifter),
+            vec![
+                "Rifter",
+                "Main",
+                "Jita IV - Moon 4 - Caldari Navy Assembly Plant",
+                "Hangar",
+                "1",
+                "27,289.00",
+                "505,000.00",
+                "500,000.00",
+                "—",
+                "503,000.00",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_blueprint_has_no_optional_price_even_with_a_market_row() {
+        let mut assets = sample();
+        assets.push(asset(MAIN, 9_100, BLUEPRINT, JITA, JITA, 1, true, "Hangar"));
+        let mut types = all_prices();
+        types.insert(BLUEPRINT, blueprint());
+        let prices = PriceColumns {
+            forge_sell: true,
+            forge_buy: true,
+            sell_average: true,
+        };
+        let data = build_grouped(
+            &assets,
+            &types,
+            &place_map(),
+            &names(),
+            None,
+            Group::Nothing,
+            prices,
+        );
+        let row = data
+            .rows
+            .iter()
+            .find(|row| row.cells[0].text == "Rifter Blueprint")
+            .expect("the blueprint row");
+        assert_eq!(
+            &row.cells[7..],
+            &[Cell::missing(), Cell::missing(), Cell::missing()]
+        );
+    }
+
+    #[test]
+    fn the_saved_choices_parse_and_a_bad_group_is_nothing() {
+        assert_eq!(Group::from_setting("nothing"), Group::Nothing);
+        assert_eq!(Group::from_setting("place"), Group::Place);
+        assert_eq!(Group::from_setting("character"), Group::Character);
+        assert_eq!(Group::from_setting("item"), Group::Item);
+        assert_eq!(Group::from_setting("bad"), Group::Nothing);
+
+        let all = PriceColumns::from_text("forge_sell,forge_buy,sell_average");
+        assert_eq!(all.text(), "forge_sell,forge_buy,sell_average");
+        assert_eq!(
+            PriceColumns::from_text("bogus,forge_buy").text(),
+            "forge_buy"
+        );
+        assert_eq!(PriceColumns::default().text(), "");
+    }
+
+    #[test]
+    fn the_oldest_data_is_the_smallest_update_and_never_when_one_is_missing() {
+        assert_eq!(
+            oldest_text(&[Some(900_000), Some(950_400)], 1_000_000),
+            "Oldest data: 1d"
+        );
+        assert_eq!(
+            oldest_text(&[Some(900_000), None], 1_000_000),
+            "Oldest data: never"
+        );
+        assert_eq!(oldest_text(&[], 1_000_000), "Oldest data: never");
     }
 }
