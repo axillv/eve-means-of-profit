@@ -39,8 +39,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
-use egui::{Context, Key, Modifiers, Ui, ViewportCommand};
-use egui_dock::DockState;
+use egui::{
+    Button, Context, Key, Modifiers, RichText, Sense, Stroke, TextWrapMode, Ui, ViewportCommand,
+    WidgetInfo, WidgetType, vec2,
+};
+use egui_dock::{DockState, NodeIndex};
+use egui_phosphor::regular;
 use mop_esi::character_data::Refreshed;
 use mop_esi::error::EsiError;
 use mop_esi::industry::{self as esi_industry, IndustryData, IndustryKind};
@@ -55,11 +59,14 @@ use assets::{AssetsPage, AssetsPanel};
 use build::{BuildPage, BuildPanel};
 use characters::{CharactersPage, CharactersPanel};
 use claims::ClaimsState;
+use dock::UserNames;
 use first_run::{Reply, Startup};
 use jobs::{JobsPage, JobsPanel};
+use layout::model::{Binding, Layout, PanelRef};
+use layout::user::UserLayouts;
 use net_worth::{NetWorthPage, NetWorthPanel};
 use orders::{OrdersPage, OrdersPanel};
-use rail::Page;
+use rail::{Page, Shown};
 use selection::Selection;
 use session::{EveAccess, Loaded, Session};
 use setup::{SetupPage, SetupPanel};
@@ -288,6 +295,233 @@ fn saved_docks(store: &Store) -> Result<Docks, mop_store::StoreError> {
     })
 }
 
+/// The names a player's layout needs for its headers: what is selected to follow, and the name of
+/// every pin the layout holds.
+struct LayoutNames {
+    selected_plan: Option<(i64, String)>,
+    selected_stockpile: Option<(i64, String)>,
+    pins: Vec<(Binding, String)>,
+}
+
+impl LayoutNames {
+    /// Reads the selected plan from the Build page, the selected stockpile from the selection, and
+    /// the name of every pin in `layout` from the store. A lookup that fails is treated as a missing
+    /// plan or stockpile, so a damaged database shows "pinned: deleted" rather than no page.
+    fn read(
+        layout: &Layout,
+        build_page: &BuildPage,
+        selection: &Selection,
+        store: &mut Store,
+    ) -> Self {
+        let selected_plan = build_page.selected.and_then(|id| {
+            build_page
+                .record
+                .as_ref()
+                .map(|record| (id, record.name.clone()))
+        });
+        let selected_stockpile = selection
+            .stockpile
+            .and_then(|id| stockpile_name(store, id).map(|name| (id, name)));
+        let mut pins: Vec<(Binding, String)> = Vec::new();
+        if let Some(root) = &layout.root {
+            for slot in root.slots() {
+                if matches!(slot.binding, Binding::Follow)
+                    || pins.iter().any(|(pin, _)| *pin == slot.binding)
+                {
+                    continue;
+                }
+                let name = match &slot.binding {
+                    Binding::Follow => None,
+                    Binding::PinPlan(id) => plan_name(store, *id),
+                    Binding::PinStockpile(id) => stockpile_name(store, *id),
+                };
+                if let Some(name) = name {
+                    pins.push((slot.binding.clone(), name));
+                }
+            }
+        }
+        Self {
+            selected_plan,
+            selected_stockpile,
+            pins,
+        }
+    }
+}
+
+/// The saved plan `id`'s name, or `None` when it is gone or cannot be read.
+fn plan_name(store: &mut Store, id: i64) -> Option<String> {
+    match store.plan(id) {
+        Ok(plan) => plan.map(|plan| plan.name),
+        Err(_) => None,
+    }
+}
+
+/// The saved stockpile `id`'s name, or `None` when it is gone or cannot be read.
+fn stockpile_name(store: &mut Store, id: i64) -> Option<String> {
+    match store.stockpile(id) {
+        Ok(stockpile) => stockpile.map(|stockpile| stockpile.name),
+        Err(_) => None,
+    }
+}
+
+/// The page state a player's layout panel reads, one mutable reference per shipped page.
+struct PageStates<'a> {
+    build: &'a mut BuildPage,
+    assets: &'a mut AssetsPage,
+    net_worth: &'a mut NetWorthPage,
+    orders: &'a mut OrdersPage,
+    jobs: &'a mut JobsPage,
+    characters: &'a mut CharactersPage,
+    stockpiles: &'a mut StockpilesPage,
+    setup: &'a mut SetupPage,
+}
+
+/// Draws the panel of a player's layout named by `key`. Only a key in the panel list reaches here,
+/// and a key with no shipped panel draws nothing.
+fn show_panel(key: &str, ui: &mut Ui, pages: &mut PageStates, cx: &mut Shared) {
+    match key.split_once('.') {
+        Some(("build", _)) => show_build_panel(key, ui, &mut *pages.build, cx),
+        Some(("assets", _)) => show_assets_panel(key, ui, &mut *pages.assets, cx),
+        Some(("net_worth", _)) => show_net_worth_panel(key, ui, &mut *pages.net_worth, cx),
+        Some(("orders", _)) => {
+            if key == "orders.orders" {
+                orders::show(&mut *pages.orders, OrdersPanel::Orders, ui, cx);
+            }
+        }
+        Some(("jobs", _)) => {
+            if key == "jobs.industry_jobs" {
+                jobs::show(&mut *pages.jobs, JobsPanel::IndustryJobs, ui, cx);
+            }
+        }
+        Some(("characters", _)) => show_characters_panel(key, ui, &mut *pages.characters, cx),
+        Some(("setup", _)) => show_setup_panel(key, ui, &mut *pages.setup, cx),
+        Some(("stockpiles", _)) => show_stockpiles_panel(key, ui, &mut *pages.stockpiles, cx),
+        _ if key == "item" => item_panel::show(ui, cx),
+        _ => {}
+    }
+}
+
+fn show_build_panel(key: &str, ui: &mut Ui, page: &mut BuildPage, cx: &mut Shared) {
+    let panel = match key {
+        "build.plans" => BuildPanel::Plans,
+        "build.steps" => BuildPanel::Steps,
+        "build.buy_list" => BuildPanel::BuyList,
+        // The pasted stock is a window of the Plan panel, so that panel shows its page.
+        "build.plan" | "build.pasted_stock" => BuildPanel::Plan,
+        _ => return,
+    };
+    build::show(page, panel, ui, cx);
+}
+
+fn show_assets_panel(key: &str, ui: &mut Ui, page: &mut AssetsPage, cx: &mut Shared) {
+    let panel = match key {
+        "assets.places" => AssetsPanel::Places,
+        "assets.assets" => AssetsPanel::Assets,
+        _ => return,
+    };
+    assets::show(page, panel, ui, cx);
+}
+
+fn show_net_worth_panel(key: &str, ui: &mut Ui, page: &mut NetWorthPage, cx: &mut Shared) {
+    let panel = match key {
+        "net_worth.net_worth" => NetWorthPanel::NetWorth,
+        "net_worth.by_character" => NetWorthPanel::ByCharacter,
+        "net_worth.right_now" => NetWorthPanel::RightNow,
+        _ => return,
+    };
+    net_worth::show(page, panel, ui, cx);
+}
+
+fn show_characters_panel(key: &str, ui: &mut Ui, page: &mut CharactersPage, cx: &mut Shared) {
+    let panel = match key {
+        "characters.characters" => CharactersPanel::Characters,
+        "characters.jeve_data" => CharactersPanel::JeveData,
+        _ => return,
+    };
+    characters::show(page, panel, ui, cx);
+}
+
+fn show_setup_panel(key: &str, ui: &mut Ui, page: &mut SetupPage, cx: &mut Shared) {
+    let panel = match key {
+        "setup.facilities" => SetupPanel::Facilities,
+        "setup.freight_services" => SetupPanel::FreightServices,
+        "setup.price_history" => SetupPanel::PriceHistory,
+        "setup.price_rule" => SetupPanel::PriceRule,
+        "setup.structures" => SetupPanel::Structures,
+        "setup.fees" => SetupPanel::Fees,
+        "setup.invention" => SetupPanel::Invention,
+        "setup.display" => SetupPanel::Display,
+        _ => return,
+    };
+    setup::show(page, panel, ui, cx);
+}
+
+fn show_stockpiles_panel(key: &str, ui: &mut Ui, page: &mut StockpilesPage, cx: &mut Shared) {
+    let panel = match key {
+        "stockpiles.stockpiles" => StockpilesPanel::Stockpiles,
+        "stockpiles.contents" => StockpilesPanel::Contents,
+        _ => return,
+    };
+    page.show(panel, ui, cx);
+}
+
+/// The icon a page entry shows in the icons-only rail.
+fn page_icon(page: Page) -> &'static str {
+    match page {
+        Page::Today => regular::SUN,
+        Page::Build => regular::HAMMER,
+        Page::Stockpiles => regular::STACK,
+        Page::Assets => regular::PACKAGE,
+        Page::NetWorth => regular::CHART_LINE_UP,
+        Page::Orders => regular::STOREFRONT,
+        Page::Jobs => regular::FACTORY,
+        Page::Characters => regular::USERS,
+        Page::Setup => regular::GEAR,
+    }
+}
+
+/// Whether a page entry starts a group, and so has a line above it.
+fn page_starts_group(page: Page) -> bool {
+    matches!(page, Page::Build | Page::Assets | Page::Characters)
+}
+
+/// Draws the line between groups of rail entries, with space above and below.
+fn rail_divider(ui: &mut Ui, style: &Style) {
+    ui.add_space(8.0);
+    let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter().hline(
+        line.x_range(),
+        line.center().y,
+        Stroke::new(1.0, style.line),
+    );
+    ui.add_space(8.0);
+}
+
+/// Draws one icon-only rail entry, accented when it is the one on show, with its label as hover
+/// text and as its widget label.
+fn icon_entry(
+    ui: &mut Ui,
+    style: &Style,
+    content_width: f32,
+    icon: &str,
+    label: &str,
+    selected: bool,
+) -> egui::Response {
+    let (fill, text) = if selected {
+        (style.accent, style.on_accent)
+    } else {
+        (style.row, style.text)
+    };
+    let button = Button::new(RichText::new(icon).color(text))
+        .fill(fill)
+        .corner_radius(style.control_radius)
+        .wrap_mode(TextWrapMode::Extend)
+        .min_size(vec2(content_width, 40.0));
+    let response = ui.add(button);
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
+    response.on_hover_text(label)
+}
+
 pub struct App {
     ctx: Context,
     shared: Shared,
@@ -307,6 +541,10 @@ pub struct App {
     events: Receiver<Event>,
     events_tx: Sender<Event>,
     page: Page,
+    /// The player's layouts and their file.
+    user: UserLayouts,
+    /// The layout on show, `None` when a shipped page is.
+    layout_shown: Option<usize>,
     build_page: BuildPage,
     build_dock: DockState<BuildPanel>,
     assets_page: AssetsPage,
@@ -367,8 +605,14 @@ impl App {
             Arc::new(images::Ureq::new()),
         );
         let now = (config.clock)();
+        let (user, layout_notices) = UserLayouts::load(
+            config.data_dir.join("layouts.txt"),
+            layout::panels::panels(),
+            now,
+        );
         let opened = Store::open(&config.data_dir.join(USER_DB), now)?;
-        let notices = fresh_start_notice(opened.started_fresh.as_ref());
+        let mut notices = fresh_start_notice(opened.started_fresh.as_ref());
+        notices.extend(layout_notices);
         let mut store = opened.store;
         let recorder = Arc::new(history::Recorder::open(
             &config.data_dir.join(USER_DB),
@@ -421,6 +665,8 @@ impl App {
             events,
             events_tx,
             page: Page::Today,
+            user,
+            layout_shown: None,
             build_page: BuildPage::default(),
             build_dock: docks.build,
             assets_page: AssetsPage,
@@ -460,7 +706,13 @@ impl App {
 
     /// Makes `page` the page on show, for code that drives the app from outside.
     pub fn show_page(&mut self, page: Page) {
+        self.go_to(page);
+    }
+
+    /// Makes `page` the page on show, and takes any player's layout off the screen.
+    fn go_to(&mut self, page: Page) {
         self.page = page;
+        self.layout_shown = None;
     }
 
     /// One frame: take the worker's results, then draw.
@@ -478,7 +730,7 @@ impl App {
             self.shared.notices.push(Notice::error(error));
         }
         if ui.input_mut(|input| input.consume_key(Modifiers::CTRL, Key::Comma)) {
-            self.page = Page::Setup;
+            self.go_to(Page::Setup);
         }
         self.zoom_with_keys(ui);
         self.menu_bar(ui);
@@ -545,7 +797,7 @@ impl App {
                 });
                 ui.menu_button("View", |ui| {
                     if ui.button("Settings…").clicked() {
-                        self.page = Page::Setup;
+                        self.go_to(Page::Setup);
                         ui.close();
                     }
                 });
@@ -553,13 +805,104 @@ impl App {
         });
     }
 
+    /// Draws the rail and takes the entry the player picked, page or layout.
+    fn rail(&mut self, ui: &mut Ui, style: &Style) {
+        if self.shared.rail_icons_only {
+            self.icons_only_rail(ui, style);
+            return;
+        }
+        let names = self.user.names();
+        let mut shown = match self.layout_shown {
+            Some(index) => Shown::Layout(index),
+            None => Shown::Page(self.page),
+        };
+        // A right-click on the rail waits for the task that does its actions.
+        let _action = rail::show_with_layouts(ui, style, &mut shown, &names);
+        match shown {
+            Shown::Page(page) => self.go_to(page),
+            Shown::Layout(index) => self.layout_shown = Some(index),
+        }
+    }
+
+    /// Draws the icons-only rail: every page, then the player's layouts, as icons with their labels
+    /// on hover. The shipped icons-only rail draws the pages alone, so this one draws the layout
+    /// entries too rather than hide them from a player who has that setting on.
+    fn icons_only_rail(&mut self, ui: &mut Ui, style: &Style) {
+        if let Some(page) = empty::take(ui.ctx()) {
+            self.go_to(page);
+        }
+        let names = self.user.names();
+        let mut shown = match self.layout_shown {
+            Some(index) => Shown::Layout(index),
+            None => Shown::Page(self.page),
+        };
+        let width = style.rail_narrow;
+        let content_width = width
+            - egui::Frame::side_top_panel(ui.style())
+                .total_margin()
+                .sum()
+                .x;
+        egui::Panel::left("rail")
+            .exact_size(width)
+            .resizable(false)
+            .show(ui, |ui| {
+                ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                    for entry in Page::ALL {
+                        if page_starts_group(entry) {
+                            rail_divider(ui, style);
+                        }
+                        let response = icon_entry(
+                            ui,
+                            style,
+                            content_width,
+                            page_icon(entry),
+                            entry.label(),
+                            shown == Shown::Page(entry),
+                        );
+                        if response.clicked() {
+                            shown = Shown::Page(entry);
+                        }
+                        response.context_menu(|menu| {
+                            if menu.button("Save a copy").clicked() {
+                                menu.close();
+                            }
+                        });
+                    }
+                    if names.is_empty() {
+                        return;
+                    }
+                    rail_divider(ui, style);
+                    for (index, name) in names.iter().enumerate() {
+                        let response = icon_entry(
+                            ui,
+                            style,
+                            content_width,
+                            regular::FOLDER,
+                            name,
+                            shown == Shown::Layout(index),
+                        );
+                        if response.clicked() {
+                            shown = Shown::Layout(index);
+                        }
+                    }
+                });
+            });
+        match shown {
+            Shown::Page(page) => self.go_to(page),
+            Shown::Layout(index) => self.layout_shown = Some(index),
+        }
+    }
+
     fn pages(&mut self, ui: &mut Ui) {
         let style = self.shared.style;
-        rail::show_with(ui, &style, &mut self.page, self.shared.rail_icons_only);
+        self.rail(ui, &style);
+        if self.show_layout(ui, &style) {
+            return;
+        }
         egui::CentralPanel::default().show(ui, |ui| match self.page {
             Page::Today => {
                 if let Some(page) = today::show(ui, &mut self.shared) {
-                    self.page = page;
+                    self.go_to(page);
                 }
             }
             Page::Build => {
@@ -651,6 +994,85 @@ impl App {
         }
     }
 
+    /// Draws the player's layout on show, when there is one that still exists, and says whether it
+    /// did. A layout the rail no longer lists shows the page it was hiding.
+    fn show_layout(&mut self, ui: &mut Ui, style: &Style) -> bool {
+        let Some(index) = self.layout_shown else {
+            return false;
+        };
+        if index >= self.user.layouts.len() {
+            self.layout_shown = None;
+            return false;
+        }
+        self.user_layout(ui, index, style);
+        true
+    }
+
+    /// Draws the player's layout at `index`. Every panel shows its shipped page's state; until a
+    /// slot can be pinned to its own plan, a pinned slot follows the same selection.
+    fn user_layout(&mut self, ui: &mut Ui, index: usize, style: &Style) {
+        let Some(layout) = self.user.layouts.get(index) else {
+            return;
+        };
+        let names = LayoutNames::read(
+            layout,
+            &self.build_page,
+            &self.shared.selection,
+            &mut self.shared.store,
+        );
+        let pin_name = |binding: &Binding| {
+            names
+                .pins
+                .iter()
+                .find(|(pin, _)| pin == binding)
+                .map(|(_, name)| name.clone())
+        };
+        let user_names = UserNames {
+            selected_plan: names
+                .selected_plan
+                .as_ref()
+                .map(|(id, name)| (*id, name.as_str())),
+            selected_stockpile: names
+                .selected_stockpile
+                .as_ref()
+                .map(|(id, name)| (*id, name.as_str())),
+            pin_name: &pin_name,
+        };
+        if layout.root.is_none() {
+            // The conversion gives a layout with no panel a leaf with no tabs, which the dock draws
+            // as a blank leaf. The empty-layout text needs a dock with no node at all.
+            let mut dock = DockState::new(Vec::new());
+            dock.main_surface_mut().remove_leaf(NodeIndex::root());
+            dock::show_user(
+                ui,
+                style,
+                &mut dock,
+                layout::panels::panels(),
+                &user_names,
+                |_, _| {},
+            );
+            return;
+        }
+        let mut pages = PageStates {
+            build: &mut self.build_page,
+            assets: &mut self.assets_page,
+            net_worth: &mut self.net_worth_page,
+            orders: &mut self.orders_page,
+            jobs: &mut self.jobs_page,
+            characters: &mut self.characters_page,
+            stockpiles: &mut self.stockpiles_page,
+            setup: &mut self.setup_page,
+        };
+        let notice = self.user.show(index, ui, style, &user_names, |ui, slot| {
+            if let PanelRef::Known(key) = &slot.panel {
+                show_panel(key, ui, &mut pages, &mut self.shared);
+            }
+        });
+        if let Some(notice) = notice {
+            build::state::push_error(&mut self.shared.notices, notice.text);
+        }
+    }
+
     fn show_stockpiles(&mut self, ui: &mut Ui, style: &Style) {
         let text = dock::show_page(
             ui,
@@ -674,7 +1096,7 @@ impl App {
         let Some(id) = self.stockpiles_page.open_plan.take() else {
             return;
         };
-        self.page = Page::Build;
+        self.go_to(Page::Build);
         if self.build_page.selected == Some(id) {
             if self.build_page.dirty {
                 self.build_page.dialog =

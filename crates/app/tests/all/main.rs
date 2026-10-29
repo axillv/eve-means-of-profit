@@ -9,6 +9,7 @@ mod history;
 mod invention;
 mod item_panel;
 mod jobs;
+mod layout_edit;
 mod layout_model;
 mod names;
 mod net_worth;
