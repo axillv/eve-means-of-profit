@@ -19,6 +19,7 @@ pub mod reservations;
 pub mod settings;
 pub mod stockpiles;
 pub mod structure_names;
+pub mod wallet;
 
 use rusqlite::Transaction;
 

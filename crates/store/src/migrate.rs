@@ -322,6 +322,48 @@ CREATE TABLE blueprints (
     te INTEGER NOT NULL CHECK (te BETWEEN 0 AND 20),
     PRIMARY KEY (character_id, item_id)
 ) WITHOUT ROWID;
+CREATE TABLE wallet_journal_fetches (
+    character_id INTEGER PRIMARY KEY,
+    fetched_at INTEGER NOT NULL
+);
+CREATE TABLE wallet_journal (
+    character_id INTEGER NOT NULL,
+    id INTEGER NOT NULL CHECK (id >= 0),
+    at INTEGER NOT NULL,
+    ref_type TEXT NOT NULL CHECK (length(ref_type) > 0),
+    ref_id INTEGER,
+    first_party_id INTEGER,
+    second_party_id INTEGER,
+    amount INTEGER,
+    balance INTEGER,
+    reason TEXT,
+    tax INTEGER,
+    tax_receiver_id INTEGER,
+    context_id INTEGER,
+    context_id_type TEXT,
+    description TEXT NOT NULL,
+    PRIMARY KEY (character_id, id)
+) WITHOUT ROWID;
+CREATE INDEX wallet_journal_by_at ON wallet_journal (character_id, at);
+CREATE TABLE wallet_transactions_fetches (
+    character_id INTEGER PRIMARY KEY,
+    fetched_at INTEGER NOT NULL
+);
+CREATE TABLE wallet_transactions (
+    character_id INTEGER NOT NULL,
+    transaction_id INTEGER NOT NULL CHECK (transaction_id >= 0),
+    at INTEGER NOT NULL,
+    client_id INTEGER NOT NULL,
+    is_buy INTEGER NOT NULL CHECK (is_buy IN (0, 1)),
+    is_personal INTEGER NOT NULL CHECK (is_personal IN (0, 1)),
+    journal_ref_id INTEGER NOT NULL,
+    location_id INTEGER NOT NULL,
+    quantity INTEGER NOT NULL CHECK (quantity >= 1),
+    type_id INTEGER NOT NULL CHECK (type_id >= 0),
+    unit_price INTEGER NOT NULL CHECK (unit_price >= 0),
+    PRIMARY KEY (character_id, transaction_id)
+) WITHOUT ROWID;
+CREATE INDEX wallet_transactions_by_at ON wallet_transactions (character_id, at);
 ";
 
 /// An open database. Every method on it runs in one transaction.

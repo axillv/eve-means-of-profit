@@ -16,3 +16,4 @@ pub mod saved;
 pub mod secrets;
 pub mod skills;
 pub mod token;
+pub mod wallet;

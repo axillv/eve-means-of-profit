@@ -590,7 +590,7 @@ fn time(object: &Value, key: &'static str, route: &str) -> Result<i64, EsiError>
     utc_seconds(value).ok_or_else(|| bad_data(route, key, value))
 }
 
-fn utc_seconds(text: &str) -> Option<i64> {
+pub(crate) fn utc_seconds(text: &str) -> Option<i64> {
     let bytes = text.as_bytes();
     if bytes.len() != 20 || bytes.get(19) != Some(&b'Z') {
         return None;
