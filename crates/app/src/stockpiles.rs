@@ -3,6 +3,7 @@
 
 mod buy;
 mod contents;
+mod edit;
 mod import;
 mod list;
 
@@ -37,6 +38,7 @@ const LAST_STATION: LocationId = 63_999_999;
 pub struct StockpilesPage {
     pub(crate) list: list::State,
     pub(crate) buy: buy::State,
+    pub(crate) edit: edit::State,
     pub(crate) import: import::State,
 }
 
@@ -77,10 +79,10 @@ impl StockpilesPage {
         }
     }
 
-    /// Opens the stockpile editor. The editor belongs to M1-51; until it lands the page only
-    /// keeps the stockpile selected.
+    /// Opens the stockpile editor on `stockpile_id`, keeping it selected.
     pub fn edit(&mut self, stockpile_id: i64, cx: &mut Shared) {
         self.open(stockpile_id, cx);
+        self.edit.open(stockpile_id, cx);
     }
 
     pub(crate) fn open_import(&mut self) {
@@ -100,6 +102,7 @@ impl StockpilesPage {
 
     /// Draws the page's windows once a frame, after the dock.
     pub fn show_windows(&mut self, ui: &mut Ui, cx: &mut Shared) {
+        self.edit.show(ui, cx);
         self.import.show(ui, cx);
     }
 }
