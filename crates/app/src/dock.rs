@@ -19,7 +19,7 @@ use crate::setup::SetupPanel;
 use crate::table::{copy_request, has_table};
 use crate::theme::Style;
 
-/// The Build panels the Panels menu lists. Item is the inspector and is never listed.
+/// The Build panels the Panels menu lists. The Item inspector floats outside the dock.
 pub const BUILD_PANELS: [BuildPanel; 5] = [
     BuildPanel::Plans,
     BuildPanel::PastedStock,
@@ -28,7 +28,7 @@ pub const BUILD_PANELS: [BuildPanel; 5] = [
     BuildPanel::BuyList,
 ];
 
-/// The Assets panels the Panels menu lists. Item is the inspector and is never listed.
+/// The Assets panels the Panels menu lists. The Item inspector floats outside the dock.
 pub const ASSETS_PANELS: [AssetsPanel; 2] = [AssetsPanel::Places, AssetsPanel::Assets];
 
 /// The Net worth panels the Panels menu lists.
@@ -54,25 +54,23 @@ pub const SETUP_PANELS: [SetupPanel; 8] = [
     SetupPanel::Display,
 ];
 
-/// The Build page: Plans over Pasted stock on the left; Plan on top, then Steps and Buy list, with
-/// Item on the right of them.
+/// The Build page: Plans over Pasted stock on the left; Plan on top, then Steps and Buy list side
+/// by side below it.
 pub fn build_layout() -> DockState<BuildPanel> {
     let mut dock = DockState::new(vec![BuildPanel::Plans]);
     let surface = dock.main_surface_mut();
     let [plans, plan] = surface.split_right(NodeIndex::root(), 0.4, vec![BuildPanel::Plan]);
     surface.split_below(plans, 0.5, vec![BuildPanel::PastedStock]);
     let [_plan, lower] = surface.split_below(plan, 0.45, vec![BuildPanel::Steps]);
-    let [steps, _item] = surface.split_right(lower, 0.75, vec![BuildPanel::Item]);
-    surface.split_right(steps, 0.5, vec![BuildPanel::BuyList]);
+    surface.split_right(lower, 0.5, vec![BuildPanel::BuyList]);
     dock
 }
 
-/// The Assets page: Places, Assets and Item side by side, at 25%, 50% and 25%.
+/// The Assets page: Places at 25%, Assets at 75%.
 pub fn assets_layout() -> DockState<AssetsPanel> {
     let mut dock = DockState::new(vec![AssetsPanel::Places]);
     let surface = dock.main_surface_mut();
-    let [_places, rest] = surface.split_right(NodeIndex::root(), 0.25, vec![AssetsPanel::Assets]);
-    surface.split_right(rest, 2.0 / 3.0, vec![AssetsPanel::Item]);
+    surface.split_right(NodeIndex::root(), 0.25, vec![AssetsPanel::Assets]);
     dock
 }
 
@@ -186,7 +184,7 @@ pub fn show_page<T: Copy + PartialEq>(
 }
 
 /// Opens or closes `panel`. Returns whether the page changed; closing the last open tab is
-/// refused, so a page never ends up with no panel at all (Item counts).
+/// refused, so a page never ends up with no panel at all.
 fn toggle<T: Copy + PartialEq>(state: &mut DockState<T>, panel: T) -> bool {
     match state.find_tab(&panel) {
         Some(path) => {
@@ -227,9 +225,9 @@ fn apply_open<T: Copy + PartialEq>(
     all: &[T],
     title: fn(T) -> &'static str,
 ) {
-    // The app itself saves an empty text when only panels outside `all` are left open, such as
-    // Item: that legal state closes every listed panel. A text with names that all fail to match
-    // is corrupt instead, and leaves the page as it is.
+    // An empty text closes every listed panel but the last, so the page keeps one panel at
+    // least. A text with names that all fail to match is corrupt instead, and leaves the page as
+    // it is.
     if text.trim().is_empty() {
         for &panel in all {
             let Some(path) = state.find_tab(&panel) else {
@@ -396,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_build_list_closes_the_panels_it_does_not_name_and_keeps_item() {
+    fn a_saved_build_list_closes_the_panels_it_does_not_name() {
         let mut dock = build_layout();
         apply_open(
             &mut dock,
@@ -406,8 +404,8 @@ mod tests {
         );
         assert_eq!(
             tabs(&dock),
-            [BuildPanel::Plans, BuildPanel::BuyList, BuildPanel::Item],
-            "only the named panels and the inspector stay open"
+            [BuildPanel::Plans, BuildPanel::BuyList],
+            "only the named panels stay open"
         );
         apply_open(
             &mut dock,
@@ -417,8 +415,8 @@ mod tests {
         );
         assert_eq!(
             tabs(&dock),
-            [BuildPanel::Plans, BuildPanel::BuyList, BuildPanel::Item],
-            "Item is not tickable and Foo is unknown, so neither changes the page"
+            [BuildPanel::Plans, BuildPanel::BuyList],
+            "Item is not a dock panel and Foo is unknown, so neither changes the page"
         );
     }
 
@@ -427,7 +425,7 @@ mod tests {
         let mut dock = build_layout();
         assert!(toggle(&mut dock, BuildPanel::BuyList), "Buy list closes");
         let open = tabs(&dock);
-        assert_eq!(open.len(), 5, "five tabs are left");
+        assert_eq!(open.len(), 4, "four tabs are left");
         assert!(!open.contains(&BuildPanel::BuyList), "Buy list is gone");
 
         let mut orders = DockState::new(vec![OrdersPanel::Orders]);
@@ -502,7 +500,6 @@ mod tests {
                 BuildPanel::Plans,
                 BuildPanel::PastedStock,
                 BuildPanel::Plan,
-                BuildPanel::Item,
                 BuildPanel::Steps,
                 BuildPanel::BuyList,
             ],
@@ -511,20 +508,29 @@ mod tests {
     }
 
     #[test]
-    fn closing_every_listed_panel_is_remembered_when_item_stays() {
+    fn closing_the_last_panel_is_refused_and_an_empty_list_keeps_one() {
         let mut dock = build_layout();
-        for panel in BUILD_PANELS {
+        for panel in [
+            BuildPanel::Plans,
+            BuildPanel::PastedStock,
+            BuildPanel::Plan,
+            BuildPanel::BuyList,
+        ] {
             assert!(toggle(&mut dock, panel), "{} closes", panel.title());
         }
         assert_eq!(
             tabs(&dock),
-            [BuildPanel::Item],
-            "only the inspector is left"
+            [BuildPanel::Steps],
+            "the last panel stays open"
+        );
+        assert!(
+            !toggle(&mut dock, BuildPanel::Steps),
+            "the last tab cannot close"
         );
         assert_eq!(
             open_text(&dock, &BUILD_PANELS, BuildPanel::title),
-            "",
-            "no listed panel is open"
+            "Steps",
+            "the remaining panel is the saved list"
         );
 
         let dir = TempDir::new().expect("a temp folder");
@@ -542,8 +548,8 @@ mod tests {
         .expect("the empty panel list reads");
         assert_eq!(
             tabs(&saved),
-            [BuildPanel::Item],
-            "the page comes back with only Item open"
+            [BuildPanel::BuyList],
+            "an empty list closes panels until one is left"
         );
     }
 

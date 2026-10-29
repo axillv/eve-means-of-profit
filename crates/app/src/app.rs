@@ -615,6 +615,10 @@ impl App {
                 save_panels(&mut self.shared, "setup", text);
             }
         });
+        // The inspector floats over the page, so it is drawn after the panels that fill it.
+        if matches!(self.page, Page::Build | Page::Assets) {
+            item_panel::inspector(ui, &mut self.shared);
+        }
     }
 
     fn first_run_screen(&mut self, ui: &mut Ui) {

@@ -637,8 +637,8 @@ mod tests {
         complete_list_sized(world, services, 1280.0)
     }
 
-    /// `complete_list` in a window `width` points wide. The Item panel narrows the Buy list, and the
-    /// freight amount needs the room to be hovered.
+    /// `complete_list` in a window `width` points wide. The Buy list takes half the Build page's
+    /// lower row, and the freight amount needs the room to be hovered.
     fn complete_list_sized(
         world: &World,
         services: &[(&'static str, RateCard, RouteKind, Option<u32>)],
@@ -1067,7 +1067,14 @@ mod tests {
         assert_row(&harness, "Robotics", &["—"]);
         assert!(shown(&harness, " incomplete"));
         assert!(shown(&harness, "m³ 121.10 · value 687,036.00 · freight "));
-        hover(&mut harness, " incomplete");
+        // The wider list wraps the footer so the incomplete label starts on a later line than
+        // the label's own rect centre; hover the run of text itself.
+        let incomplete = harness
+            .query_all_by_value("incomplete")
+            .next()
+            .expect("the incomplete label")
+            .rect();
+        hover_at_point(&mut harness, incomplete.center());
         assert!(shown(&harness, "Robotics\nParticle Accelerator Unit"));
     }
 

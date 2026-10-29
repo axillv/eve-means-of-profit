@@ -616,11 +616,11 @@ mod tests {
             ("Today", &["Today"]),
             (
                 "Build",
-                &["Plans", "Pasted stock", "Plan", "Steps", "Buy list", "Item"],
+                &["Plans", "Pasted stock", "Plan", "Steps", "Buy list"],
             ),
             ("Industry jobs", &["Industry jobs"]),
             ("Orders", &["Orders"]),
-            ("Assets", &["Places", "Assets", "Item"]),
+            ("Assets", &["Places", "Assets"]),
             ("Net worth", &["Net worth", "By character", "Right now"]),
             ("Characters", &["Characters", "jEve data"]),
             (
@@ -650,7 +650,7 @@ mod tests {
             }
         }
         rail(&mut harness, "Build");
-        for panel in ["Plans", "Pasted stock", "Plan", "Steps", "Buy list", "Item"] {
+        for panel in ["Plans", "Pasted stock", "Plan", "Steps", "Buy list"] {
             assert_eq!(harness.query_all_by_label(panel).count(), 1, "{panel}");
         }
     }
