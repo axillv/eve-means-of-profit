@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use mop_core::freight::Packing;
 use mop_core::industry::TypeId;
+use mop_core::plan::PlanProduct;
 use mop_market::book::PriceRule;
 use rusqlite::{OptionalExtension, Row, Transaction, params};
 
@@ -279,6 +280,43 @@ fn read_me(tx: &Transaction<'_>, plan_id: i64) -> Result<BTreeMap<TypeId, u8>> {
         .collect()
 }
 
+/// The stored product rows of a plan in `position` order: its type id and quantity.
+fn stored_products(tx: &Transaction<'_>, plan_id: i64) -> Result<Vec<(i64, i64)>> {
+    let mut stmt = tx.prepare(
+        "SELECT type_id, quantity FROM plan_products WHERE plan_id = ?1 ORDER BY position",
+    )?;
+    let rows = stmt
+        .query_map(params![plan_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Refuses a product list the store cannot keep — empty, a zero quantity or a repeated type id —
+/// before anything is written, and gives the first product, which the plan's columns follow.
+fn check_products(products: &[PlanProduct]) -> Result<PlanProduct> {
+    let Some(first) = products.first().copied() else {
+        return Err(StoreError::InvalidPlanStock(
+            "a plan needs at least one product".to_owned(),
+        ));
+    };
+    let mut listed = BTreeSet::new();
+    for product in products {
+        if product.quantity == 0 {
+            return Err(StoreError::InvalidPlanStock(
+                "a quantity must be at least one".to_owned(),
+            ));
+        }
+        if !listed.insert(product.type_id) {
+            return Err(StoreError::InvalidPlanStock(
+                "each product appears once".to_owned(),
+            ));
+        }
+    }
+    Ok(first)
+}
+
 /// Replaces the build set and the ME values of a plan.
 fn write_sets(tx: &Transaction<'_>, id: i64, plan: &PlanRecord) -> Result<()> {
     tx.execute("DELETE FROM plan_build WHERE plan_id = ?1", params![id])?;
@@ -295,6 +333,23 @@ fn write_sets(tx: &Transaction<'_>, id: i64, plan: &PlanRecord) -> Result<()> {
             params![id, i64::from(*type_id), i64::from(*me)],
         )?;
     }
+    Ok(())
+}
+
+/// Copies a plan's product rows to its duplicate, in order. A source with no rows leaves the
+/// duplicate's pair of columns, written from the source's, alone.
+fn copy_products(tx: &Transaction<'_>, from: i64, to: i64) -> Result<()> {
+    tx.execute(
+        "DELETE FROM plan_products WHERE plan_id = ?2 \
+         AND EXISTS (SELECT 1 FROM plan_products WHERE plan_id = ?1)",
+        params![from, to],
+    )?;
+    tx.execute(
+        "INSERT INTO plan_products (plan_id, position, type_id, quantity) \
+         SELECT ?2, position, type_id, quantity FROM plan_products WHERE plan_id = ?1 \
+         ORDER BY position",
+        params![from, to],
+    )?;
     Ok(())
 }
 
@@ -324,6 +379,10 @@ fn insert_plan(tx: &Transaction<'_>, plan: &PlanRecord, name: &str, now: i64) ->
     .map_err(missing_reference)?;
     let id = tx.last_insert_rowid();
     write_sets(tx, id, plan)?;
+    tx.execute(
+        "INSERT INTO plan_products (plan_id, position, type_id, quantity) VALUES (?1, 0, ?2, ?3)",
+        params![id, i64::from(plan.product), quantity],
+    )?;
     Ok(id)
 }
 
@@ -374,6 +433,78 @@ impl Store {
             return Err(StoreError::NotFound);
         }
         write_sets(&tx, plan.id, plan)?;
+        tx.execute(
+            "INSERT INTO plan_products (plan_id, position, type_id, quantity) \
+                VALUES (?1, 0, ?2, ?3) ON CONFLICT (plan_id, position) DO UPDATE SET \
+                type_id = excluded.type_id, quantity = excluded.quantity",
+            params![plan.id, i64::from(plan.product), quantity],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The products of a plan, in the order they were set. While the table holds no row for the
+    /// plan, its `product` and `quantity` columns stand in as one product. An unknown plan is
+    /// `NotFound`.
+    pub fn plan_products(&mut self, id: i64) -> Result<Vec<PlanProduct>> {
+        let tx = self.conn.transaction()?;
+        let columns: Option<(i64, i64)> = tx
+            .query_row(
+                "SELECT product, quantity FROM plans WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((product, quantity)) = columns else {
+            return Err(StoreError::NotFound);
+        };
+        let rows = stored_products(&tx, id)?;
+        let products = if rows.is_empty() {
+            vec![PlanProduct {
+                type_id: from_stored(product, TABLE, id, "product")?,
+                quantity: from_stored(quantity, TABLE, id, "quantity")?,
+            }]
+        } else {
+            rows.into_iter()
+                .map(|(type_id, quantity)| {
+                    Ok(PlanProduct {
+                        type_id: from_stored(type_id, "plan_products", id, "type_id")?,
+                        quantity: from_stored(quantity, "plan_products", id, "quantity")?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        tx.commit()?;
+        Ok(products)
+    }
+
+    /// Replaces a plan's products with `products`, in that order, and follows the first one with
+    /// the plan's `product` and `quantity` columns and `updated_at`. Nothing is written when a
+    /// list is refused or the plan is unknown.
+    pub fn set_plan_products(&mut self, id: i64, products: &[PlanProduct], now: i64) -> Result<()> {
+        let first = check_products(products)?;
+        let tx = self.conn.transaction()?;
+        let quantity = to_stored_u64(first.quantity)?;
+        let changed = tx.execute(
+            "UPDATE plans SET product = ?2, quantity = ?3, updated_at = ?4 WHERE id = ?1",
+            params![id, i64::from(first.type_id), quantity, now],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound);
+        }
+        tx.execute("DELETE FROM plan_products WHERE plan_id = ?1", params![id])?;
+        for (position, product) in (0_i64..).zip(products) {
+            tx.execute(
+                "INSERT INTO plan_products (plan_id, position, type_id, quantity) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    id,
+                    position,
+                    i64::from(product.type_id),
+                    to_stored_u64(product.quantity)?
+                ],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -558,6 +689,7 @@ impl Store {
             copy += 1;
         };
         let new_id = insert_plan(&tx, &plan, &name, now)?;
+        copy_products(&tx, id, new_id)?;
         copy_scope(&tx, id, new_id)?;
         copy_invention(&tx, id, new_id)?;
         tx.execute(
@@ -623,6 +755,25 @@ mod tests {
             .into_iter()
             .find(|plan| plan.id == id)
             .expect("the plan")
+    }
+
+    fn product(type_id: TypeId, quantity: u64) -> PlanProduct {
+        PlanProduct { type_id, quantity }
+    }
+
+    fn products(store: &mut Store, id: i64) -> Vec<PlanProduct> {
+        store.plan_products(id).expect("the products")
+    }
+
+    fn product_rows(store: &mut Store, id: i64) -> i64 {
+        store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM plan_products WHERE plan_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .expect("count the rows")
     }
 
     #[test]
@@ -719,5 +870,117 @@ mod tests {
         assert_eq!(copied.stage, PlanStage::Planned);
         assert_eq!(copied.stage_override, None);
         assert_eq!(copied.effective_stage(), PlanStage::Planned);
+    }
+
+    #[test]
+    fn a_created_plan_reads_back_its_one_product() {
+        let (_dir, mut store) = open_temp();
+        let id = store.create_plan(&record(), 1_000).expect("create");
+
+        assert_eq!(products(&mut store, id), vec![product(PRODUCT, 10)]);
+        assert_eq!(product_rows(&mut store, id), 1);
+    }
+
+    #[test]
+    fn several_products_are_kept_in_order_and_followed_by_the_columns() {
+        let (_dir, mut store) = open_temp();
+        let id = store.create_plan(&record(), 1_000).expect("create");
+        let list = [product(587, 2), product(PRODUCT, 10)];
+
+        store.set_plan_products(id, &list, 2_000).expect("set");
+
+        let plan = store.plan(id).expect("plan").expect("the plan");
+        assert_eq!((plan.product, plan.quantity), (587, 2));
+        assert_eq!(plan.updated_at, 2_000);
+        assert_eq!(products(&mut store, id), list);
+        assert!(matches!(
+            store.plan_products(999),
+            Err(StoreError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn a_refused_list_leaves_the_stored_products_alone() {
+        let (_dir, mut store) = open_temp();
+        let id = store.create_plan(&record(), 1_000).expect("create");
+        let list = [product(587, 2), product(PRODUCT, 10)];
+        store.set_plan_products(id, &list, 2_000).expect("set");
+
+        assert!(matches!(
+            store.set_plan_products(id, &[], 3_000),
+            Err(StoreError::InvalidPlanStock(reason))
+                if reason == "a plan needs at least one product"
+        ));
+        assert!(matches!(
+            store.set_plan_products(id, &[product(PRODUCT, 0)], 3_000),
+            Err(StoreError::InvalidPlanStock(reason))
+                if reason == "a quantity must be at least one"
+        ));
+        assert!(matches!(
+            store.set_plan_products(id, &[product(PRODUCT, 1), product(PRODUCT, 2)], 3_000),
+            Err(StoreError::InvalidPlanStock(reason))
+                if reason == "each product appears once"
+        ));
+
+        assert_eq!(products(&mut store, id), list);
+        assert_eq!(
+            store.plan(id).expect("plan").expect("the plan").updated_at,
+            2_000
+        );
+    }
+
+    #[test]
+    fn saving_keeps_the_other_products_a_copy_gets_them_and_deleting_drops_the_rows() {
+        let (_dir, mut store) = open_temp();
+        let id = store.create_plan(&record(), 1_000).expect("create");
+        store
+            .set_plan_products(id, &[product(587, 2), product(PRODUCT, 10)], 2_000)
+            .expect("set");
+
+        let mut plan = store.plan(id).expect("plan").expect("the plan");
+        plan.quantity = 12;
+        store.save_plan(&plan, 3_000).expect("save");
+        assert_eq!(
+            products(&mut store, id),
+            vec![product(587, 12), product(PRODUCT, 10)]
+        );
+
+        let copy = store.duplicate_plan(id, 4_000).expect("duplicate");
+        assert_eq!(
+            products(&mut store, copy),
+            vec![product(587, 12), product(PRODUCT, 10)]
+        );
+
+        store.delete_plan(id).expect("delete");
+        assert_eq!(product_rows(&mut store, id), 0);
+        assert_eq!(
+            products(&mut store, copy),
+            vec![product(587, 12), product(PRODUCT, 10)]
+        );
+    }
+
+    #[test]
+    fn the_products_of_an_unknown_plan_are_not_found_and_set_writes_nothing() {
+        let (_dir, mut store) = open_temp();
+        assert!(matches!(
+            store.plan_products(999),
+            Err(StoreError::NotFound)
+        ));
+        assert!(matches!(
+            store.set_plan_products(999, &[product(PRODUCT, 1)], 2_000),
+            Err(StoreError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn a_plan_without_rows_falls_back_to_its_columns() {
+        let (_dir, mut store) = open_temp();
+        let id = store.create_plan(&record(), 1_000).expect("create");
+        store
+            .conn
+            .execute("DELETE FROM plan_products WHERE plan_id = ?1", params![id])
+            .expect("drop the rows");
+
+        assert_eq!(products(&mut store, id), vec![product(PRODUCT, 10)]);
     }
 }

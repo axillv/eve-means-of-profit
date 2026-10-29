@@ -78,6 +78,14 @@ CREATE TABLE plan_build (
     type_id INTEGER NOT NULL CHECK (type_id >= 0),
     PRIMARY KEY (plan_id, type_id)
 );
+CREATE TABLE plan_products (
+    plan_id INTEGER NOT NULL REFERENCES plans (id) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    type_id INTEGER NOT NULL CHECK (type_id >= 0),
+    quantity INTEGER NOT NULL CHECK (quantity >= 1),
+    PRIMARY KEY (plan_id, position),
+    UNIQUE (plan_id, type_id)
+);
 CREATE TABLE plan_me (
     plan_id INTEGER NOT NULL REFERENCES plans (id) ON DELETE CASCADE,
     type_id INTEGER NOT NULL CHECK (type_id >= 0),
