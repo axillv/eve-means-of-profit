@@ -9,6 +9,7 @@ use crate::{dock, item_panel};
 mod name_dialog;
 mod tree;
 mod value;
+pub mod worth;
 
 #[derive(Debug, Default)]
 pub struct AssetsPage;
