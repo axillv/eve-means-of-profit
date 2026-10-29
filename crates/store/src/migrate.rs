@@ -306,6 +306,22 @@ CREATE TABLE price_rule_changes (
     fixed INTEGER CHECK (fixed >= 0),
     PRIMARY KEY (target_kind, target_id, at)
 ) WITHOUT ROWID;
+CREATE TABLE blueprint_fetches (
+    character_id INTEGER PRIMARY KEY,
+    fetched_at INTEGER NOT NULL
+);
+CREATE TABLE blueprints (
+    character_id INTEGER NOT NULL,
+    item_id INTEGER NOT NULL,
+    type_id INTEGER NOT NULL,
+    location_id INTEGER NOT NULL,
+    flag TEXT,
+    stack INTEGER NOT NULL CHECK (stack >= 1),
+    runs INTEGER CHECK (runs IS NULL OR (runs >= 1 AND stack = 1)),
+    me INTEGER NOT NULL CHECK (me BETWEEN 0 AND 10),
+    te INTEGER NOT NULL CHECK (te BETWEEN 0 AND 20),
+    PRIMARY KEY (character_id, item_id)
+) WITHOUT ROWID;
 ";
 
 /// An open database. Every method on it runs in one transaction.

@@ -4,6 +4,7 @@
 //! [`Store::open`] creates the file, or sets an earlier test-build file aside and creates a new one. Each method runs in one transaction. Names are
 //! trimmed and unique ignoring case. Money, volumes and rates are whole numbers.
 
+pub mod blueprints;
 pub mod costs;
 pub mod error;
 pub mod facilities;
