@@ -18,7 +18,6 @@ mod tests {
     use egui::{Key, Modifiers, vec2};
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable, by};
-    use eve_means_of_profit::build::prices::Prices;
     use eve_means_of_profit::characters::list::{
         date_text, kind_view, login_view, parse_date, plex_text,
     };
@@ -125,6 +124,7 @@ mod tests {
         removed: Vec<u64>,
         opened: Vec<String>,
         begun: usize,
+        keychain: usize,
     }
 
     #[derive(Clone)]
@@ -257,6 +257,7 @@ mod tests {
         }
 
         fn keychain_warning(&self) -> Option<String> {
+            self.write(|log| log.keychain += 1);
             self.warning.clone()
         }
 
@@ -426,27 +427,111 @@ mod tests {
         drop(connection);
     }
 
-    /// Opens the app on the Characters page. Main's data is saved first, so the app loads it.
+    /// Opens the app on the Characters page. Main's data is saved first, so the app loads it. The
+    /// start-up refresh is left to settle and the fake's log is cleared, so a test sees only what
+    /// it caused.
     fn open(env: &Env, eve: &FakeEve) -> Harness<'static, App> {
+        let mut harness = open_raw(env, eve);
+        drop(settle_start(&mut harness));
+        clear_log(&mut harness, eve);
+        harness
+    }
+
+    /// Like [`open`], without waiting for the start-up refresh or clearing its log.
+    fn open_raw(env: &Env, eve: &FakeEve) -> Harness<'static, App> {
         open_with(env, eve, true)
+    }
+
+    /// Like [`open`], but saves no character file: the session holds only what the fake's login
+    /// lists.
+    fn open_without_saved(env: &Env, eve: &FakeEve) -> Harness<'static, App> {
+        let mut harness = open_app(env, eve, true);
+        drop(settle_start(&mut harness));
+        clear_log(&mut harness, eve);
+        harness
+    }
+
+    /// Runs frames until the start-up character refresh and its price request are both over.
+    /// Returns the `explicit` mark of every price answer that arrived.
+    fn settle_start(harness: &mut Harness<'_, App>) -> Vec<bool> {
+        let mut prices = Vec::new();
+        let mut loaded = false;
+        let mut busy = true;
+        let mut running = true;
+        for _ in 0..500 {
+            harness.step();
+            prices.extend(price_requests(harness));
+            loaded = harness.state_mut().shared_mut().session.loaded();
+            busy = disabled(harness, "Refresh all");
+            running = harness.state_mut().shared_mut().market.running();
+            if loaded && !prices.is_empty() && !busy && !running {
+                return prices;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!(
+            "the start-up refresh did not finish: loaded {loaded}, prices {prices:?}, busy {busy}, running {running}"
+        );
+    }
+
+    /// Clears what the fake and the market have recorded, so a test sees only its own work.
+    fn clear_log(harness: &mut Harness<'_, App>, eve: &FakeEve) {
+        eve.write(|log| {
+            log.refreshed.clear();
+            log.named.clear();
+            log.removed.clear();
+            log.opened.clear();
+            log.begun = 0;
+        });
+        drop(harness.state_mut().shared_mut().market.take_outcomes());
+    }
+
+    /// The `explicit` marks of the price requests that have finished since the last call.
+    fn price_requests(harness: &mut Harness<'_, App>) -> Vec<bool> {
+        harness
+            .state_mut()
+            .shared_mut()
+            .market
+            .take_outcomes()
+            .into_iter()
+            .map(|outcome| outcome.explicit)
+            .collect()
+    }
+
+    /// Runs frames until `wanted` price answers have arrived, and returns their marks.
+    fn settled_price_requests(harness: &mut Harness<'_, App>, wanted: usize) -> Vec<bool> {
+        let mut all = Vec::new();
+        for _ in 0..500 {
+            harness.step();
+            all.extend(price_requests(harness));
+            if all.len() >= wanted {
+                return all;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("only {} price answers arrived, wanted {wanted}", all.len());
     }
 
     /// Like [`open`]; with `hooks` false the page uses its own client id check and browser opener.
     fn open_with(env: &Env, eve: &FakeEve, hooks: bool) -> Harness<'static, App> {
         saved::save_character(&esi_dir(env), &main_data()).expect("Main's data saved");
+        open_app(env, eve, hooks)
+    }
+
+    /// Opens the app with whatever the fake's login and the saved files already hold.
+    fn open_app(env: &Env, eve: &FakeEve, hooks: bool) -> Harness<'static, App> {
         let config = AppConfig {
             data_dir: env.data.clone(),
             cache_dir: env.cache.clone(),
             fetch: Box::new(NoNetwork),
             clock: Box::new(|| NOW),
             eve: Box::new(eve.clone()),
-            market: Box::new(crate::offline::Offline),
+            market: Box::new(NoForge),
         };
         let mut harness = Harness::builder()
             .with_size(vec2(1280.0, 800.0))
             .with_max_steps(crate::SETTLE_STEPS)
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
-        harness.state_mut().shared_mut().market = Arc::new(Prices::new(Box::new(NoForge)));
         if hooks {
             set_client_id_present(&harness.ctx, true);
             let log = Arc::clone(&eve.log);
@@ -527,7 +612,27 @@ mod tests {
         panic!("no notice came");
     }
 
+    /// The buttons labelled `Refresh all`, from the top of the window down: the page's own first,
+    /// the status line's last.
+    fn refresh_buttons<'a>(harness: &'a Harness<'a, App>) -> Vec<egui_kittest::Node<'a>> {
+        let mut buttons: Vec<egui_kittest::Node<'a>> = harness
+            .get_all_by_label("Refresh all")
+            .filter(|node| node.accesskit_node().role() == Role::Button)
+            .collect();
+        buttons.sort_by(|a, b| a.rect().center().y.total_cmp(&b.rect().center().y));
+        buttons
+    }
+
+    /// Whether the page's button labelled `label` is disabled. The status line also draws a
+    /// `Refresh all`, so that one is picked out by its place above the status line.
     fn disabled(harness: &Harness<'_, App>, label: &str) -> bool {
+        if label == "Refresh all" {
+            return refresh_buttons(harness)
+                .first()
+                .expect("a button")
+                .accesskit_node()
+                .is_disabled();
+        }
         harness
             .get_all_by_label(label)
             .find(|node| node.accesskit_node().role() == Role::Button)
@@ -536,13 +641,21 @@ mod tests {
             .is_disabled()
     }
 
-    /// Clicks the `nth` node labelled `label` and waits until the job it started is over.
+    /// Clicks the `nth` button labelled `label` and waits until the job it started is over.
     fn press(harness: &mut Harness<'_, App>, label: &str, nth: usize) {
-        harness
-            .get_all_by_label(label)
-            .nth(nth)
-            .expect("a button")
-            .click();
+        if label == "Refresh all" {
+            refresh_buttons(harness)
+                .into_iter()
+                .nth(nth)
+                .expect("a button")
+                .click();
+        } else {
+            harness
+                .get_all_by_label(label)
+                .nth(nth)
+                .expect("a button")
+                .click();
+        }
         frames(harness);
         until(harness, "the job", |h| !disabled(h, "Refresh all"));
     }
@@ -790,7 +903,8 @@ mod tests {
     #[test]
     fn rows_are_sorted_by_name_with_the_login_and_the_age_of_each_kind() {
         let env = env();
-        let eve = FakeEve::new(&env, partial);
+        // Nothing is due, so the start-up refresh leaves the saved ages as they are.
+        let eve = FakeEve::new(&env, all_not_yet);
         let mut harness = open(&env, &eve);
         until(&mut harness, "the rows", |h| {
             shown(h, "login expired: log in again")
@@ -853,14 +967,93 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_fetched_without_a_click() {
+    fn the_session_load_refreshes_every_character_and_the_prices_once() {
         let env = env();
         let eve = FakeEve::new(&env, partial);
-        let mut harness = open(&env, &eve);
+        let mut harness = open_raw(&env, &eve);
+        assert_eq!(settle_start(&mut harness), vec![false]);
+        assert_eq!(eve.log(|log| log.refreshed.clone()), vec![ALT, MAIN]);
         for _ in 0..20 {
             frames(&mut harness);
         }
+        assert_eq!(eve.log(|log| log.refreshed.clone()), vec![ALT, MAIN]);
+        assert!(price_requests(&mut harness).is_empty());
+    }
+
+    #[test]
+    fn the_status_line_and_the_page_each_refresh_all() {
+        let env = env();
+        let eve = FakeEve::new(&env, partial);
+        let mut harness = open(&env, &eve);
+        assert_eq!(refresh_buttons(&harness).len(), 2);
+
+        // The status line's button refreshes the characters and the prices, explicitly.
+        press(&mut harness, "Refresh all", 1);
+        assert_eq!(eve.log(|log| log.refreshed.clone()), vec![ALT, MAIN]);
+        assert_eq!(settled_price_requests(&mut harness, 1), vec![true]);
+
+        // The page's own button stays character-only.
+        press(&mut harness, "Refresh all", 0);
+        assert_eq!(
+            eve.log(|log| log.refreshed.clone()),
+            vec![ALT, MAIN, ALT, MAIN]
+        );
+        assert!(price_requests(&mut harness).is_empty());
+    }
+
+    #[test]
+    fn refresh_all_without_characters_still_asks_for_prices() {
+        let env = env();
+        let mut eve = FakeEve::new(&env, partial);
+        eve.characters.clear();
+        // No character file is saved either, so nothing outside the fake's login can add one.
+        let mut harness = open_without_saved(&env, &eve);
+        // The login itself is empty, not just the fake's whitelist.
+        assert!(
+            harness
+                .state_mut()
+                .shared_mut()
+                .session
+                .characters()
+                .is_empty()
+        );
         assert!(eve.log(|log| log.refreshed.is_empty()));
+        drop(price_requests(&mut harness));
+
+        press(&mut harness, "Refresh all", 1);
+        assert!(eve.log(|log| log.refreshed.is_empty()));
+        assert_eq!(settled_price_requests(&mut harness, 1), vec![true]);
+    }
+
+    #[test]
+    fn a_press_while_a_character_refresh_runs_starts_no_second_job() {
+        let env = env();
+        let eve = FakeEve::new(&env, partial);
+        let mut harness = open(&env, &eve);
+        eve.hold.store(true, Ordering::Relaxed);
+
+        refresh_buttons(&harness)
+            .into_iter()
+            .nth(1)
+            .expect("the status line's button")
+            .click();
+        until(&mut harness, "the first character", |_| {
+            eve.log(|log| log.refreshed.len()) == 1
+        });
+
+        refresh_buttons(&harness)
+            .into_iter()
+            .nth(1)
+            .expect("the status line's button")
+            .click();
+        for _ in 0..10 {
+            harness.step();
+        }
+        assert_eq!(eve.log(|log| log.refreshed.len()), 1);
+
+        eve.hold.store(false, Ordering::Relaxed);
+        until(&mut harness, "the refresh", |h| !disabled(h, "Refresh all"));
+        assert_eq!(eve.log(|log| log.refreshed.clone()), vec![ALT, MAIN]);
     }
 
     #[test]
@@ -868,6 +1061,10 @@ mod tests {
         let env = env();
         let eve = FakeEve::new(&env, partial);
         let mut harness = open(&env, &eve);
+        let (main_before, alt_before) = {
+            let session = &harness.state_mut().shared_mut().session;
+            (session.revision(MAIN), session.revision(ALT))
+        };
         press(&mut harness, "Refresh", 1);
         assert_eq!(eve.log(|log| log.refreshed.clone()), vec![MAIN]);
         assert_eq!(
@@ -879,8 +1076,8 @@ mod tests {
             .expect("Main's file");
         assert!(saved_main.jobs.is_some());
         let session = &harness.state_mut().shared_mut().session;
-        assert_eq!(session.revision(MAIN), 1);
-        assert_eq!(session.revision(ALT), 0);
+        assert_eq!(session.revision(MAIN), main_before + 1);
+        assert_eq!(session.revision(ALT), alt_before);
         let named = session
             .structures()
             .get(&HOME_FORT)
@@ -894,8 +1091,11 @@ mod tests {
         let env = env();
         let eve = FakeEve::new(&env, all_not_yet);
         let mut harness = open(&env, &eve);
+        clear_notices(&mut harness);
+        // The page's own button is the first one: the status line draws one below the page.
         press(&mut harness, "Refresh all", 0);
         assert_eq!(eve.log(|log| log.refreshed.clone()), vec![ALT, MAIN]);
+        assert!(price_requests(&mut harness).is_empty());
         let session = &harness.state_mut().shared_mut().session;
         assert_eq!(session.revision(MAIN), 0);
         assert_eq!(session.revision(ALT), 0);
@@ -910,6 +1110,8 @@ mod tests {
         let env = env();
         let eve = FakeEve::new(&env, wallet_fails);
         let mut harness = open(&env, &eve);
+        clear_notices(&mut harness);
+        let before = harness.state_mut().shared_mut().session.revision(MAIN);
         press(&mut harness, "Refresh", 1);
         assert_eq!(
             notices(&mut harness),
@@ -919,7 +1121,7 @@ mod tests {
             )]
         );
         let session = &harness.state_mut().shared_mut().session;
-        assert_eq!(session.revision(MAIN), 1);
+        assert_eq!(session.revision(MAIN), before + 1);
         assert!(
             session
                 .character_data(MAIN)
@@ -932,6 +1134,7 @@ mod tests {
         let env = env();
         let eve = FakeEve::new(&env, limited);
         let mut harness = open(&env, &eve);
+        clear_notices(&mut harness);
         press(&mut harness, "Refresh", 1);
         assert_eq!(
             notices(&mut harness),
@@ -944,6 +1147,7 @@ mod tests {
         let env = env();
         let eve = FakeEve::new(&env, expired);
         let mut harness = open(&env, &eve);
+        clear_notices(&mut harness);
         press(&mut harness, "Refresh", 1);
         assert_eq!(
             notices(&mut harness),
@@ -960,13 +1164,15 @@ mod tests {
         let mut eve = FakeEve::new(&env, partial);
         eve.failed_names = 1;
         let mut harness = open(&env, &eve);
+        clear_notices(&mut harness);
+        let before = harness.state_mut().shared_mut().session.revision(MAIN);
         press(&mut harness, "Refresh", 1);
         assert_eq!(
             notices(&mut harness),
             vec!["Could not get 1 structure names from EVE. The last names are kept.".to_owned()]
         );
         let session = &harness.state_mut().shared_mut().session;
-        assert_eq!(session.revision(MAIN), 1);
+        assert_eq!(session.revision(MAIN), before + 1);
     }
 
     #[test]
@@ -1092,6 +1298,15 @@ mod tests {
         let mut harness = open(&env, &eve);
         until_notice(&mut harness);
         assert_eq!(notices(&mut harness), vec![KEYCHAIN.to_owned()]);
+        // The notice can arrive one frame before the table draws its warning line.
+        until(&mut harness, "the warning above the table", |h| {
+            let Some(main) = h.get_all_by_label("Main").next() else {
+                return false;
+            };
+            let main_y = main.rect().center().y;
+            h.query_all_by_label(KEYCHAIN)
+                .any(|node| node.rect().center().y < main_y)
+        });
         let main_y = row_y(&harness, "Main");
         assert!(
             harness
@@ -1124,7 +1339,9 @@ mod tests {
     fn the_jeve_panel_lists_its_characters_and_whether_the_app_uses_them() {
         let env = env();
         let jeve = jeve_profile();
-        let mut eve = FakeEve::new(&env, partial);
+        // Nothing is due, so the start-up refresh leaves Alt's jEve data in use until the test
+        // replaces it below.
+        let mut eve = FakeEve::new(&env, all_not_yet);
         eve.jeve = Some(jeve.path().to_path_buf());
         let mut harness = open(&env, &eve);
         until(&mut harness, "the jEve rows", |h| shown(h, "Hauler"));
@@ -1293,8 +1510,8 @@ mod tests {
     fn the_buttons_say_what_is_running_while_it_runs() {
         let env = env();
         let eve = FakeEve::new(&env, partial);
-        eve.hold.store(true, Ordering::Relaxed);
         let mut harness = open(&env, &eve);
+        eve.hold.store(true, Ordering::Relaxed);
         harness
             .get_all_by_label("Refresh")
             .nth(1)
@@ -1302,7 +1519,11 @@ mod tests {
             .click();
         frames(&mut harness);
         assert!(disabled(&harness, "Refresh all"));
-        harness.get_by_label("Refresh all").hover();
+        refresh_buttons(&harness)
+            .into_iter()
+            .next()
+            .expect("the page's button")
+            .hover();
         frames(&mut harness);
         assert!(shown(&harness, "Busy: refreshing Main"));
         eve.hold.store(false, Ordering::Relaxed);
@@ -1386,6 +1607,10 @@ mod tests {
     /// listing of jEve's folder and its first ask for the keychain warning happen during the wait.
     fn first_show_during_a_login(eve: &FakeEve, env: &Env) -> Harness<'static, App> {
         let mut harness = open(env, eve);
+        if eve.warning.is_some() {
+            // The start-up ask may still be on its way; let it land before the state is forgotten.
+            until(&mut harness, "the keychain notice", |h| shown(h, KEYCHAIN));
+        }
         harness.get_by_label("Add character").click();
         until(&mut harness, "the waiting text", |h| {
             shown(h, "Waiting for the EVE login in your browser…")
@@ -1424,7 +1649,9 @@ mod tests {
         }
         assert_eq!(
             notices(&mut harness),
-            vec![KEYCHAIN.to_owned(), KEYCHAIN.to_owned()]
+            vec![KEYCHAIN.to_owned(), KEYCHAIN.to_owned()],
+            "keychain asks: {}",
+            eve.log(|log| log.keychain)
         );
         frames(&mut harness);
         assert!(shown(&harness, KEYCHAIN));

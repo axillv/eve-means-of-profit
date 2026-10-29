@@ -668,6 +668,46 @@ mod tests {
     }
 
     #[test]
+    fn refresh_all_keeps_a_notice_and_dismiss_or_its_action_removes_it() {
+        use eve_means_of_profit::status::{self, Action, Notice};
+
+        struct State {
+            notices: Vec<Notice>,
+            action: Option<Action>,
+        }
+        let mut harness = Harness::new_ui_state(
+            |ui, state: &mut State| {
+                state.action =
+                    status::show(ui, &Style::eve_dense(), &mut state.notices, None, "idle");
+            },
+            State {
+                notices: vec![Notice::info("First notice")],
+                action: None,
+            },
+        );
+        harness.run();
+        assert!(harness.query_all_by_label("First notice").next().is_some());
+
+        harness.get_by_label("Refresh all").click();
+        harness.step();
+        assert_eq!(harness.state().notices.len(), 1);
+        assert_eq!(harness.state().action, Some(Action::RefreshAll));
+        assert!(harness.query_all_by_label("First notice").next().is_some());
+
+        harness.get_by_label("Dismiss").click();
+        harness.step();
+        assert!(harness.state().notices.is_empty());
+
+        harness.state_mut().notices =
+            vec![Notice::info("Update ready").with_action(Action::Update { build: 42 })];
+        harness.run();
+        harness.get_by_label("Update").click();
+        harness.step();
+        assert_eq!(harness.state().action, Some(Action::Update { build: 42 }));
+        assert!(harness.state().notices.is_empty());
+    }
+
+    #[test]
     fn ctrl_comma_opens_the_settings_page_and_a_density_is_saved() {
         let folders = Folders::new();
         folders.install_game_data();

@@ -1,5 +1,6 @@
-//! The Characters page: the login characters and jEve's data. Nothing is fetched without a click:
-//! `Refresh`, `Refresh all` and a finished login are the only things that fetch.
+//! The Characters page: the login characters and jEve's data. Everything is fetched once after the
+//! saved session loads; after that, `Refresh all`, a finished login and one character's `Refresh`
+//! are the only things that fetch.
 //!
 //! The page keeps its state in the egui context, under one id, because the app builds it as a
 //! unit value. Jobs on the worker send [`Msg`]s over a channel the page owns; every panel's
@@ -189,6 +190,33 @@ fn send(tx: &Sender<Msg>, ctx: &Context, msg: Msg) {
     // The receiver is gone only when the app is closing, and then nobody needs the message.
     drop(tx.send(msg));
     ctx.request_repaint();
+}
+
+/// Takes in what the jobs have sent. Runs every frame, whatever page is shown, so a refresh that
+/// ends while another page is open still lands.
+pub fn tick(cx: &mut Shared, ctx: &Context) {
+    let held = handle(ctx);
+    let mut inner = lock(&held.0);
+    drain(&mut inner, cx, ctx);
+}
+
+/// Refreshes every login character and asks for The Forge prices. `explicit` is set when the player
+/// pressed `Refresh all`, so a price answer that is too soon is shown only then. A character job
+/// already running is left alone; `Prices::refresh` refuses a second price request itself.
+pub fn refresh_all(cx: &mut Shared, ctx: &Context, explicit: bool) {
+    let held = handle(ctx);
+    let mut inner = lock(&held.0);
+    if inner.busy.is_none() {
+        let ids: Vec<u64> = cx
+            .session
+            .characters()
+            .iter()
+            .map(|character| character.id)
+            .collect();
+        start_refresh(&mut inner, cx, ctx, &ids);
+    }
+    let now = (cx.clock)();
+    cx.market.refresh(&cx.worker, now, explicit);
 }
 
 /// Draws the body of one panel of this page.

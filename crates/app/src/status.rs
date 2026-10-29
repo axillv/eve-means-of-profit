@@ -3,7 +3,7 @@
 //! Activity (a background update) shows first. Otherwise the first notice shows, with
 //! ` (1 of <n>)` when there are several. With no notice, the idle text shows.
 
-use egui::Ui;
+use egui::{Align, Layout, Ui};
 
 use crate::theme::Style;
 
@@ -17,11 +17,14 @@ pub enum Level {
     Error,
 }
 
-/// A button on a notice. Pressing it also removes the notice.
+/// A button on the status line. A notice's own button also removes the notice; `Refresh all` does
+/// not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     /// Downloads and imports build `build` in the background.
     Update { build: u64 },
+    /// Refreshes every login character and The Forge prices.
+    RefreshAll,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +66,7 @@ pub fn show(
     idle: &str,
 ) -> Option<Action> {
     let mut action = None;
+    let mut notice_action = false;
     let mut dismiss = false;
     egui::Panel::bottom("status").show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -85,6 +89,7 @@ pub fn show(
                     && ui.button(button_text(pending)).clicked()
                 {
                     action = Some(pending);
+                    notice_action = true;
                 }
                 if ui.button("Dismiss").clicked() {
                     dismiss = true;
@@ -92,9 +97,14 @@ pub fn show(
             } else {
                 ui.label(idle);
             }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("Refresh all").clicked() {
+                    action = Some(Action::RefreshAll);
+                }
+            });
         });
     });
-    if (dismiss || action.is_some()) && !notices.is_empty() {
+    if (dismiss || notice_action) && !notices.is_empty() {
         notices.remove(0);
     }
     action
@@ -103,6 +113,7 @@ pub fn show(
 fn button_text(action: Action) -> &'static str {
     match action {
         Action::Update { .. } => "Update",
+        Action::RefreshAll => "Refresh all",
     }
 }
 

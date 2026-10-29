@@ -460,6 +460,7 @@ impl App {
     /// One frame: take the worker's results, then draw.
     pub fn show(&mut self, ui: &mut Ui) {
         self.drain_events();
+        characters::tick(&mut self.shared, &self.ctx);
         history::background_refresh(&mut self.shared, &mut self.history_checked);
         self.refresh_industry_when_due();
         net_worth::record::tick(
@@ -484,8 +485,12 @@ impl App {
             activity.as_deref(),
             &idle,
         );
-        if let Some(Action::Update { build }) = clicked {
-            self.start_update(build);
+        match clicked {
+            Some(Action::Update { build }) => self.start_update(build),
+            Some(Action::RefreshAll) => {
+                characters::refresh_all(&mut self.shared, &self.ctx, true);
+            }
+            None => {}
         }
         match self.startup {
             Startup::Ready => self.pages(ui),
@@ -762,6 +767,7 @@ impl App {
             ))),
         }
         self.shared.session.mark_loaded();
+        characters::refresh_all(&mut self.shared, &self.ctx, false);
     }
 
     fn checked(&mut self, first_run: bool, result: Result<SdeBuild, FetchError>) {

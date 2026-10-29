@@ -747,10 +747,24 @@ mod tests {
         for _ in 0..10 {
             harness.run();
         }
+        let started = *refreshes.lock().unwrap_or_else(PoisonError::into_inner);
+        let counted_at_start = *counted.lock().unwrap_or_else(PoisonError::into_inner);
+        // The start refreshed Main once and fetched the file once.
+        assert_eq!(started, 1);
+        assert_eq!(counted_at_start, 1);
 
-        assert_eq!(*refreshes.lock().unwrap_or_else(PoisonError::into_inner), 0);
-        // The setup fetched the file once; the tree must not ask for another.
-        assert_eq!(*counted.lock().unwrap_or_else(PoisonError::into_inner), 1);
+        // The tree must not ask for another refresh or another file while it is shown.
+        for _ in 0..10 {
+            harness.run();
+        }
+        assert_eq!(
+            *refreshes.lock().unwrap_or_else(PoisonError::into_inner),
+            started
+        );
+        assert_eq!(
+            *counted.lock().unwrap_or_else(PoisonError::into_inner),
+            counted_at_start
+        );
     }
 
     #[test]

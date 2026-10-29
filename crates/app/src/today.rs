@@ -126,7 +126,14 @@ pub fn show(ui: &mut Ui, cx: &mut Shared) -> Option<Page> {
         order_rows::entries(cx, now)
     };
 
-    ui.heading("Today");
+    ui.horizontal(|ui| {
+        ui.heading("Today");
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui.button("Refresh all").clicked() {
+                crate::characters::refresh_all(cx, ui.ctx(), true);
+            }
+        });
+    });
     ui.add_space(HEADING_GAP);
 
     let left_width = (ui.available_width() - RIGHT_WIDTH - COLUMN_GAP).max(0.0);

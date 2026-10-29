@@ -566,6 +566,42 @@ mod tests {
             })
     }
 
+    /// The buttons labelled `Refresh all`, from the top of the window down.
+    fn refresh_buttons<'a>(harness: &'a Harness<'a, App>) -> Vec<egui_kittest::Node<'a>> {
+        let mut buttons: Vec<egui_kittest::Node<'a>> = harness
+            .get_all_by_label("Refresh all")
+            .filter(|node| node.accesskit_node().role() == Role::Button)
+            .collect();
+        buttons.sort_by(|a, b| a.rect().center().y.total_cmp(&b.rect().center().y));
+        buttons
+    }
+
+    /// The `explicit` marks of the price answers since the last call.
+    fn price_marks(harness: &mut Harness<'_, App>) -> Vec<bool> {
+        harness
+            .state_mut()
+            .shared_mut()
+            .market
+            .take_outcomes()
+            .into_iter()
+            .map(|outcome| outcome.explicit)
+            .collect()
+    }
+
+    /// Runs frames until the start-up character refresh and its price answer are over.
+    fn settle_start(harness: &mut Harness<'_, App>, refreshes: &Arc<Mutex<usize>>) {
+        for _ in 0..500 {
+            harness.step();
+            let done = *refreshes.lock().unwrap_or_else(PoisonError::into_inner) >= 1
+                && !harness.state_mut().shared_mut().market.running();
+            if done {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the start-up refresh did not finish");
+    }
+
     /// The texts of the notices the app holds.
     fn notices(harness: &mut Harness<'_, App>) -> Vec<String> {
         harness
@@ -990,7 +1026,7 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_fetched_at_start_and_old_data_is_noticed() {
+    fn the_start_refreshes_the_characters_and_old_data_is_noticed() {
         let env = env();
         saved::save_character(&esi_dir(&env), &main_data()).expect("Main's data saved");
         let eve = FakeEve::new(vec![character(MAIN, "Main")], None);
@@ -1000,7 +1036,7 @@ mod tests {
         for _ in 0..10 {
             harness.run();
         }
-        assert_eq!(*refreshes.lock().unwrap_or_else(PoisonError::into_inner), 0);
+        assert_eq!(*refreshes.lock().unwrap_or_else(PoisonError::into_inner), 1);
         assert!(
             notices(&mut harness).contains(&OLD_NOTICE.to_owned()),
             "{:?}",
@@ -1357,6 +1393,67 @@ mod tests {
             shown(&harness, "jEve data"),
             "Add character shows Characters"
         );
+    }
+
+    #[test]
+    fn the_status_line_and_the_today_heading_each_refresh_all() {
+        let env = env();
+        saved::save_character(&esi_dir(&env), &main_data()).expect("Main's data saved");
+        let eve = FakeEve::new(vec![character(MAIN, "Main")], None);
+        let refreshes = eve.refreshes();
+        let mut harness = start(&env, eve, NOW);
+        loaded(&mut harness);
+        settle_start(&mut harness, &refreshes);
+        drop(price_marks(&mut harness));
+        let base = *refreshes.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(base, 1);
+
+        // The status line's button is the lower one.
+        assert_eq!(refresh_buttons(&harness).len(), 2);
+        refresh_buttons(&harness)
+            .into_iter()
+            .nth(1)
+            .expect("the status line's button")
+            .click();
+        let mut marks = Vec::new();
+        for _ in 0..500 {
+            harness.step();
+            marks.extend(price_marks(&mut harness));
+            if *refreshes.lock().unwrap_or_else(PoisonError::into_inner) == base + 1
+                && !marks.is_empty()
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            *refreshes.lock().unwrap_or_else(PoisonError::into_inner),
+            base + 1
+        );
+        assert_eq!(marks, vec![true]);
+
+        // The Today heading's button is the upper one.
+        refresh_buttons(&harness)
+            .into_iter()
+            .next()
+            .expect("the heading's button")
+            .click();
+        let mut marks = Vec::new();
+        for _ in 0..500 {
+            harness.step();
+            marks.extend(price_marks(&mut harness));
+            if *refreshes.lock().unwrap_or_else(PoisonError::into_inner) == base + 2
+                && !marks.is_empty()
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            *refreshes.lock().unwrap_or_else(PoisonError::into_inner),
+            base + 2
+        );
+        assert_eq!(marks, vec![true]);
     }
 
     #[test]
