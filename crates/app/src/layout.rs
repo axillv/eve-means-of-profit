@@ -7,3 +7,4 @@ pub mod model;
 pub mod panels;
 pub mod saved;
 pub mod text;
+pub mod user;
