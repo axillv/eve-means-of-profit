@@ -929,7 +929,7 @@ mod tests {
     use std::io::Write;
     use std::ops::ControlFlow;
     use std::path::Path;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use mop_core::stock::{Asset, CharacterAssets, Places, StockScope};
     use mop_esi::character_data::{CharacterData, Fetched, OwnedAssets};
@@ -1122,6 +1122,10 @@ mod tests {
             store,
             worker: Worker::spawn(egui::Context::default(), Box::new(NoFetch)),
             market: Arc::new(Prices::new(Box::new(NoHttp))),
+            // The net worth copy job that would ask for PLEX never runs in these tests, so the
+            // client is never used.
+            plex_http: Arc::new(mop_market::http::UreqHttp::new()),
+            copy_notices: Arc::new(Mutex::new(Vec::new())),
             style: Style::eve_dense(),
             density: Density::Normal,
             rail_icons_only: false,

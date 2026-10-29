@@ -32,15 +32,16 @@ use std::error::Error;
 use std::fs;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 
 use egui::{Context, Key, Modifiers, Ui, ViewportCommand};
 use egui_dock::DockState;
 use mop_esi::character_data::Refreshed;
 use mop_esi::error::EsiError;
 use mop_esi::industry::{self as esi_industry, IndustryData, IndustryKind};
+use mop_market::cache::Http;
 use mop_sde::{
     Fetch, FetchError, ImportReport, Sde, SdeBuild, SdeError, download_and_import, latest_build,
     needs_update, update_due,
@@ -132,6 +133,10 @@ pub struct Shared {
     pub worker: Worker,
     /// The Forge prices the Build page reads, shared with the Items and the Orders pages.
     pub market: Arc<build::prices::Prices>,
+    /// The client for the one global PLEX market, and the notices the price-copy jobs leave for
+    /// the next frame, which `net_worth::record::tick` moves into `notices`.
+    pub plex_http: Arc<dyn Http + Send + Sync>,
+    pub copy_notices: Arc<Mutex<Vec<Notice>>>,
     pub style: Style,
     pub density: Density,
     /// Whether the rail shows icons alone, saved by an earlier run.
@@ -293,6 +298,8 @@ impl App {
                 market: Arc::new(
                     build::prices::Prices::new(config.market).recording(Arc::clone(&recorder)),
                 ),
+                plex_http: Arc::new(mop_market::http::UreqHttp::new()),
+                copy_notices: Arc::new(Mutex::new(Vec::new())),
                 style,
                 density: settings.density,
                 rail_icons_only: settings.rail_icons_only,

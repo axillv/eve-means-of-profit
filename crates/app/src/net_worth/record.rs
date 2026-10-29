@@ -2,12 +2,17 @@
 //! items at that moment, so the net worth chart can value the past.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use mop_core::industry::{Activity, RecipeBook, TypeId};
 use mop_core::money::Money;
 use mop_core::net_worth::{CharacterKey, Holdings, Record, Snapshot, points};
 use mop_core::stock::Asset;
 use mop_esi::character_data::{CharacterData, Job, JobStatus, Order};
+use mop_market::cache::Http;
+use mop_market::fuzzwork::{Side, SummaryRow};
+use mop_market::plex::{self, PLEX};
 use mop_sde::query::Sde;
 use mop_store::Store;
 use mop_store::price_history::PointPrices;
@@ -24,6 +29,10 @@ const TOO_LARGE: &str = "the sum is too large";
 /// characters seen so far. `started` is kept apart from `seen`: a first call that sees no
 /// characters still counts as the first call, so the characters that appear later are recorded.
 pub fn tick(shared: &mut Shared, seen: &mut BTreeMap<u64, u64>, started: &mut bool) {
+    // The price-copy jobs run on the worker and leave their errors here; each of them asks for
+    // a repaint, so the next frame shows them.
+    let pending: Vec<Notice> = std::mem::take(&mut *lock(&shared.copy_notices));
+    shared.notices.extend(pending);
     let first = !*started;
     *started = true;
     let ids: Vec<u64> = shared.session.characters().iter().map(|c| c.id).collect();
@@ -248,44 +257,113 @@ fn latest_types(store: &mut Store, now: i64) -> Result<BTreeSet<TypeId>, String>
     Ok(types)
 }
 
-/// Saves the held prices of the assets, the job outputs and the orders' items at `now`.
+/// Saves the held prices of the assets, the job outputs and the orders' items at `now`, with
+/// PLEX's price of the same moment, on the worker. One job per frame that wrote records: the job
+/// asks the global PLEX market and writes the copy through its own connection to the user
+/// database, so neither the request nor the write holds up a frame.
 fn copy_prices(shared: &mut Shared, now: i64, recorded: &[u64]) {
     let held = shared.market.held();
-    let Some(published_at) = held.published_at else {
-        return;
-    };
-    let mut types = match latest_types(&mut shared.store, now) {
-        Ok(types) => types,
-        Err(error) => {
-            shared.notices.push(Notice::error(format!(
-                "Could not save the prices of this point: {error}"
-            )));
-            return;
+    let mut rows: BTreeMap<(TypeId, Side), SummaryRow> = BTreeMap::new();
+    // Without a held download the copy holds the fetched PLEX price alone, so no file row is
+    // read and nothing of the file's types is needed.
+    if held.published_at.is_some() {
+        let mut types = match latest_types(&mut shared.store, now) {
+            Ok(types) => types,
+            Err(error) => {
+                shared.notices.push(Notice::error(format!(
+                    "Could not save the prices of this point: {error}"
+                )));
+                return;
+            }
+        };
+        for id in recorded {
+            let orders = shared
+                .session
+                .character_data(*id)
+                .and_then(|data| data.orders.as_ref());
+            if let Some(orders) = orders {
+                types.extend(orders.data.iter().map(|order| order.type_id));
+            }
         }
-    };
-    for id in recorded {
-        let orders = shared
-            .session
-            .character_data(*id)
-            .and_then(|data| data.orders.as_ref());
-        if let Some(orders) = orders {
-            types.extend(orders.data.iter().map(|order| order.type_id));
-        }
+        rows = held
+            .rows
+            .iter()
+            .filter(|((type_id, _), _)| types.contains(type_id))
+            .map(|(key, row)| (*key, row.clone()))
+            .collect();
     }
-    let rows = held
-        .rows
-        .iter()
-        .filter(|((type_id, _), _)| types.contains(type_id))
-        .map(|(key, row)| (*key, row.clone()))
-        .collect();
-    let prices = PointPrices {
+    let job = CopyJob {
         at: now,
-        published_at: Some(published_at),
+        published_at: held.published_at,
         rows,
+        plex_http: Arc::clone(&shared.plex_http),
+        notices: Arc::clone(&shared.copy_notices),
+        db: shared.data_dir.join(crate::USER_DB),
     };
-    if let Err(error) = shared.store.save_point_prices(&prices) {
-        shared.notices.push(Notice::error(format!(
-            "Could not save the prices of this point: {error}"
-        )));
+    if !shared.worker.run(Box::new(move || job.run())) {
+        shared.notices.push(Notice::error(
+            "The background worker has stopped. Restart the app.",
+        ));
     }
+}
+
+/// One price copy to save on the worker: the rows of the held download (none when no download is
+/// held) and the client to ask for PLEX's price with.
+struct CopyJob {
+    at: i64,
+    published_at: Option<i64>,
+    rows: BTreeMap<(TypeId, Side), SummaryRow>,
+    plex_http: Arc<dyn Http + Send + Sync>,
+    notices: Arc<Mutex<Vec<Notice>>>,
+    /// The user database, opened again on the worker for the save.
+    db: PathBuf,
+}
+
+impl CopyJob {
+    /// Runs on the worker: PLEX's price of the moment replaces the file's stale row, then the
+    /// copy is saved. A failed fetch still saves a held download's copy, without PLEX rows;
+    /// without a held download the PLEX price was all the copy would hold, so nothing is saved.
+    fn run(mut self) {
+        // The file held PLEX's row from before PLEX left it in July 2025; the live price from
+        // the global market replaces it.
+        self.rows.retain(|(type_id, _), _| *type_id != PLEX);
+        match plex::fetch_plex(&*self.plex_http) {
+            Ok(found) => self
+                .rows
+                .extend(found.into_iter().map(|(side, row)| ((PLEX, side), row))),
+            Err(error) => {
+                self.say(format!("Could not fetch the PLEX price: {error}"));
+                if self.published_at.is_none() {
+                    return;
+                }
+            }
+        }
+        self.save();
+    }
+
+    /// Saves the copy through a second connection to the user database, so the screen's
+    /// connection is never held up by the worker.
+    fn save(&mut self) {
+        let prices = PointPrices {
+            at: self.at,
+            published_at: self.published_at,
+            rows: std::mem::take(&mut self.rows),
+        };
+        let saved = Store::open(&self.db, self.at)
+            .and_then(|mut opened| opened.store.save_point_prices(&prices));
+        if let Err(error) = saved {
+            self.say(format!("Could not save the prices of this point: {error}"));
+        }
+    }
+
+    /// Leaves a notice for the next frame to show.
+    fn say(&self, text: String) {
+        lock(&self.notices).push(Notice::error(text));
+    }
+}
+
+/// Locks the queue of notices the price-copy jobs leave. A lock poisoned by a panicked job is
+/// still used.
+fn lock(notices: &Mutex<Vec<Notice>>) -> MutexGuard<'_, Vec<Notice>> {
+    notices.lock().unwrap_or_else(PoisonError::into_inner)
 }
