@@ -1,10 +1,11 @@
-//! Pages as locked egui_dock layouts. The lock recipe is in the design note (section 5.1): tab
-//! bars hidden, tabs not draggable, no close buttons, no tab menus, and the show-tab-bar button
-//! kept at size 0. Each panel draws its own header with its name and, when its body has a table, a
-//! button that copies the table.
+//! Pages as locked egui_dock layouts, and a user's layout as a dock of its own. The lock recipe is
+//! in the design note (section 5.1): tab bars hidden, tabs not draggable, no close buttons, no tab
+//! menus, and the show-tab-bar button kept at size 0. Each panel draws its own header with its name
+//! and, when its body has a table, a button that copies the table. A user layout instead shows its
+//! tab bar, drags and closes its tabs, and lets each panel follow the selection or be pinned.
 
 use egui::{CornerRadius, Id, RichText, Ui, WidgetText};
-use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
+use egui_dock::{DockArea, DockState, NodeIndex, OverlayType, TabViewer};
 use mop_store::Store;
 use mop_store::StoreError;
 
@@ -13,6 +14,7 @@ use crate::assets::AssetsPanel;
 use crate::build::BuildPanel;
 use crate::characters::CharactersPanel;
 use crate::jobs::JobsPanel;
+use crate::layout::model::{Binding, Follows, PanelInfo, PanelRef, Slot, display_name};
 use crate::net_worth::NetWorthPanel;
 use crate::orders::OrdersPanel;
 use crate::setup::SetupPanel;
@@ -320,6 +322,247 @@ pub fn show_locked<T: Copy>(
         .show_inside(ui, &mut viewer);
 }
 
+/// The text a user layout with no panel left shows.
+const EMPTY_LAYOUT: &str =
+    "This layout is empty. Add panels with \"Add to layout…\" in any panel's Layout menu.";
+
+/// The names a user layout needs: what is selected to pin to, and the name of each existing pin.
+pub struct UserNames<'a> {
+    pub selected_plan: Option<(i64, &'a str)>,
+    pub selected_stockpile: Option<(i64, &'a str)>,
+    /// The plan or stockpile name a pin points at, or `None` when it is gone.
+    pub pin_name: &'a dyn Fn(&Binding) -> Option<String>,
+}
+
+/// Draws a user's layout: every leaf shows its tab bar, tabs drag and close, and each panel follows
+/// the selection or is pinned to one plan or stockpile. An empty layout draws no dock, only the
+/// text that says how to add panels. `body` draws the inside of a panel that can show one.
+pub fn show_user(
+    ui: &mut Ui,
+    theme: &Style,
+    state: &mut DockState<Slot>,
+    panels: &[PanelInfo],
+    names: &UserNames,
+    body: impl FnMut(&mut Ui, &Slot),
+) {
+    if state.main_surface().is_empty() {
+        ui.label(EMPTY_LAYOUT);
+        return;
+    }
+    for (_, node) in state.iter_all_nodes_mut() {
+        // A user layout always shows its tabs, even when a leaf holds only one panel.
+        if let Some(leaf) = node.get_leaf_mut() {
+            leaf.tab_bar_hidden = false;
+        }
+    }
+    let mut viewer = UserViewer {
+        panels,
+        selected_plan: names.selected_plan,
+        selected_stockpile: names.selected_stockpile,
+        pin_name: names.pin_name,
+        mute: theme.mute,
+        body,
+    };
+    // A user drops a tab on the edge of the panel it should split, not on a button in the middle.
+    let mut style = style(ui, theme);
+    style.overlay.overlay_type = OverlayType::HighlightedAreas;
+    DockArea::new(state)
+        .style(style)
+        .draggable_tabs(true)
+        .show_close_buttons(true)
+        .show_leaf_close_all_buttons(false)
+        .show_leaf_collapse_buttons(false)
+        .tab_context_menus(false)
+        .show_inside(ui, &mut viewer);
+}
+
+/// The follows kind of a known panel, or `None` for a panel this version does not know.
+fn follows_of<'a>(panel: &PanelRef, panels: &'a [PanelInfo]) -> Option<&'a Follows> {
+    match panel {
+        PanelRef::Known(key) => panels
+            .iter()
+            .find(|info| info.key == *key)
+            .map(|info| &info.follows),
+        PanelRef::Unknown(_) => None,
+    }
+}
+
+/// The muted words a following panel shows after its name; a panel that follows nothing has none.
+fn follows_text(follows: &Follows) -> Option<&'static str> {
+    match follows {
+        Follows::Nothing => None,
+        Follows::Plan => Some("follows plan"),
+        Follows::Stockpile => Some("follows stockpile"),
+        Follows::Item => Some("follows item"),
+        Follows::Place => Some("follows place"),
+        Follows::Character => Some("follows character"),
+    }
+}
+
+/// The stable part of a tab id that tells two bindings of the same panel apart. `Binding` itself
+/// does not hash, so its kind and id stand in for it.
+fn binding_key(binding: &Binding) -> (&'static str, i64) {
+    match binding {
+        Binding::Follow => ("follow", 0),
+        Binding::PinPlan(id) => ("plan", *id),
+        Binding::PinStockpile(id) => ("stockpile", *id),
+    }
+}
+
+/// The `Layout` menu of a plan or stockpile panel: follow the selection when pinned, pin to it when
+/// following. A panel that follows nothing gets no menu.
+fn layout_menu(
+    ui: &mut Ui,
+    tab: &mut Slot,
+    follows: &Follows,
+    selected_plan: Option<(i64, &str)>,
+    selected_stockpile: Option<(i64, &str)>,
+) {
+    let stockpile = matches!(follows, Follows::Stockpile);
+    ui.menu_button("Layout", |ui| {
+        if tab.binding == Binding::Follow {
+            let selected = if stockpile {
+                selected_stockpile
+            } else {
+                selected_plan
+            };
+            match selected {
+                Some((id, name)) => {
+                    if ui.button(format!("Pin to \"{name}\"")).clicked() {
+                        tab.binding = if stockpile {
+                            Binding::PinStockpile(id)
+                        } else {
+                            Binding::PinPlan(id)
+                        };
+                        ui.close();
+                    }
+                }
+                None => {
+                    let label = if stockpile {
+                        "Pin to the selected stockpile"
+                    } else {
+                        "Pin to the selected plan"
+                    };
+                    let hover = if stockpile {
+                        "No stockpile selected"
+                    } else {
+                        "No plan selected"
+                    };
+                    ui.add_enabled(false, egui::Button::new(label))
+                        .on_disabled_hover_text(hover);
+                }
+            }
+        } else {
+            let follow = if stockpile {
+                "Follow the selected stockpile"
+            } else {
+                "Follow the selected plan"
+            };
+            if ui.button(follow).clicked() {
+                tab.binding = Binding::Follow;
+                ui.close();
+            }
+        }
+    });
+}
+
+struct UserViewer<'a, B> {
+    panels: &'a [PanelInfo],
+    selected_plan: Option<(i64, &'a str)>,
+    selected_stockpile: Option<(i64, &'a str)>,
+    pin_name: &'a dyn Fn(&Binding) -> Option<String>,
+    mute: egui::Color32,
+    body: B,
+}
+
+impl<B: FnMut(&mut Ui, &Slot)> TabViewer for UserViewer<'_, B> {
+    type Tab = Slot;
+
+    fn id(&mut self, tab: &mut Slot) -> Id {
+        Id::new((
+            "user",
+            display_name(&tab.panel, self.panels),
+            binding_key(&tab.binding),
+        ))
+    }
+
+    fn title(&mut self, tab: &mut Slot) -> WidgetText {
+        display_name(&tab.panel, self.panels).into()
+    }
+
+    fn ui(&mut self, ui: &mut Ui, tab: &mut Slot) {
+        let id = self.id(tab);
+        let name = display_name(&tab.panel, self.panels).to_owned();
+        let follows = follows_of(&tab.panel, self.panels);
+        let selected_plan = self.selected_plan;
+        let selected_stockpile = self.selected_stockpile;
+        let pin_name = self.pin_name;
+        let mute = self.mute;
+        // The flag was set by the body on the previous frame, so it says whether the panel had a
+        // table then.
+        let table_shown = ui
+            .data(|data| data.get_temp::<bool>(has_table(id)))
+            .unwrap_or(false);
+        ui.horizontal(|ui| {
+            ui.strong(&name);
+            if tab.binding == Binding::Follow {
+                if let Some(text) = follows.and_then(follows_text) {
+                    ui.label(RichText::new(text).color(mute));
+                }
+            } else {
+                let text = match pin_name(&tab.binding) {
+                    Some(pin) => format!("pinned: {pin}"),
+                    None => "pinned: deleted".to_owned(),
+                };
+                ui.label(RichText::new(text).color(mute));
+            }
+            if let Some(follows) = follows
+                && matches!(follows, Follows::Plan | Follows::Stockpile)
+            {
+                layout_menu(ui, tab, follows, selected_plan, selected_stockpile);
+            }
+            if table_shown
+                && ui
+                    .button("Copy table")
+                    .on_hover_text("Copies this table for a spreadsheet (tab-separated).")
+                    .clicked()
+            {
+                ui.data_mut(|data| data.insert_temp(copy_request(id), true));
+            }
+        });
+        // Cleared before the body draws, so a panel whose table stops showing loses the button on
+        // the next frame.
+        ui.data_mut(|data| data.remove_temp::<bool>(has_table(id)));
+        let shows_body = follows.is_some()
+            && match &tab.binding {
+                Binding::Follow => true,
+                Binding::PinPlan(_) | Binding::PinStockpile(_) => pin_name(&tab.binding).is_some(),
+            };
+        if shows_body {
+            (self.body)(ui, tab);
+        } else if follows.is_some() {
+            let (text, follow) = match &tab.binding {
+                Binding::PinStockpile(_) => (
+                    "The stockpile this panel was pinned to no longer exists.",
+                    "Follow the selected stockpile",
+                ),
+                Binding::PinPlan(_) | Binding::Follow => (
+                    "The plan this panel was pinned to no longer exists.",
+                    "Follow the selected plan",
+                ),
+            };
+            ui.label(text);
+            if ui.button(follow).clicked() {
+                tab.binding = Binding::Follow;
+            }
+        } else {
+            ui.label(format!("\"{name}\" is not in this version of the app."));
+        }
+        // A copy asked for on a panel with no table is dropped, not kept for a table shown later.
+        ui.data_mut(|data| data.remove_temp::<bool>(copy_request(id)));
+    }
+}
+
 /// The egui_dock style with the lock recipe applied on top of the egui look.
 fn style(ui: &Ui, theme: &Style) -> egui_dock::Style {
     let mut style = egui_dock::Style::from_egui(ui.style());
@@ -379,7 +622,11 @@ impl<T: Copy, B: FnMut(&mut Ui, T)> TabViewer for Locked<T, B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::panels::panels;
+    use egui::{Modifiers, PointerButton, Pos2, Rect, pos2, vec2};
     use egui_dock::Node;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
     use tempfile::TempDir;
 
     const SETUP_PANELS: [SetupPanel; 9] = [
@@ -694,5 +941,379 @@ mod tests {
         assert_eq!(SetupPanel::Structures.title(), "Structures");
         assert_eq!(SetupPanel::Fees.title(), "Fees and skills");
         assert_eq!(SetupPanel::Display.title(), "Display");
+    }
+
+    /// The state the user-layout tests keep: the dock, the slots `body` was called for, the
+    /// selection a plan panel can pin to, and the name of every pin that still exists.
+    struct User {
+        dock: DockState<Slot>,
+        bodies: Vec<Slot>,
+        selected_plan: Option<(i64, &'static str)>,
+        pin: Option<String>,
+    }
+
+    /// The acceptance layout: Buy list left, Steps pinned to plan 1 right.
+    fn acceptance_dock() -> DockState<Slot> {
+        user_dock(
+            "EVE Means of Profit layout 1\nname: Test\nsplit right 50%\n  Buy list\n  Steps [pinned plan 1]\n",
+        )
+    }
+
+    fn user_dock(text: &str) -> DockState<Slot> {
+        let parsed =
+            crate::layout::text::parse_saved(text, panels()).expect("the test layout reads");
+        crate::layout::dock_convert::to_dock(&parsed.layout)
+    }
+
+    fn user_harness(
+        dock: DockState<Slot>,
+        selected_plan: Option<(i64, &'static str)>,
+        pin: Option<&str>,
+    ) -> Harness<'static, User> {
+        let style = Style::eve_dense();
+        Harness::builder()
+            .with_size(vec2(800.0, 600.0))
+            .build_ui_state(
+                move |ui, user: &mut User| {
+                    style.apply(ui.ctx());
+                    let User {
+                        dock,
+                        bodies,
+                        selected_plan,
+                        pin,
+                    } = user;
+                    let pin_name = |binding: &Binding| match binding {
+                        Binding::PinPlan(_) | Binding::PinStockpile(_) => pin.clone(),
+                        Binding::Follow => None,
+                    };
+                    let names = UserNames {
+                        selected_plan: *selected_plan,
+                        selected_stockpile: None,
+                        pin_name: &pin_name,
+                    };
+                    show_user(ui, &style, dock, panels(), &names, |ui, slot| {
+                        bodies.push(slot.clone());
+                        ui.label("body");
+                    });
+                },
+                User {
+                    dock,
+                    bodies: Vec::new(),
+                    selected_plan,
+                    pin: pin.map(str::to_owned),
+                },
+            )
+    }
+
+    fn shown(harness: &Harness<'_, User>, label: &str) -> bool {
+        harness.query_by_label(label).is_some()
+    }
+
+    fn click(harness: &mut Harness<'_, User>, label: &str) {
+        harness.get_by_label(label).click();
+        harness.run_steps(3);
+    }
+
+    /// The rect of the topmost painted text equal to `text`. Tab titles are painted, not widgets,
+    /// so this is how a test finds a tab.
+    fn text_rect(harness: &Harness<'_, User>, text: &str) -> Rect {
+        fn collect(shape: &egui::Shape, text: &str, found: &mut Vec<Rect>) {
+            match shape {
+                egui::Shape::Text(painted) if painted.galley.text() == text => {
+                    found.push(Rect::from_min_size(painted.pos, painted.galley.size()));
+                }
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, text, found);
+                    }
+                }
+                egui::Shape::Noop
+                | egui::Shape::Circle(_)
+                | egui::Shape::Ellipse(_)
+                | egui::Shape::LineSegment { .. }
+                | egui::Shape::Path(_)
+                | egui::Shape::Rect(_)
+                | egui::Shape::Text(_)
+                | egui::Shape::Mesh(_)
+                | egui::Shape::QuadraticBezier(_)
+                | egui::Shape::CubicBezier(_)
+                | egui::Shape::Callback(_) => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &harness.output().shapes {
+            collect(&clipped.shape, text, &mut found);
+        }
+        found
+            .into_iter()
+            .min_by(|a, b| a.top().total_cmp(&b.top()))
+            .unwrap_or_else(|| panic!("\"{text}\" is not painted"))
+    }
+
+    fn click_at(harness: &mut Harness<'_, User>, pos: Pos2) {
+        harness.event(egui::Event::PointerMoved(pos));
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            });
+        }
+        harness.run_steps(3);
+    }
+
+    /// Clicks the close button at the right of the tab titled `name`. The close button is 24 points
+    /// wide with 8 points of padding before the title, so its centre sits 20 points right of the
+    /// painted title.
+    fn close_tab(harness: &mut Harness<'_, User>, name: &str) {
+        let title = text_rect(harness, name);
+        click_at(harness, pos2(title.right() + 20.0, title.center().y));
+    }
+
+    fn saved(dock: &DockState<Slot>) -> String {
+        crate::layout::text::to_text(
+            &crate::layout::dock_convert::from_dock(dock, "Test"),
+            panels(),
+            crate::layout::text::Mode::Saved,
+        )
+    }
+
+    /// The text below the header and name lines.
+    fn layout_part(text: &str) -> &str {
+        text.splitn(3, '\n').nth(2).unwrap_or_default()
+    }
+
+    #[test]
+    fn headers_say_whether_each_panel_follows_or_is_pinned() {
+        let mut harness = user_harness(
+            acceptance_dock(),
+            Some((2, "Rifter 31")),
+            Some("Hobgoblin 10"),
+        );
+        harness.run_steps(2);
+
+        assert!(shown(&harness, "follows plan"), "Buy list follows the plan");
+        assert!(
+            shown(&harness, "pinned: Hobgoblin 10"),
+            "Steps names the plan it is pinned to"
+        );
+        let buy_list = Slot {
+            panel: PanelRef::Known("build.buy_list"),
+            binding: Binding::Follow,
+        };
+        let steps = Slot {
+            panel: PanelRef::Known("build.steps"),
+            binding: Binding::PinPlan(1),
+        };
+        assert!(
+            harness.state().bodies.contains(&buy_list),
+            "body draws Buy list while it follows"
+        );
+        assert!(
+            harness.state().bodies.contains(&steps),
+            "body draws Steps while its pin exists"
+        );
+    }
+
+    #[test]
+    fn the_layout_menu_pins_to_the_selected_plan_and_follows_again() {
+        let mut harness = user_harness(
+            user_dock(
+                "EVE Means of Profit layout 1\nname: Test\nsplit right 50%\n  Plans\n  Buy list\n",
+            ),
+            Some((2, "Rifter 31")),
+            None,
+        );
+        harness.run_steps(2);
+        click(&mut harness, "Layout");
+        click(&mut harness, "Pin to \"Rifter 31\"");
+        assert!(
+            saved(&harness.state().dock).ends_with("  Buy list [pinned plan 2]\n"),
+            "the pin is written into the slot: {}",
+            saved(&harness.state().dock)
+        );
+
+        let mut harness = user_harness(
+            user_dock(
+                "EVE Means of Profit layout 1\nname: Test\nsplit right 50%\n  Plans\n  Steps [pinned plan 1]\n",
+            ),
+            Some((2, "Rifter 31")),
+            Some("Hobgoblin 10"),
+        );
+        harness.run_steps(2);
+        click(&mut harness, "Layout");
+        click(&mut harness, "Follow the selected plan");
+        assert!(
+            saved(&harness.state().dock).ends_with("  Steps\n"),
+            "following drops the pin: {}",
+            saved(&harness.state().dock)
+        );
+    }
+
+    #[test]
+    fn the_pin_button_is_disabled_without_a_selected_plan() {
+        let mut harness = user_harness(
+            user_dock("EVE Means of Profit layout 1\nname: Test\nBuy list\n"),
+            None,
+            None,
+        );
+        harness.run_steps(2);
+        click(&mut harness, "Layout");
+        let pin = harness.get_by_label("Pin to the selected plan");
+        assert!(
+            pin.accesskit_node().is_disabled(),
+            "no plan is selected to pin to"
+        );
+    }
+
+    #[test]
+    fn a_panel_that_follows_nothing_has_no_layout_menu() {
+        let mut harness = user_harness(
+            user_dock("EVE Means of Profit layout 1\nname: Test\nPlans\n"),
+            Some((2, "Rifter 31")),
+            None,
+        );
+        harness.run_steps(2);
+        assert!(
+            !shown(&harness, "Layout"),
+            "a panel that follows nothing has nothing to put in the menu"
+        );
+    }
+
+    #[test]
+    fn closing_every_tab_empties_the_layout_and_stops_the_body() {
+        let mut harness = user_harness(
+            acceptance_dock(),
+            Some((2, "Rifter 31")),
+            Some("Hobgoblin 10"),
+        );
+        harness.run_steps(2);
+        close_tab(&mut harness, "Buy list");
+        assert_eq!(
+            layout_part(&saved(&harness.state().dock)),
+            "Steps [pinned plan 1]\n",
+            "only Steps is left, now at the root"
+        );
+
+        close_tab(&mut harness, "Steps");
+        assert_eq!(
+            layout_part(&saved(&harness.state().dock)),
+            "empty\n",
+            "the layout is empty"
+        );
+        assert!(
+            shown(&harness, EMPTY_LAYOUT),
+            "the empty layout shows how to add panels"
+        );
+        harness.state_mut().bodies.clear();
+        harness.run_steps(2);
+        assert!(
+            harness.state().bodies.is_empty(),
+            "an empty layout calls no body"
+        );
+    }
+
+    #[test]
+    fn dragging_the_steps_tab_onto_the_lower_edge_of_buy_list_splits_down() {
+        let mut harness = user_harness(
+            acceptance_dock(),
+            Some((2, "Rifter 31")),
+            Some("Hobgoblin 10"),
+        );
+        harness.run_steps(2);
+        let start = text_rect(&harness, "Steps").center();
+        let target = pos2(200.0, 580.0);
+        harness.hover_at(start);
+        harness.run_steps(2);
+        harness.drag_at(start);
+        harness.run_steps(2);
+        // egui_dock starts the drag where the pointer first moved, so move in two steps: the
+        // first sets the start, the second passes its threshold and records the dragged tab.
+        harness.hover_at(start + vec2(40.0, 0.0));
+        harness.run_steps(2);
+        harness.hover_at(target);
+        harness.run_steps(3);
+        harness.drop_at(target);
+        harness.run_steps(3);
+
+        let layout = crate::layout::dock_convert::from_dock(&harness.state().dock, "Test");
+        let Some(crate::layout::model::Node::Split { dir, first, .. }) = &layout.root else {
+            panic!(
+                "the drag splits the layout: {}",
+                saved(&harness.state().dock)
+            );
+        };
+        assert_eq!(*dir, crate::layout::model::Dir::Down, "Steps lands below");
+        assert!(
+            matches!(
+                first.as_ref(),
+                crate::layout::model::Node::Panel(Slot {
+                    binding: Binding::Follow,
+                    ..
+                })
+            ),
+            "Buy list stays above"
+        );
+    }
+
+    #[test]
+    fn a_pin_that_is_gone_says_so_and_follows_again() {
+        let mut harness = user_harness(
+            user_dock(
+                "EVE Means of Profit layout 1\nname: Test\nsplit right 50%\n  Plans\n  Steps [pinned plan 1]\n",
+            ),
+            Some((2, "Rifter 31")),
+            None,
+        );
+        harness.run_steps(2);
+        assert!(
+            shown(
+                &harness,
+                "The plan this panel was pinned to no longer exists."
+            ),
+            "a gone pin is named as gone"
+        );
+        assert!(
+            !harness
+                .state()
+                .bodies
+                .iter()
+                .any(|slot| slot.panel == PanelRef::Known("build.steps")),
+            "a panel pinned to something gone draws no body"
+        );
+        assert!(shown(&harness, "pinned: deleted"), "the header says so too");
+
+        click(&mut harness, "Follow the selected plan");
+        assert!(
+            saved(&harness.state().dock).ends_with("  Steps\n"),
+            "following drops the gone pin: {}",
+            saved(&harness.state().dock)
+        );
+    }
+
+    #[test]
+    fn an_unknown_panel_says_it_is_not_in_this_version_and_draws_no_body() {
+        let mut harness = user_harness(
+            user_dock("EVE Means of Profit layout 1\nname: Test\nMarket depth\n"),
+            Some((2, "Rifter 31")),
+            None,
+        );
+        harness.run_steps(2);
+        assert!(
+            shown(
+                &harness,
+                "\"Market depth\" is not in this version of the app."
+            ),
+            "the unknown panel is named"
+        );
+        assert!(
+            harness.state().bodies.is_empty(),
+            "an unknown panel draws no body"
+        );
+        assert!(
+            text_rect(&harness, "Market depth").top() < 100.0,
+            "the unknown panel still has its tab at the top"
+        );
     }
 }
