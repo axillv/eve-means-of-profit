@@ -7,7 +7,9 @@ use egui::{Button, ComboBox, Id, RichText, Ui};
 
 use crate::Shared;
 use crate::build::state::report;
+use crate::empty::{self, Fill};
 use crate::orders::rows::grouped;
+use crate::rail::Page;
 use crate::table::model::{Cell, Column, ColumnKind, Row};
 use crate::table::{Table, hidden_from_text};
 use rows::{Entry, PlanCell, footer, status_text};
@@ -16,7 +18,43 @@ use rows::{Entry, PlanCell, footer, status_text};
 const TABLE: &str = "jobs";
 /// The setting that keeps the chip: `finished` when finished jobs are shown, else empty.
 const CHIPS: &str = "jobs.chips";
-const EMPTY: &str = "No industry jobs. Refresh on the Characters page to fetch them.";
+
+/// Why the page has no rows and what fills it: no characters, no fetched jobs, or fetched jobs
+/// that hold none.
+fn blank(cx: &Shared) -> (&'static str, &'static str, Option<Fill>) {
+    let characters = cx.session.characters();
+    if characters.is_empty() {
+        return (
+            "No characters yet.",
+            "Jobs are fetched from EVE for each character you add.",
+            Some(Fill {
+                label: "Add character",
+                page: Some(Page::Characters),
+            }),
+        );
+    }
+    let fetched = characters.iter().any(|character| {
+        cx.session
+            .character_data(character.id)
+            .and_then(|data| data.jobs.as_ref())
+            .is_some()
+    });
+    if !fetched {
+        return (
+            "No industry jobs.",
+            "Refresh a character on the Characters page to fetch them.",
+            Some(Fill {
+                label: "Refresh a character",
+                page: Some(Page::Characters),
+            }),
+        );
+    }
+    (
+        "No industry jobs.",
+        "You have none running right now. Start one in EVE, then refresh.",
+        None,
+    )
+}
 
 #[derive(Debug, Default)]
 pub struct JobsPage;
@@ -39,7 +77,8 @@ pub fn show(_page: &mut JobsPage, panel: JobsPanel, ui: &mut Ui, cx: &mut Shared
     let now = (cx.clock)();
     let all = rows::entries(cx, now);
     if all.is_empty() {
-        ui.label(RichText::new(EMPTY).color(cx.style.mute));
+        let (why, what, fill) = blank(cx);
+        empty::show(ui, &cx.style, why, what, fill);
         return;
     }
     let finished_shown = chip(ui, cx);

@@ -40,7 +40,6 @@ mod tests {
     const MORPHITE: u32 = 11_399;
     const HEADER: &str =
         "what,weightedaverage,maxval,minval,stddev,median,volume,numorders,fivepercent,orderSet";
-    const EMPTY: &str = "No market orders. Refresh on the Characters page to fetch them.";
 
     fn fixture() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE)
@@ -618,14 +617,84 @@ mod tests {
     }
 
     #[test]
-    fn with_no_characters_the_page_says_so() {
+    fn with_no_characters_the_page_says_so_and_offers_add_character() {
         let env = env();
         let requests = Arc::new(Mutex::new(0));
         let mut harness = start(&env, Vec::new(), requests);
         loaded(&mut harness);
         click(&mut harness, "Orders");
 
-        assert!(shown(&harness, EMPTY));
+        assert!(shown(&harness, "No characters yet."));
+        assert!(shown(
+            &harness,
+            "Orders are fetched from EVE for each character you add."
+        ));
+        assert_eq!(harness.query_all_by_label("Add character").count(), 1);
+        assert!(!shown(&harness, "Columns"));
+        assert!(!shown(&harness, "Sell"));
+
+        click(&mut harness, "Add character");
+        assert!(
+            shown(&harness, "jEve data"),
+            "Add character shows Characters"
+        );
+    }
+
+    #[test]
+    fn characters_without_fetched_orders_say_to_refresh_a_character() {
+        let env = env();
+        let requests = Arc::new(Mutex::new(0));
+        let mut harness = start(&env, vec![character(MAIN, "Main")], requests);
+        loaded(&mut harness);
+        click(&mut harness, "Orders");
+
+        assert!(shown(&harness, "No orders yet."));
+        assert!(shown(
+            &harness,
+            "Refresh a character on the Characters page to fetch them."
+        ));
+        assert_eq!(harness.query_all_by_label("Refresh a character").count(), 1);
+        assert!(!shown(&harness, "Columns"));
+        assert!(!shown(&harness, "Sell"));
+
+        click(&mut harness, "Refresh a character");
+        assert!(
+            shown(&harness, "jEve data"),
+            "Refresh a character shows Characters"
+        );
+    }
+
+    #[test]
+    fn fetched_orders_with_none_listed_say_there_is_nothing_to_show() {
+        let env = env();
+        let data = CharacterData {
+            character_id: MAIN,
+            assets: None,
+            orders: Some(Fetched {
+                data: Vec::new(),
+                fetched_at: NOW,
+                last_modified: None,
+                expires: None,
+            }),
+            jobs: None,
+            wallet: None,
+        };
+        saved::save_character(&esi_dir(&env), &data).expect("Main's empty orders saved");
+        let requests = Arc::new(Mutex::new(0));
+        let mut harness = start(&env, vec![character(MAIN, "Main")], requests);
+        loaded(&mut harness);
+        click(&mut harness, "Orders");
+
+        assert!(shown(&harness, "No market orders."));
+        assert!(shown(
+            &harness,
+            "You have none listed right now. Refresh after you place one in EVE."
+        ));
+        assert_eq!(harness.query_all_by_label("Add character").count(), 0);
+        assert_eq!(harness.query_all_by_label("Refresh a character").count(), 0);
+        assert!(!shown(&harness, "Columns"));
+        assert!(!shown(&harness, "Sell"));
+        assert!(!shown(&harness, "Buy"));
     }
 
     #[test]

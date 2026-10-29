@@ -41,7 +41,6 @@ mod tests {
     const RIFTER_BLUEPRINT: u32 = 691;
     const HOBGOBLIN_II_BLUEPRINT: u32 = 2_457;
     const CRYSTALLINE_CARBONIDE: u32 = 16_670;
-    const EMPTY: &str = "No industry jobs. Refresh on the Characters page to fetch them.";
 
     fn fixture() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE)
@@ -494,13 +493,68 @@ mod tests {
     }
 
     #[test]
-    fn with_no_characters_the_page_says_so() {
+    fn with_no_characters_the_page_says_so_and_offers_add_character() {
         let env = env();
         let mut harness = start(&env, Vec::new());
         loaded(&mut harness);
         click(&mut harness, "Industry jobs");
 
-        assert!(shown(&harness, EMPTY));
+        assert!(shown(&harness, "No characters yet."));
+        assert!(shown(
+            &harness,
+            "Jobs are fetched from EVE for each character you add."
+        ));
+        assert_eq!(harness.query_all_by_label("Add character").count(), 1);
+        assert!(!shown(&harness, "Columns"));
+        assert!(!shown(&harness, "Show finished"));
+
+        click(&mut harness, "Add character");
+        assert!(
+            shown(&harness, "jEve data"),
+            "Add character shows Characters"
+        );
+    }
+
+    #[test]
+    fn characters_without_fetched_jobs_say_to_refresh_a_character() {
+        let env = env();
+        let mut harness = start(&env, vec![character(MAIN, "Main")]);
+        loaded(&mut harness);
+        click(&mut harness, "Industry jobs");
+
+        assert!(shown(&harness, "No industry jobs."));
+        assert!(shown(
+            &harness,
+            "Refresh a character on the Characters page to fetch them."
+        ));
+        assert_eq!(harness.query_all_by_label("Refresh a character").count(), 1);
+        assert!(!shown(&harness, "Columns"));
+        assert!(!shown(&harness, "Show finished"));
+
+        click(&mut harness, "Refresh a character");
+        assert!(
+            shown(&harness, "jEve data"),
+            "Refresh a character shows Characters"
+        );
+    }
+
+    #[test]
+    fn fetched_jobs_with_none_running_say_there_is_nothing_to_show() {
+        let env = env();
+        save_jobs(&env, Vec::new());
+        let mut harness = start(&env, vec![character(MAIN, "Main")]);
+        loaded(&mut harness);
+        click(&mut harness, "Industry jobs");
+
+        assert!(shown(&harness, "No industry jobs."));
+        assert!(shown(
+            &harness,
+            "You have none running right now. Start one in EVE, then refresh."
+        ));
+        assert_eq!(harness.query_all_by_label("Add character").count(), 0);
+        assert_eq!(harness.query_all_by_label("Refresh a character").count(), 0);
+        assert!(!shown(&harness, "Columns"));
+        assert!(!shown(&harness, "Show finished"));
     }
 
     #[test]

@@ -8,6 +8,8 @@ use egui::{Id, RichText, Ui};
 use crate::Shared;
 use crate::build::prices::OLD_HOVER;
 use crate::build::state::report;
+use crate::empty::{self, Fill};
+use crate::rail::Page;
 use crate::table::model::{Cell, Column, ColumnKind, Row};
 use crate::table::{Table, hidden_from_text};
 use rows::{Entry, OLD_SECS, STALE_SECS, age_label, expires_text, grouped, utc_text};
@@ -16,9 +18,45 @@ use rows::{Entry, OLD_SECS, STALE_SECS, age_label, expires_text, grouped, utc_te
 const TABLE: &str = "orders";
 /// The setting that keeps the chips: the sides shown, as `sell,buy`.
 const CHIPS: &str = "orders.chips";
-const EMPTY: &str = "No market orders. Refresh on the Characters page to fetch them.";
 /// The most characters of a location name the Location column shows; the full name is on hover.
 const LOCATION_CHARS: usize = 24;
+
+/// Why the page has no rows and what fills it: no characters, no fetched orders, or fetched orders
+/// that hold none.
+fn blank(cx: &Shared) -> (&'static str, &'static str, Option<Fill>) {
+    let characters = cx.session.characters();
+    if characters.is_empty() {
+        return (
+            "No characters yet.",
+            "Orders are fetched from EVE for each character you add.",
+            Some(Fill {
+                label: "Add character",
+                page: Some(Page::Characters),
+            }),
+        );
+    }
+    let fetched = characters.iter().any(|character| {
+        cx.session
+            .character_data(character.id)
+            .and_then(|data| data.orders.as_ref())
+            .is_some()
+    });
+    if !fetched {
+        return (
+            "No orders yet.",
+            "Refresh a character on the Characters page to fetch them.",
+            Some(Fill {
+                label: "Refresh a character",
+                page: Some(Page::Characters),
+            }),
+        );
+    }
+    (
+        "No market orders.",
+        "You have none listed right now. Refresh after you place one in EVE.",
+        None,
+    )
+}
 
 #[derive(Debug, Default)]
 pub struct OrdersPage;
@@ -66,7 +104,8 @@ pub fn show(_page: &mut OrdersPage, panel: OrdersPanel, ui: &mut Ui, cx: &mut Sh
     let now = (cx.clock)();
     let all = rows::entries(cx, now);
     if all.is_empty() {
-        ui.label(RichText::new(EMPTY).color(cx.style.mute));
+        let (why, what, fill) = blank(cx);
+        empty::show(ui, &cx.style, why, what, fill);
         return;
     }
     let chips = chip_row(ui, cx);
