@@ -19,7 +19,9 @@ mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable, by};
     use eve_means_of_profit::build::prices::Prices;
-    use eve_means_of_profit::characters::list::{kind_view, login_view};
+    use eve_means_of_profit::characters::list::{
+        date_text, kind_view, login_view, parse_date, plex_text,
+    };
     use eve_means_of_profit::characters::{forget_state, set_client_id_present, set_opener};
     use eve_means_of_profit::session::{EveAccess, PendingLogin, lock_eve};
     use eve_means_of_profit::status::Level;
@@ -528,7 +530,7 @@ mod tests {
     fn disabled(harness: &Harness<'_, App>, label: &str) -> bool {
         harness
             .get_all_by_label(label)
-            .next()
+            .find(|node| node.accesskit_node().role() == Role::Button)
             .expect("a button")
             .accesskit_node()
             .is_disabled()
@@ -605,13 +607,14 @@ mod tests {
             .and_then(|node| node.value())
     }
 
-    /// Clicks the `index`th node labelled `label`, counting from the top of the page.
+    /// Clicks the `index`th button labelled `label`, counting from the top of the page.
     fn click_nth(harness: &mut Harness<'_, App>, label: &str, index: usize) {
         {
             let target = harness
-                .query_all_by_label(label)
+                .get_all_by_label(label)
+                .filter(|node| node.accesskit_node().role() == Role::Button)
                 .nth(index)
-                .unwrap_or_else(|| panic!("no node labelled {label} number {index}"));
+                .unwrap_or_else(|| panic!("no button labelled {label} number {index}"));
             target.click();
         }
         harness.run_steps(3);
@@ -712,6 +715,66 @@ mod tests {
             .store
             .accounts()
             .expect("the accounts read")
+    }
+
+    /// Seeds an account through the store, with the characters given.
+    fn seed_account(env: &Env, name: &str, characters: &[u64]) -> i64 {
+        let mut store = Store::open(&env.data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
+        let account = store.add_account(name).expect("the account");
+        for character in characters {
+            store
+                .set_account(*character, Some(account))
+                .expect("a character in it");
+        }
+        account
+    }
+
+    /// Seeds a PLEX count through the store.
+    fn seed_plex(env: &Env, account: i64, count: u64, at: i64) {
+        let mut store = Store::open(&env.data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
+        store.set_plex(account, count, at).expect("the count");
+    }
+
+    /// The PLEX counts the app's own store holds for the account.
+    fn plex_counts_in(harness: &mut Harness<'_, App>, account: i64) -> Vec<(i64, u64)> {
+        harness
+            .state_mut()
+            .shared_mut()
+            .store
+            .plex_counts(account)
+            .expect("the counts read")
+    }
+
+    fn clear_notices(harness: &mut Harness<'_, App>) {
+        harness.state_mut().shared_mut().notices.clear();
+    }
+
+    /// Empties the text field that has this caption: selects all of it and deletes it.
+    fn clear_field(harness: &mut Harness<'_, App>, caption: &str) {
+        reveal_field(harness, caption);
+        {
+            let field = harness
+                .query_all_by_label(caption)
+                .find(|node| node.accesskit_node().role() == Role::TextInput)
+                .unwrap_or_else(|| panic!("no text field captioned {caption}"));
+            field.hover();
+        }
+        harness.run_steps(2);
+        {
+            let field = harness
+                .query_all_by_label(caption)
+                .find(|node| node.accesskit_node().role() == Role::TextInput)
+                .unwrap_or_else(|| panic!("no text field captioned {caption}"));
+            field.click();
+        }
+        harness.run_steps(2);
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness.key_press(Key::Backspace);
+        harness.run_steps(3);
     }
 
     /// The background price refresh stays off here: the test asks for each download itself.
@@ -1494,7 +1557,7 @@ mod tests {
         assert!(disabled(&harness, "Full"));
         harness
             .get_all_by_label("Full")
-            .next()
+            .find(|node| node.accesskit_node().role() == Role::Button)
             .expect("the entry")
             .hover();
         frames(&mut harness);
@@ -1511,6 +1574,207 @@ mod tests {
         // Alt's dropdown now shows Full, and its Full entry is enabled.
         click_combo(&mut harness, "Full", 0);
         assert!(!disabled(&harness, "Full"));
+    }
+
+    #[test]
+    fn plex_counts_are_grouped_and_dates_read_both_ways() {
+        assert_eq!(plex_text(0), "0");
+        assert_eq!(plex_text(999), "999");
+        assert_eq!(plex_text(1_250), "1,250");
+        assert_eq!(plex_text(1_234_567), "1,234,567");
+        assert_eq!(parse_date("1970-01-10"), Some(9));
+        assert_eq!(parse_date("1970-02-30"), None);
+        assert_eq!(parse_date("10 Jan"), None);
+        assert_eq!(date_text(11), "1970-01-12");
+    }
+
+    #[test]
+    fn an_account_block_lists_its_characters_and_the_date_starts_today() {
+        let env = env();
+        seed_account(&env, "Main acct", &[MAIN, ALT]);
+        seed_account(&env, "Spare", &[]);
+        let eve = FakeEve::new(&env, partial);
+        let mut harness = open(&env, &eve);
+        until(&mut harness, "the account block", |h| {
+            shown(h, "no PLEX count yet")
+        });
+        assert!(shown(&harness, "Main acct"));
+        assert!(shown(&harness, "Alt, Main"));
+        assert!(shown(&harness, "Rename Main acct"));
+        assert!(shown(&harness, "PLEX in Main acct"));
+        assert!(shown(&harness, "no characters"));
+        assert_eq!(
+            field_text(&harness, "Date (UTC)").as_deref(),
+            Some("1970-01-12")
+        );
+    }
+
+    #[test]
+    fn setting_plex_stores_the_count_and_clears_the_field() {
+        let env = env();
+        let main = seed_account(&env, "Main acct", &[MAIN, ALT]);
+        let eve = FakeEve::new(&env, partial);
+        let mut harness = open(&env, &eve);
+        until(&mut harness, "the account block", |h| {
+            shown(h, "no PLEX count yet")
+        });
+        type_into(&mut harness, "PLEX in Main acct", "1,250");
+        press(&mut harness, "Set PLEX", 0);
+        until(&mut harness, "the count line", |h| {
+            shown(h, "1,250 PLEX, set 0s ago")
+        });
+        assert_eq!(plex_counts_in(&mut harness, main), vec![(NOW, 1_250)]);
+        assert_eq!(
+            field_text(&harness, "PLEX in Main acct").as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            field_text(&harness, "Date (UTC)").as_deref(),
+            Some("1970-01-12")
+        );
+    }
+
+    #[test]
+    fn a_seeded_count_shows_its_age_and_a_new_count_is_added() {
+        let env = env();
+        let main = seed_account(&env, "Main acct", &[MAIN, ALT]);
+        seed_plex(&env, main, 650, 740_800);
+        let eve = FakeEve::new(&env, partial);
+        let mut harness = open(&env, &eve);
+        until(&mut harness, "the seeded count", |h| {
+            shown(h, "650 PLEX, set 3d ago")
+        });
+        type_into(&mut harness, "PLEX in Main acct", "1,250");
+        press(&mut harness, "Set PLEX", 0);
+        until(&mut harness, "the new count", |h| {
+            shown(h, "1,250 PLEX, set 0s ago")
+        });
+        assert_eq!(
+            plex_counts_in(&mut harness, main),
+            vec![(740_800, 650), (NOW, 1_250)]
+        );
+    }
+
+    #[test]
+    fn bad_plex_counts_and_dates_are_errors_and_a_past_day_is_kept() {
+        let env = env();
+        let main = seed_account(&env, "Main acct", &[MAIN, ALT]);
+        let eve = FakeEve::new(&env, partial);
+        let mut harness = open(&env, &eve);
+        until(&mut harness, "the account block", |h| {
+            shown(h, "no PLEX count yet")
+        });
+
+        type_into(&mut harness, "PLEX in Main acct", "0");
+        clear_field(&mut harness, "PLEX in Main acct");
+        press(&mut harness, "Set PLEX", 0);
+        assert_eq!(
+            notices(&mut harness),
+            vec!["Type the number of PLEX.".to_owned()]
+        );
+        clear_notices(&mut harness);
+
+        type_into(&mut harness, "PLEX in Main acct", "12x");
+        press(&mut harness, "Set PLEX", 0);
+        assert_eq!(
+            notices(&mut harness),
+            vec!["Type a whole number of PLEX.".to_owned()]
+        );
+        clear_notices(&mut harness);
+
+        type_into(&mut harness, "PLEX in Main acct", "900");
+        type_into(&mut harness, "Date (UTC)", "1970-01-13");
+        press(&mut harness, "Set PLEX", 0);
+        assert_eq!(
+            notices(&mut harness),
+            vec!["The date cannot be in the future.".to_owned()]
+        );
+        clear_notices(&mut harness);
+
+        type_into(&mut harness, "Date (UTC)", "1970-02-30");
+        press(&mut harness, "Set PLEX", 0);
+        assert_eq!(
+            notices(&mut harness),
+            vec!["Type the date as year-month-day, like 2026-10-18.".to_owned()]
+        );
+        clear_notices(&mut harness);
+
+        type_into(&mut harness, "Date (UTC)", "10 Jan");
+        press(&mut harness, "Set PLEX", 0);
+        assert_eq!(
+            notices(&mut harness),
+            vec!["Type the date as year-month-day, like 2026-10-18.".to_owned()]
+        );
+        clear_notices(&mut harness);
+
+        // A good count on a past day is kept at that day's 00:00 UTC.
+        type_into(&mut harness, "PLEX in Main acct", "900");
+        type_into(&mut harness, "Date (UTC)", "1970-01-10");
+        press(&mut harness, "Set PLEX", 0);
+        until(&mut harness, "the past count", |h| {
+            shown(h, "900 PLEX, set 2d ago")
+        });
+        assert_eq!(plex_counts_in(&mut harness, main), vec![(777_600, 900)]);
+        clear_notices(&mut harness);
+
+        // The same date replaces its count instead of adding another.
+        type_into(&mut harness, "PLEX in Main acct", "950");
+        type_into(&mut harness, "Date (UTC)", "1970-01-10");
+        press(&mut harness, "Set PLEX", 0);
+        until(&mut harness, "the replaced count", |h| {
+            shown(h, "950 PLEX, set 2d ago")
+        });
+        assert_eq!(plex_counts_in(&mut harness, main), vec![(777_600, 950)]);
+        clear_notices(&mut harness);
+
+        // 0 is a valid count, and an empty date means today.
+        type_into(&mut harness, "PLEX in Main acct", "0");
+        clear_field(&mut harness, "Date (UTC)");
+        press(&mut harness, "Set PLEX", 0);
+        until(&mut harness, "the zero count", |h| {
+            shown(h, "0 PLEX, set 0s ago")
+        });
+        assert_eq!(
+            plex_counts_in(&mut harness, main),
+            vec![(777_600, 950), (NOW, 0)]
+        );
+    }
+
+    #[test]
+    fn an_account_is_renamed_and_a_taken_or_blank_name_is_an_error() {
+        let env = env();
+        seed_account(&env, "Main acct", &[MAIN, ALT]);
+        seed_account(&env, "Spare", &[]);
+        let eve = FakeEve::new(&env, partial);
+        let mut harness = open(&env, &eve);
+        until(&mut harness, "the account block", |h| {
+            shown(h, "no PLEX count yet")
+        });
+
+        type_into(&mut harness, "Rename Main acct", " Pilots ");
+        press(&mut harness, "Rename", 0);
+        until(&mut harness, "the new name", |h| shown(h, "Rename Pilots"));
+        assert!(accounts_in(&mut harness).iter().any(|a| a.name == "Pilots"));
+        assert_eq!(
+            field_text(&harness, "Rename Pilots").as_deref(),
+            Some("Pilots")
+        );
+
+        type_into(&mut harness, "Rename Pilots", "Spare");
+        press(&mut harness, "Rename", 0);
+        assert_eq!(
+            notices(&mut harness),
+            vec!["An account called \"Spare\" already exists.".to_owned()]
+        );
+        clear_notices(&mut harness);
+
+        type_into(&mut harness, "Rename Pilots", "   ");
+        press(&mut harness, "Rename", 0);
+        assert_eq!(
+            notices(&mut harness),
+            vec!["Type a name for the account.".to_owned()]
+        );
+        assert!(accounts_in(&mut harness).iter().any(|a| a.name == "Pilots"));
     }
 
     #[test]
