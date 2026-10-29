@@ -22,6 +22,19 @@ use crate::stockpiles::StockpilesPanel;
 use crate::table::{copy_request, has_table};
 use crate::theme::Style;
 
+/// The panel name last asked for by an `Add to layout…` item.
+pub fn take_add_request(ctx: &egui::Context) -> Option<String> {
+    ctx.data_mut(|data| data.remove_temp::<String>(Id::new("add to layout")))
+}
+
+/// The `Add to layout…` item of a panel's `Layout` menu.
+fn add_to_layout(ui: &mut Ui, name: &str) {
+    if ui.button("Add to layout…").clicked() {
+        ui.data_mut(|data| data.insert_temp(Id::new("add to layout"), name.to_owned()));
+        ui.close();
+    }
+}
+
 /// The Build panels the Panels menu lists. The Item inspector floats outside the dock.
 pub const BUILD_PANELS: [BuildPanel; 4] = [
     BuildPanel::Plans,
@@ -409,17 +422,24 @@ fn binding_key(binding: &Binding) -> (&'static str, i64) {
     }
 }
 
-/// The `Layout` menu of a plan or stockpile panel: follow the selection when pinned, pin to it when
-/// following. A panel that follows nothing gets no menu.
+/// The `Layout` menu of a panel: always `Add to layout…`, plus follow or pin for a plan or
+/// stockpile panel.
 fn layout_menu(
     ui: &mut Ui,
+    name: &str,
     tab: &mut Slot,
-    follows: &Follows,
+    follows: Option<&Follows>,
     selected_plan: Option<(i64, &str)>,
     selected_stockpile: Option<(i64, &str)>,
 ) {
-    let stockpile = matches!(follows, Follows::Stockpile);
+    let stockpile = matches!(follows, Some(Follows::Stockpile));
+    let follows = follows.filter(|follows| matches!(follows, Follows::Plan | Follows::Stockpile));
     ui.menu_button("Layout", |ui| {
+        add_to_layout(ui, name);
+        if follows.is_none() {
+            return;
+        }
+        ui.separator();
         if tab.binding == Binding::Follow {
             let selected = if stockpile {
                 selected_stockpile
@@ -516,11 +536,7 @@ impl<B: FnMut(&mut Ui, &Slot)> TabViewer for UserViewer<'_, B> {
                 };
                 ui.label(RichText::new(text).color(mute));
             }
-            if let Some(follows) = follows
-                && matches!(follows, Follows::Plan | Follows::Stockpile)
-            {
-                layout_menu(ui, tab, follows, selected_plan, selected_stockpile);
-            }
+            layout_menu(ui, &name, tab, follows, selected_plan, selected_stockpile);
             if table_shown
                 && ui
                     .button("Copy table")
@@ -601,6 +617,7 @@ impl<T: Copy, B: FnMut(&mut Ui, T)> TabViewer for Locked<T, B> {
             .unwrap_or(false);
         ui.horizontal(|ui| {
             ui.strong(title);
+            ui.menu_button("Layout", |ui| add_to_layout(ui, title));
             if table_shown
                 && ui
                     .button("Copy table")
@@ -1005,13 +1022,42 @@ mod tests {
             )
     }
 
-    fn shown(harness: &Harness<'_, User>, label: &str) -> bool {
+    fn shown<S>(harness: &Harness<'_, S>, label: &str) -> bool {
         harness.query_by_label(label).is_some()
     }
 
-    fn click(harness: &mut Harness<'_, User>, label: &str) {
+    fn click<S>(harness: &mut Harness<'_, S>, label: &str) {
         harness.get_by_label(label).click();
         harness.run_steps(3);
+    }
+
+    /// Clicks the `Layout` menu of the panel whose title is `panel`, not the one of another panel
+    /// that happens to be in the same dock.
+    fn click_layout_of(harness: &mut Harness<'_, User>, panel: &str) {
+        let title = text_rect(harness, panel).center();
+        let button = harness
+            .get_all_by_label("Layout")
+            .min_by(|a, b| {
+                let da = a.rect().center().distance(title);
+                let db = b.rect().center().distance(title);
+                da.total_cmp(&db)
+            })
+            .expect("the panel has a Layout menu");
+        button.click();
+        harness.run_steps(3);
+    }
+
+    fn locked_harness(dock: DockState<BuildPanel>) -> Harness<'static, DockState<BuildPanel>> {
+        let style = Style::eve_dense();
+        Harness::builder()
+            .with_size(vec2(800.0, 600.0))
+            .build_ui_state(
+                move |ui, dock: &mut DockState<BuildPanel>| {
+                    style.apply(ui.ctx());
+                    show_locked(ui, &style, dock, BuildPanel::title, |_, _| {});
+                },
+                dock,
+            )
     }
 
     /// The rect of the topmost painted text equal to `text`. Tab titles are painted, not widgets,
@@ -1126,7 +1172,7 @@ mod tests {
             None,
         );
         harness.run_steps(2);
-        click(&mut harness, "Layout");
+        click_layout_of(&mut harness, "Buy list");
         click(&mut harness, "Pin to \"Rifter 31\"");
         assert!(
             saved(&harness.state().dock).ends_with("  Buy list [pinned plan 2]\n"),
@@ -1142,7 +1188,7 @@ mod tests {
             Some("Hobgoblin 10"),
         );
         harness.run_steps(2);
-        click(&mut harness, "Layout");
+        click_layout_of(&mut harness, "Steps");
         click(&mut harness, "Follow the selected plan");
         assert!(
             saved(&harness.state().dock).ends_with("  Steps\n"),
@@ -1168,17 +1214,40 @@ mod tests {
     }
 
     #[test]
-    fn a_panel_that_follows_nothing_has_no_layout_menu() {
+    fn a_panel_that_follows_nothing_still_offers_add_to_layout() {
         let mut harness = user_harness(
             user_dock("EVE Means of Profit layout 1\nname: Test\nPlans\n"),
             Some((2, "Rifter 31")),
             None,
         );
         harness.run_steps(2);
-        assert!(
-            !shown(&harness, "Layout"),
-            "a panel that follows nothing has nothing to put in the menu"
+        assert!(shown(&harness, "Layout"), "every panel can be added");
+        click(&mut harness, "Layout");
+        assert!(shown(&harness, "Add to layout…"));
+    }
+
+    #[test]
+    fn a_locked_page_layout_menu_asks_to_add_the_panel() {
+        let mut harness = locked_harness(DockState::new(vec![BuildPanel::BuyList]));
+        harness.run_steps(2);
+        click(&mut harness, "Layout");
+        click(&mut harness, "Add to layout…");
+        assert_eq!(take_add_request(&harness.ctx), Some("Buy list".to_owned()));
+        assert_eq!(take_add_request(&harness.ctx), None);
+    }
+
+    #[test]
+    fn a_user_dock_layout_menu_asks_to_add_the_panel() {
+        let mut harness = user_harness(
+            user_dock("EVE Means of Profit layout 1\nname: Test\nBuy list\n"),
+            Some((2, "Rifter 31")),
+            None,
         );
+        harness.run_steps(2);
+        click(&mut harness, "Layout");
+        click(&mut harness, "Add to layout…");
+        assert_eq!(take_add_request(&harness.ctx), Some("Buy list".to_owned()));
+        assert_eq!(take_add_request(&harness.ctx), None);
     }
 
     #[test]
