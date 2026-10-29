@@ -27,6 +27,22 @@ pub struct PlanInput {
     pub stock: BTreeMap<TypeId, u64>,
 }
 
+/// One product of a plan that holds several.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanProduct {
+    pub type_id: TypeId,
+    pub quantity: u64,
+}
+
+/// What the player asks for when a plan holds several products. Every product is always built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanProducts {
+    pub products: Vec<PlanProduct>,
+    pub build: BTreeSet<TypeId>,
+    pub modifiers: BTreeMap<TypeId, Modifier>,
+    pub stock: BTreeMap<TypeId, u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
     pub steps: Vec<Step>,
@@ -58,6 +74,7 @@ pub struct BuyLine {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanError {
+    NoProducts,
     QuantityZero,
     NoRecipe(TypeId),
     NoModifier(TypeId),
@@ -70,6 +87,7 @@ pub enum PlanError {
 impl fmt::Display for PlanError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NoProducts => write!(f, "the plan needs at least one product"),
             Self::QuantityZero => write!(f, "the quantity to build must be at least one"),
             Self::NoRecipe(t) => write!(f, "type {t} has no recipe"),
             Self::NoModifier(t) => write!(f, "type {t} is built but has no material modifier"),
@@ -85,22 +103,63 @@ impl std::error::Error for PlanError {}
 
 /// Works out the chain for `input.quantity` units of `input.product`.
 pub fn plan(input: &PlanInput, recipes: &RecipeBook) -> Result<Plan, PlanError> {
-    if input.quantity == 0 {
-        return Err(PlanError::QuantityZero);
+    plan_products(
+        &PlanProducts {
+            products: vec![PlanProduct {
+                type_id: input.product,
+                quantity: input.quantity,
+            }],
+            build: input.build.clone(),
+            modifiers: input.modifiers.clone(),
+            stock: input.stock.clone(),
+        },
+        recipes,
+    )
+}
+
+/// Works out one plan for all the products, sharing the stock between them. Every product is always
+/// built, even when it is also a material of another product.
+pub fn plan_products(input: &PlanProducts, recipes: &RecipeBook) -> Result<Plan, PlanError> {
+    if input.products.is_empty() {
+        return Err(PlanError::NoProducts);
     }
+    // Duplicate products are one product; their quantities add up.
+    let mut product_demand: BTreeMap<TypeId, u64> = BTreeMap::new();
+    for product in &input.products {
+        if product.quantity == 0 {
+            return Err(PlanError::QuantityZero);
+        }
+        let total = product_demand.entry(product.type_id).or_insert(0);
+        *total = total
+            .checked_add(product.quantity)
+            .ok_or(PlanError::Overflow)?;
+    }
+    let products: BTreeSet<TypeId> = product_demand.keys().copied().collect();
+
     let mut built = BTreeSet::new();
-    visit(input.product, input, recipes, &mut Vec::new(), &mut built)?;
-    let depth = depths(input.product, &built, recipes)?;
+    for product in &input.products {
+        if !built.contains(&product.type_id) {
+            visit(
+                product.type_id,
+                input,
+                &products,
+                recipes,
+                &mut Vec::new(),
+                &mut built,
+            )?;
+        }
+    }
+    let depth = depths(&products, &built, recipes)?;
     let mut order: Vec<(u32, TypeId)> = depth.iter().map(|(t, d)| (*d, *t)).collect();
     order.sort_unstable();
 
-    let mut demand = BTreeMap::from([(input.product, input.quantity)]);
+    let mut demand = product_demand;
     let mut used_from_stock = BTreeMap::new();
     let mut steps = Vec::new();
     let mut buy = Vec::new();
     for (d, t) in order {
         let needed = demand.get(&t).copied().unwrap_or(0);
-        let owned = if t == input.product {
+        let owned = if products.contains(&t) {
             0
         } else {
             input.stock.get(&t).copied().unwrap_or(0)
@@ -113,7 +172,7 @@ pub fn plan(input: &PlanInput, recipes: &RecipeBook) -> Result<Plan, PlanError> 
                 d,
                 needed,
                 from_stock,
-                input,
+                &input.modifiers,
                 recipes,
                 &mut demand,
             )?);
@@ -153,7 +212,8 @@ fn recipe_of(t: TypeId, recipes: &RecipeBook) -> Result<&Recipe, PlanError> {
 /// type and finds loops; the first problem met wins. `done` collects the built types.
 fn visit(
     t: TypeId,
-    input: &PlanInput,
+    input: &PlanProducts,
+    products: &BTreeSet<TypeId>,
     recipes: &RecipeBook,
     path: &mut Vec<TypeId>,
     done: &mut BTreeSet<TypeId>,
@@ -170,9 +230,9 @@ fn visit(
         if path.contains(material) {
             return Err(PlanError::Loop(*material));
         }
-        let built = *material == input.product || input.build.contains(material);
+        let built = products.contains(material) || input.build.contains(material);
         if built && !done.contains(material) {
-            visit(*material, input, recipes, path, done)?;
+            visit(*material, input, products, recipes, path, done)?;
         }
     }
     path.pop();
@@ -180,11 +240,11 @@ fn visit(
     Ok(())
 }
 
-/// Longest path from the product to each reached type, over built edges. Built types are
-/// expanded only once all their built consumers are, so each depth is final when used.
-/// Bought types only receive a depth.
+/// Longest path from any product to each reached type, over built edges. Built types are expanded
+/// only once all their built consumers are, so each depth is final when used. Bought types only
+/// receive a depth. A product that is also a material takes the longer path through its consumer.
 fn depths(
-    product: TypeId,
+    products: &BTreeSet<TypeId>,
     built: &BTreeSet<TypeId>,
     recipes: &RecipeBook,
 ) -> Result<BTreeMap<TypeId, u32>, PlanError> {
@@ -197,8 +257,14 @@ fn depths(
             }
         }
     }
-    let mut depth = BTreeMap::from([(product, 0u32)]);
-    let mut ready = vec![product];
+    let mut depth = BTreeMap::new();
+    let mut ready = Vec::new();
+    for product in products {
+        depth.insert(*product, 0u32);
+        if pending.get(product).copied().unwrap_or(0) == 0 {
+            ready.push(*product);
+        }
+    }
     while let Some(t) = ready.pop() {
         let next = depth
             .get(&t)
@@ -228,16 +294,12 @@ fn build_step(
     depth: u32,
     needed: u64,
     from_stock: u64,
-    input: &PlanInput,
+    modifiers: &BTreeMap<TypeId, Modifier>,
     recipes: &RecipeBook,
     demand: &mut BTreeMap<TypeId, u64>,
 ) -> Result<Step, PlanError> {
     let recipe = recipe_of(t, recipes)?;
-    let modifier = input
-        .modifiers
-        .get(&t)
-        .copied()
-        .ok_or(PlanError::NoModifier(t))?;
+    let modifier = modifiers.get(&t).copied().ok_or(PlanError::NoModifier(t))?;
     // Cannot saturate: from_stock is min(owned, needed) from the caller, so it is never above needed.
     let to_build = needed.saturating_sub(from_stock);
     let runs = to_build.div_ceil(recipe.output_per_run);
@@ -460,6 +522,23 @@ mod tests {
         PlanInput {
             product,
             quantity,
+            build: build.iter().copied().collect(),
+            modifiers: modifiers.iter().copied().collect(),
+            stock: stock.iter().copied().collect(),
+        }
+    }
+
+    fn products_input(
+        products: &[(TypeId, u64)],
+        build: &[TypeId],
+        modifiers: &[(TypeId, Modifier)],
+        stock: &[(TypeId, u64)],
+    ) -> PlanProducts {
+        PlanProducts {
+            products: products
+                .iter()
+                .map(|&(type_id, quantity)| PlanProduct { type_id, quantity })
+                .collect(),
             build: build.iter().copied().collect(),
             modifiers: modifiers.iter().copied().collect(),
             stock: stock.iter().copied().collect(),
@@ -782,6 +861,157 @@ mod tests {
                 buy(36, 1, 66153, 0, 66153),
                 buy(37, 1, 13231, 0, 13231),
             ]
+        );
+    }
+
+    #[test]
+    fn several_products_share_the_stock_and_the_demand() {
+        let got = plan_products(
+            &products_input(
+                &[(11481, 150), (587, 2)],
+                &[],
+                &[(11481, me10()), (587, me10())],
+                &[(34, 1000)],
+            ),
+            &game_book(),
+        )
+        .expect("products plan");
+        assert_eq!(
+            got.steps,
+            vec![
+                step(587, Activity::Manufacturing, 0, (2, 0, 2), 2, (0, 30, 2), 0),
+                step(
+                    11481,
+                    Activity::Manufacturing,
+                    0,
+                    (150, 0, 150),
+                    2,
+                    (0, 200, 2),
+                    50
+                ),
+            ]
+        );
+        assert_eq!(
+            got.buy,
+            vec![
+                buy(34, 1, 58601, 1000, 57601),
+                buy(35, 1, 11600, 0, 11600),
+                buy(36, 1, 4900, 0, 4900),
+                buy(37, 1, 1048, 0, 1048),
+                buy(38, 1, 65, 0, 65),
+            ]
+        );
+        assert_eq!(got.unused_stock, vec![]);
+    }
+
+    #[test]
+    fn a_product_that_is_also_a_material_is_built_once_at_its_longest_depth() {
+        let got = plan_products(
+            &products_input(
+                &[(2456, 10), (11481, 150)],
+                &[],
+                &[(2456, me2()), (11481, me10())],
+                &[],
+            ),
+            &game_book(),
+        )
+        .expect("products plan");
+
+        let drone = got
+            .steps
+            .iter()
+            .find(|step| step.type_id == 2456)
+            .expect("2456 step");
+        assert_eq!(drone.depth, 0);
+        assert_eq!(drone.needed, 10);
+
+        let frigate = got
+            .steps
+            .iter()
+            .find(|step| step.type_id == 11481)
+            .expect("11481 step");
+        assert_eq!(
+            frigate,
+            &step(
+                11481,
+                Activity::Manufacturing,
+                1,
+                (160, 0, 160),
+                2,
+                (0, 200, 2),
+                40
+            )
+        );
+        assert!(got.buy.iter().all(|line| line.type_id != 11481));
+        let mineral = got
+            .buy
+            .iter()
+            .find(|line| line.type_id == 34)
+            .expect("34 buy");
+        assert_eq!(
+            (mineral.needed, mineral.from_stock, mineral.to_buy),
+            (1001, 0, 1001)
+        );
+    }
+
+    #[test]
+    fn a_plan_without_products_is_rejected() {
+        assert_eq!(
+            plan_products(&products_input(&[], &[], &[], &[]), &game_book()),
+            Err(PlanError::NoProducts)
+        );
+        assert_eq!(
+            PlanError::NoProducts.to_string(),
+            "the plan needs at least one product"
+        );
+    }
+
+    #[test]
+    fn a_product_with_quantity_zero_is_rejected() {
+        assert_eq!(
+            plan_products(
+                &products_input(
+                    &[(2456, 0), (11481, 1)],
+                    &[],
+                    &[(2456, me2()), (11481, me10())],
+                    &[],
+                ),
+                &game_book()
+            ),
+            Err(PlanError::QuantityZero)
+        );
+    }
+
+    #[test]
+    fn duplicate_products_sum_their_quantities() {
+        let got = plan_products(
+            &products_input(&[(11481, 100), (11481, 50)], &[], &[(11481, me10())], &[]),
+            &game_book(),
+        )
+        .expect("products plan");
+        assert_eq!(
+            got.steps,
+            vec![step(
+                11481,
+                Activity::Manufacturing,
+                0,
+                (150, 0, 150),
+                2,
+                (0, 200, 2),
+                50
+            )]
+        );
+        assert_eq!(
+            plan_products(
+                &products_input(
+                    &[(11481, u64::MAX), (11481, 1)],
+                    &[],
+                    &[(11481, me10())],
+                    &[],
+                ),
+                &game_book()
+            ),
+            Err(PlanError::Overflow)
         );
     }
 

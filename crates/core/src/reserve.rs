@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::industry::{RecipeBook, TypeId};
-use crate::plan::{Plan, PlanError, PlanInput};
+use crate::plan::{Plan, PlanError, PlanInput, PlanProduct, PlanProducts};
 use crate::stock::{CharacterId, ItemId, LocationId, Places, ResolvedAsset, StockScope};
 use crate::stockpile::{
     Held, Line, Source, Status, Stock, Stockpile, StockpileError, have, matches_any,
@@ -92,6 +92,7 @@ pub struct ClaimedLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReserveError {
     OutOfRange,
+    ProductCount,
     Plan { plan_id: i64, error: PlanError },
 }
 
@@ -99,6 +100,7 @@ impl fmt::Display for ReserveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::OutOfRange => write!(f, "number out of range"),
+            Self::ProductCount => write!(f, "the products do not match the plans"),
             Self::Plan { plan_id, error } => write!(f, "plan {plan_id}: {error}"),
         }
     }
@@ -113,9 +115,33 @@ pub fn claims(
     assets: &[ResolvedAsset],
     recipes: &RecipeBook,
 ) -> Result<Claims, ReserveError> {
+    let products: Vec<Vec<PlanProduct>> = plans
+        .iter()
+        .map(|reserving| {
+            vec![PlanProduct {
+                type_id: reserving.input.product,
+                quantity: reserving.input.quantity,
+            }]
+        })
+        .collect();
+    claims_many(plans, &products, assets, recipes)
+}
+
+/// Serves the plans in the given order, with plan `i` working on `products[i]` instead of the
+/// single product in its input. Each plan's stock is the hangar units no earlier plan claimed,
+/// plus its assigned jobs; the jobs are used first, then the hangar entries in order.
+pub fn claims_many(
+    plans: &[ReservingPlan],
+    products: &[Vec<PlanProduct>],
+    assets: &[ResolvedAsset],
+    recipes: &RecipeBook,
+) -> Result<Claims, ReserveError> {
+    if plans.len() != products.len() {
+        return Err(ReserveError::ProductCount);
+    }
     let mut claims = Claims::default();
     let mut claimed_on: BTreeMap<ItemId, u64> = BTreeMap::new();
-    for reserving in plans {
+    for (reserving, products) in plans.iter().zip(products) {
         let entries = entries_of(&reserving.scope, assets);
         let mut stock: BTreeMap<TypeId, u64> = BTreeMap::new();
         for &row in &entries {
@@ -128,14 +154,17 @@ pub fn claims(
             add(&mut stock, type_id, units)?;
         }
 
-        let input = PlanInput {
+        let input = PlanProducts {
+            products: products.clone(),
+            build: reserving.input.build.clone(),
+            modifiers: reserving.input.modifiers.clone(),
             stock,
-            ..reserving.input.clone()
         };
-        let computed = crate::plan::plan(&input, recipes).map_err(|error| ReserveError::Plan {
-            plan_id: reserving.plan_id,
-            error,
-        })?;
+        let computed =
+            crate::plan::plan_products(&input, recipes).map_err(|error| ReserveError::Plan {
+                plan_id: reserving.plan_id,
+                error,
+            })?;
 
         let mut used: BTreeMap<TypeId, u64> = BTreeMap::new();
         for step in &computed.steps {
@@ -622,6 +651,94 @@ mod tests {
     }
 
     #[test]
+    fn plans_with_several_products_share_the_stock() {
+        let mut many = book();
+        many.insert(900101, recipe(1, &[(900201, 2)]));
+        many.insert(900102, recipe(1, &[(900201, 3)]));
+        let modifiers = BTreeMap::from([(900101, Modifier::one()), (900102, Modifier::one())]);
+        let reserving = |plan_id, product, quantity| ReservingPlan {
+            plan_id,
+            input: PlanInput {
+                product,
+                quantity,
+                build: BTreeSet::new(),
+                modifiers: modifiers.clone(),
+                stock: BTreeMap::new(),
+            },
+            scope: scope(&[MAIN], Places::All),
+            assigned: BTreeMap::new(),
+        };
+        let rows = vec![asset(1, 900201, MAIN, P1, 50, true)];
+        let products = vec![
+            vec![PlanProduct {
+                type_id: 900101,
+                quantity: 10,
+            }],
+            vec![PlanProduct {
+                type_id: 900102,
+                quantity: 20,
+            }],
+        ];
+
+        let got = claims_many(
+            &[reserving(1, 900101, 10), reserving(2, 900102, 20)],
+            &products,
+            &rows,
+            &many,
+        )
+        .expect("claims");
+
+        assert_eq!(got.order, vec![1, 2]);
+        assert_eq!(got.by_plan[&1].from_assets, BTreeMap::from([(900201, 20)]));
+        assert_eq!(got.by_plan[&2].from_assets, BTreeMap::from([(900201, 30)]));
+        let mineral = got.by_plan[&2]
+            .plan
+            .buy
+            .iter()
+            .find(|line| line.type_id == 900201)
+            .expect("buy line");
+        assert_eq!(
+            (mineral.needed, mineral.from_stock, mineral.to_buy),
+            (60, 30, 30)
+        );
+        assert_eq!(got.by_asset, BTreeMap::from([(1, vec![(1, 20), (2, 30)])]));
+    }
+
+    #[test]
+    fn claims_many_needs_one_product_list_per_plan() {
+        let products = vec![vec![PlanProduct {
+            type_id: 100,
+            quantity: 5,
+        }]];
+        assert_eq!(
+            claims_many(&[plan_a(), plan_b()], &products, &assets(), &book()),
+            Err(ReserveError::ProductCount)
+        );
+        assert_eq!(
+            ReserveError::ProductCount.to_string(),
+            "the products do not match the plans"
+        );
+    }
+
+    #[test]
+    fn claims_with_one_product_per_plan_matches_claims_many() {
+        let plans = [plan_a(), plan_b()];
+        let products: Vec<Vec<PlanProduct>> = plans
+            .iter()
+            .map(|reserving| {
+                vec![PlanProduct {
+                    type_id: reserving.input.product,
+                    quantity: reserving.input.quantity,
+                }]
+            })
+            .collect();
+        assert_eq!(
+            claims(&plans, &assets(), &book()),
+            claims_many(&plans, &products, &assets(), &book())
+        );
+    }
+
+    #[test]
     fn reversed_order_changes_who_gets_the_shared_units() {
         let got = claims(&[plan_b(), plan_a()], &assets(), &book()).expect("claims");
         assert_eq!(got.order, vec![12, 11]);
@@ -939,6 +1056,10 @@ mod tests {
     #[test]
     fn errors_read_as_sentences() {
         assert_eq!(ReserveError::OutOfRange.to_string(), "number out of range");
+        assert_eq!(
+            ReserveError::ProductCount.to_string(),
+            "the products do not match the plans"
+        );
         assert_eq!(
             ReserveError::Plan {
                 plan_id: 14,
