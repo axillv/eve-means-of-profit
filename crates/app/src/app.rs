@@ -628,7 +628,10 @@ impl App {
                 );
                 save_panels(&mut self.shared, "characters", text);
             }
-            Page::Stockpiles => self.show_stockpiles(ui, &style),
+            Page::Stockpiles => {
+                self.show_stockpiles(ui, &style);
+                self.open_built_plan();
+            }
             Page::Setup => {
                 let text = dock::show_page(
                     ui,
@@ -662,6 +665,27 @@ impl App {
         );
         save_panels(&mut self.shared, "stockpiles", text);
         self.stockpiles_page.show_windows(ui, &mut self.shared);
+    }
+
+    /// Opens the plan a `Build what is short` click made, once the Stockpiles page has been drawn.
+    /// A request skips a plan already on screen, so that one is loaded directly; a plan with
+    /// unsaved edits asks about leaving first.
+    fn open_built_plan(&mut self) {
+        let Some(id) = self.stockpiles_page.open_plan.take() else {
+            return;
+        };
+        self.page = Page::Build;
+        if self.build_page.selected == Some(id) {
+            if self.build_page.dirty {
+                self.build_page.dialog =
+                    Some(build::state::Dialog::Leave(build::state::Next::Select(id)));
+            } else {
+                self.build_page.load(id, &mut self.shared);
+            }
+        } else {
+            self.build_page
+                .request(build::state::Next::Select(id), &mut self.shared);
+        }
     }
 
     fn first_run_screen(&mut self, ui: &mut Ui) {
@@ -1273,6 +1297,89 @@ mod tests {
             tabs(&app.characters_dock),
             [CharactersPanel::Characters],
             "the saved list replaces the default layout"
+        );
+    }
+
+    /// A saved plan of one Rifter, with everything else at its defaults.
+    fn record(name: &str) -> mop_store::PlanRecord {
+        mop_store::PlanRecord {
+            id: 0,
+            name: name.to_owned(),
+            product: 587,
+            quantity: 1,
+            build: std::collections::BTreeSet::new(),
+            me: BTreeMap::new(),
+            manufacturing: None,
+            reactions: None,
+            price_rule: Default::default(),
+            route: None,
+            service: None,
+            packing: Default::default(),
+            pasted_stock: String::new(),
+            created_at: NOW,
+            updated_at: NOW,
+        }
+    }
+
+    #[test]
+    fn a_plan_made_on_the_stockpiles_page_opens_on_build() {
+        let dir = TempDir::new().expect("a temp folder");
+        let data = dir.path().join("data");
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&data).expect("the data folder");
+        let mut app = App::new(&Context::default(), config(data, cache)).expect("the app starts");
+        let id = app
+            .shared
+            .store
+            .create_plan(&record("Kit (short)"), NOW)
+            .expect("the plan is saved");
+        app.page = Page::Stockpiles;
+        app.stockpiles_page.open_plan = Some(id);
+
+        app.open_built_plan();
+
+        assert_eq!(app.page, Page::Build);
+        assert_eq!(app.build_page.selected, Some(id));
+        assert_eq!(app.stockpiles_page.open_plan, None);
+
+        // The plan is on screen with an unsaved edit: the leave dialog asks first.
+        app.build_page.dirty = true;
+        app.page = Page::Stockpiles;
+        app.stockpiles_page.open_plan = Some(id);
+        app.open_built_plan();
+        assert_eq!(app.page, Page::Build);
+        assert_eq!(
+            app.build_page.dialog,
+            Some(build::state::Dialog::Leave(build::state::Next::Select(id)))
+        );
+
+        // Leaving loads the plan again and drops the edit.
+        app.build_page
+            .go(build::state::Next::Select(id), &mut app.shared);
+        assert!(!app.build_page.dirty);
+        assert_eq!(app.build_page.selected, Some(id));
+
+        // A different plan on screen with unsaved edits is asked about through the usual request.
+        let other = app
+            .shared
+            .store
+            .create_plan(&record("Kit (short) 2"), NOW)
+            .expect("the other plan is saved");
+        app.build_page.dirty = true;
+        app.page = Page::Stockpiles;
+        app.stockpiles_page.open_plan = Some(other);
+        app.open_built_plan();
+        assert_eq!(app.page, Page::Build);
+        assert_eq!(
+            app.build_page.dialog,
+            Some(build::state::Dialog::Leave(build::state::Next::Select(
+                other
+            )))
+        );
+        assert_eq!(
+            app.build_page.selected,
+            Some(id),
+            "the plan on screen waits for the answer"
         );
     }
 }

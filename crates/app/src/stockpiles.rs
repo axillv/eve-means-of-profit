@@ -1,6 +1,7 @@
 //! The Stockpiles page: the list of stockpiles, what one holds against its targets and the plans'
 //! claims, and what is short.
 
+mod build_short;
 mod buy;
 mod contents;
 mod edit;
@@ -10,17 +11,18 @@ mod list;
 pub use import::import_file;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use egui::Ui;
 use mop_core::buylist::LinePrice;
-use mop_core::industry::TypeId;
+use mop_core::industry::{RecipeBook, TypeId};
 use mop_core::money::Money;
 use mop_core::reserve::{self, ClaimedLine, Claims, ShortMode};
 use mop_core::stock::{CharacterId, LocationId, ResolvedAsset, resolve};
 use mop_core::stockpile::{Held, Stock, Stockpile, StockpileError};
 use mop_esi::places::FIRST_STRUCTURE_ID;
 use mop_market::book::PriceRule;
-use mop_sde::Sde;
+use mop_sde::{Sde, SdeError};
 
 use crate::Shared;
 use crate::build::prices::{Held as PricesHeld, Live, line_price, live};
@@ -40,6 +42,16 @@ pub struct StockpilesPage {
     pub(crate) buy: buy::State,
     pub(crate) edit: edit::State,
     pub(crate) import: import::State,
+    /// The plan each stockpile's `Build what is short` button wrote this run, by stockpile id.
+    /// Never saved.
+    pub(crate) built: BTreeMap<i64, i64>,
+    /// The plan a click made, for the page to open on Build once this frame is drawn.
+    pub(crate) open_plan: Option<i64>,
+    /// The game data's recipes, kept from the build they were read for so the Contents panel does
+    /// not read the whole book every frame.
+    pub(crate) recipes: Arc<RecipeBook>,
+    /// The game data build `recipes` was read from, `None` until it is first read.
+    pub(crate) recipes_build: Option<u64>,
 }
 
 /// One panel of the Stockpiles page.
@@ -87,6 +99,17 @@ impl StockpilesPage {
 
     pub(crate) fn open_import(&mut self) {
         self.import.start();
+    }
+
+    /// The game data's recipes, read once per build of the game data and kept. A failed read
+    /// leaves the kept book as it was.
+    pub(crate) fn recipes(&mut self, sde: &Sde) -> Result<Arc<RecipeBook>, SdeError> {
+        let build = sde.build()?.number;
+        if self.recipes_build != Some(build) {
+            self.recipes = Arc::new(sde.recipe_book()?);
+            self.recipes_build = Some(build);
+        }
+        Ok(Arc::clone(&self.recipes))
     }
 }
 

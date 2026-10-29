@@ -1,13 +1,13 @@
 //! The Contents panel: one stockpile's targets, what is held and claimed, and what is short.
 
-use egui::{Button, ComboBox, Id, RichText, Ui};
+use egui::{ComboBox, Id, RichText, Ui};
 use mop_core::industry::TypeId;
 use mop_core::reserve::{ClaimedLine, ShortMode};
 use mop_core::stockpile::Status;
 
 use super::{
-    Snapshot, StockpilesPage, StockpilesPanel, claimed_lines, count_text, short_total, short_value,
-    snapshot,
+    Snapshot, StockpilesPage, StockpilesPanel, build_short, claimed_lines, count_text, short_total,
+    short_value, snapshot,
 };
 use crate::Shared;
 use crate::build::prices::{Held, age_text};
@@ -44,13 +44,24 @@ pub(crate) fn show(page: &mut StockpilesPage, ui: &mut Ui, cx: &mut Shared) {
         page.buy.show(ui, cx);
         return;
     };
+    let mut errors = Vec::new();
     let lines = match claimed_lines(&snapshot, id, mode, sde, &cx.session) {
         Ok(lines) => lines,
         Err(error) => {
-            report(cx, format!("Could not read the stockpile: {error}"));
+            errors.push(format!("Could not read the stockpile: {error}"));
             Vec::new()
         }
     };
+    let recipes = match page.recipes(sde) {
+        Ok(recipes) => Some(recipes),
+        Err(error) => {
+            errors.push(format!("Could not read the recipes: {error}"));
+            None
+        }
+    };
+    for text in errors {
+        report(cx, text);
+    }
     let held = cx.market.held();
     let mut names = std::collections::BTreeMap::new();
     for line in &lines {
@@ -70,14 +81,18 @@ pub(crate) fn show(page: &mut StockpilesPage, ui: &mut Ui, cx: &mut Shared) {
     let (value, incomplete) = short_total(&rows, snapshot.price_rule, &held);
     table(ui, cx, &snapshot, &rows, mode, &names, &held);
     footer(ui, cx, &snapshot, value, incomplete);
-    let short = rows.iter().any(|line| line.short > 0);
-    if ui
-        .add_enabled(short, Button::new("Buy what is short"))
-        .on_hover_text("Puts the short rows in a buy list with prices and freight.")
-        .clicked()
-    {
-        page.buy.open(id, stockpile.name.clone());
-    }
+    build_short::buttons(
+        page,
+        ui,
+        cx,
+        &build_short::Buttons {
+            id,
+            stockpile: &stockpile,
+            rows: &rows,
+            names: &names,
+            recipes: recipes.as_deref(),
+        },
+    );
     page.buy.show(ui, cx);
 }
 
