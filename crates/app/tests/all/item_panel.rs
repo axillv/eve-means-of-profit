@@ -18,8 +18,13 @@ mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
     use eve_means_of_profit::build::prices::{Failure, Prices, failure_text};
-    use eve_means_of_profit::session::{EveAccess, PendingLogin};
-    use eve_means_of_profit::{App, AppConfig};
+    use eve_means_of_profit::claims::ClaimsState;
+    use eve_means_of_profit::item_panel::inspector;
+    use eve_means_of_profit::selection::Selection;
+    use eve_means_of_profit::session::{EveAccess, PendingLogin, Session};
+    use eve_means_of_profit::theme::Style;
+    use eve_means_of_profit::worker::Worker;
+    use eve_means_of_profit::{App, AppConfig, Shared};
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use mop_core::freight::Packing;
@@ -29,6 +34,7 @@ mod tests {
     };
     use mop_esi::characters::{Character, Login};
     use mop_esi::error::EsiError;
+    use mop_esi::industry::IndustryData;
     use mop_esi::places::{NamingReport, StructureNames};
     use mop_esi::saved;
     use mop_market::book::PriceRule;
@@ -36,7 +42,7 @@ mod tests {
     use mop_market::fuzzwork::{BytesHttp, BytesResponse};
     use mop_sde::{Fetch, FetchError, Sde, import};
     use mop_store::reservations::PlanStock;
-    use mop_store::{PlanRecord, Store};
+    use mop_store::{Density, PlanRecord, Store};
     use rusqlite::Connection;
     use tempfile::TempDir;
 
@@ -185,6 +191,48 @@ mod tests {
 
     fn sde(env: &Env) -> Sde {
         Sde::open(&env.data.join("sde.sqlite")).expect("the game data opens")
+    }
+
+    /// The state the inspector reads: the fixture game data and an empty session, with no network.
+    fn shared(env: &Env) -> Shared {
+        Shared {
+            sde: Some(sde(env)),
+            store: Store::open(&env.data.join("user.sqlite"), NOW)
+                .expect("the store opens")
+                .store,
+            worker: Worker::spawn(egui::Context::default(), Box::new(NoNetwork)),
+            market: Arc::new(Prices::new(Box::new(crate::offline::Offline))),
+            // The net worth copy job that would ask for PLEX never runs in these tests, so the
+            // client is never used.
+            plex_http: Arc::new(mop_market::http::UreqHttp::new()),
+            copy_notices: Arc::new(Mutex::new(Vec::new())),
+            style: Style::eve_dense(),
+            density: Density::Normal,
+            rail_icons_only: false,
+            data_dir: env.data.clone(),
+            notices: Vec::new(),
+            clock: Box::new(|| NOW),
+            session: Session::new(Box::new(FakeEve {
+                characters: Vec::new(),
+                jeve: None,
+            })),
+            selection: Selection::default(),
+            industry: IndustryData::default(),
+            claims: ClaimsState::default(),
+        }
+    }
+
+    /// A harness that draws only the inspector over [`shared`].
+    fn inspector_harness(env: &Env) -> Harness<'static, Shared> {
+        Harness::builder()
+            .with_size(vec2(1280.0, 800.0))
+            .build_ui_state(
+                |ui, cx: &mut Shared| {
+                    cx.style.apply(ui.ctx());
+                    inspector(ui, cx);
+                },
+                shared(env),
+            )
     }
 
     /// A login with the characters given, a jEve folder when there is one.
@@ -389,7 +437,7 @@ mod tests {
         (harness, calls)
     }
 
-    fn shown(harness: &Harness<'_, App>, text: &str) -> bool {
+    fn shown<S>(harness: &Harness<'_, S>, text: &str) -> bool {
         harness.query_all_by_label(text).next().is_some()
     }
 
@@ -528,6 +576,66 @@ mod tests {
         );
         loaded(&mut harness);
         assert!(shown(&harness, "Click an item to see it here."));
+    }
+
+    #[test]
+    fn the_inspector_draws_the_item_window_only_when_an_item_is_picked() {
+        let env = env();
+        let mut harness = inspector_harness(&env);
+        harness.run();
+        assert!(!shown(&harness, "Item"));
+
+        harness.state_mut().selection.item = Some(PAU);
+        harness.run();
+        for text in [
+            "Item",
+            "Particle Accelerator Unit",
+            "None owned.",
+            "Plans that use it",
+            "No saved plan uses it.",
+            "Pin",
+        ] {
+            assert!(shown(&harness, text), "{text}");
+        }
+    }
+
+    #[test]
+    fn escape_and_close_clear_the_item_unless_pinned() {
+        let env = env();
+        let mut harness = inspector_harness(&env);
+        harness.state_mut().selection.item = Some(PAU);
+        harness.run();
+        assert!(shown(&harness, "None owned."));
+
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+        assert!(!shown(&harness, "None owned."));
+        assert_eq!(harness.state().selection.item, None);
+
+        {
+            let selection = &mut harness.state_mut().selection;
+            selection.item = Some(PAU);
+            selection.item_pinned = true;
+        }
+        harness.run();
+        assert!(shown(&harness, "None owned."));
+
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+        assert!(shown(&harness, "None owned."));
+        assert_eq!(harness.state().selection.item, Some(PAU));
+
+        harness.get_by_label("Close window").click();
+        harness.run();
+        assert!(shown(&harness, "None owned."));
+        assert_eq!(harness.state().selection.item, Some(PAU));
+
+        harness.get_by_label("Pin").click();
+        harness.run();
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+        assert!(!shown(&harness, "None owned."));
+        assert_eq!(harness.state().selection.item, None);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 mod owned;
 mod plans;
 
-use egui::{RichText, Ui};
+use egui::{Id, Key, Modifiers, RichText, Ui, Window, pos2, vec2};
 use mop_core::format::group_thousands;
 use mop_core::industry::TypeId;
 use mop_core::money::Money;
@@ -13,9 +13,63 @@ use mop_market::fuzzwork::{Side, Stat};
 use crate::Shared;
 use crate::build::prices::{age_text, failure_text};
 use crate::build::state::type_name;
+use crate::table::{copy_request, has_table};
 
 /// Prices older than this many seconds show in the stale colour.
 const STALE_AFTER: i64 = 600;
+
+/// Draws the Item window while an item is picked. Escape and the window's close button clear the
+/// item unless the Pin holds it.
+pub fn inspector(ui: &mut Ui, cx: &mut Shared) {
+    if cx.selection.item.is_none() {
+        return;
+    }
+    // The page draws first, so a rename dialog has already taken its Escape. A menu inside the
+    // window reads Escape without consuming it, so one Escape closes such a menu and, unpinned,
+    // the window.
+    if !cx.selection.item_pinned
+        && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
+    {
+        cx.selection.close_item();
+        return;
+    }
+    let id = Id::new("Item");
+    // Set by the body's table on the previous frame, so the button says whether the panel had a
+    // table then.
+    let table_shown = ui
+        .data(|data| data.get_temp::<bool>(has_table(id)))
+        .unwrap_or(false);
+    let mut open = true;
+    Window::new("Item")
+        .collapsible(false)
+        .default_pos(pos2(840.0, 80.0))
+        .default_size(vec2(420.0, 640.0))
+        .open(&mut open)
+        .show(ui.ctx(), |ui| {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut cx.selection.item_pinned, "Pin")
+                    .on_hover_text("Keeps the panel open: Escape and the close button leave it.");
+                if table_shown
+                    && ui
+                        .button("Copy table")
+                        .on_hover_text("Copies this table for a spreadsheet (tab-separated).")
+                        .clicked()
+                {
+                    ui.data_mut(|data| data.insert_temp(copy_request(id), true));
+                }
+            });
+            // Cleared before the body draws, so a panel whose table stops showing loses the
+            // button on the next frame.
+            ui.data_mut(|data| data.remove_temp::<bool>(has_table(id)));
+            show(ui, cx);
+            // A copy asked for on a panel with no table is dropped, not kept for a table shown
+            // later.
+            ui.data_mut(|data| data.remove_temp::<bool>(copy_request(id)));
+        });
+    if !open {
+        cx.selection.close_item();
+    }
+}
 
 /// Draws the body of the Item panel.
 pub fn show(ui: &mut Ui, cx: &mut Shared) {
