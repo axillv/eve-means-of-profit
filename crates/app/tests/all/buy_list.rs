@@ -17,7 +17,7 @@ mod tests {
     use egui::accesskit::Role;
     use egui::{Event, Id, Key, Modifiers, MouseWheelUnit, OutputCommand, TouchPhase, Vec2, vec2};
     use egui_kittest::kittest::{NodeT, Queryable, by};
-    use egui_kittest::{Harness, SnapshotResults};
+    use egui_kittest::{Harness, Node, SnapshotResults};
     use eve_means_of_profit::build::prices::Prices;
     use eve_means_of_profit::rail::Page;
     use eve_means_of_profit::session::NoEve;
@@ -505,12 +505,9 @@ mod tests {
     }
 
     /// Types `text` into the price box of the Buy list row labelled `row`, and presses Enter, which
-    /// commits it.
+    /// commits it. The Price column is in view at 1280 px, so the table is not scrolled.
     fn type_price(harness: &mut Harness<'_, App>, row: &str, text: &str) {
-        let (left, y) = row_anchor(harness, row);
-        // The Buy list is narrow at 1280 px, so its price column sits past the right edge until the
-        // table is scrolled sideways. The table goes back to where it was after the price is typed.
-        scroll_table(harness, left, y, -400.0);
+        let (_, y) = row_anchor(harness, row);
         // The price box is the rightmost text box on the row's line.
         let price_box = harness
             .query_all(by().predicate(|node| node.role() == Role::TextInput))
@@ -527,7 +524,6 @@ mod tests {
         }
         harness.key_press(Key::Enter);
         harness.run();
-        scroll_table(harness, left, y, 400.0);
     }
 
     /// Scrolls the table that holds the point (`left`, `y`) sideways by `delta` points, and runs the
@@ -558,35 +554,58 @@ mod tests {
         panic!("{label:?} never shown");
     }
 
-    /// The cell texts of the Buy list row labelled `row`, left to right, empty cells left out. The
-    /// Steps panel has a row of the same name and its table can reach under the Buy list, so only
-    /// nodes under the Buy list's own tab are counted.
-    fn cells(harness: &Harness<'_, App>, row: &str) -> Vec<String> {
-        let anchor_node = harness
-            .get_all_by_label(row)
-            .max_by(|a, b| a.rect().min.x.total_cmp(&b.rect().min.x))
-            .expect("the row");
-        let anchor = (anchor_node.rect().min.x, anchor_node.rect().center().y);
+    /// The Buy list panel that holds `anchor`.
+    fn buy_list_panel<'a>(harness: &'a Harness<'_, App>, anchor: Node<'a>) -> Node<'a> {
         let title_id = harness.get_by_label("Buy list").accesskit_node().id();
-        let mut panel = anchor_node;
+        let mut panel = anchor;
         while !panel
             .children_recursive()
             .any(|node| node.accesskit_node().id() == title_id)
         {
-            panel = panel.parent().expect("the Buy list tab above the row");
+            panel = panel.parent().expect("the Buy list tab above the line");
         }
-        let mut found: Vec<(f32, String)> = panel
+        panel
+    }
+
+    /// The rightmost node labelled `label`: the Buy list is to the right of the Steps panel, which
+    /// gives some of its columns the same labels.
+    fn rightmost<'h>(harness: &'h Harness<'_, App>, label: &'h str) -> Node<'h> {
+        harness
+            .get_all_by_label(label)
+            .max_by(|a, b| a.rect().min.x.total_cmp(&b.rect().min.x))
+            .unwrap_or_else(|| panic!("no node labelled {label:?}"))
+    }
+
+    /// The text and box of each cell on the line that `anchor` is on, left to right, empty cells
+    /// left out. The Steps panel has a row of the same name and its table can reach under the Buy
+    /// list, so only nodes under the Buy list's own tab are counted.
+    fn line_cells(harness: &Harness<'_, App>, anchor: Node<'_>) -> Vec<(egui::Rect, String)> {
+        let anchor_rect = anchor.rect();
+        let panel = buy_list_panel(harness, anchor);
+        let mut found: Vec<(egui::Rect, String)> = panel
             .children_recursive()
             .filter(|node| node.accesskit_node().bounding_box().is_some())
-            .filter(|node| (node.rect().center().y - anchor.1).abs() < 4.0)
-            .filter(|node| node.rect().min.x >= anchor.0 - 1.0)
+            .filter(|node| (node.rect().center().y - anchor_rect.center().y).abs() < 4.0)
+            .filter(|node| node.rect().min.x >= anchor_rect.min.x - 1.0)
             // A text box's own text is a child node of the same value; the box is the one to count.
             .filter(|node| node.accesskit_node().role() != Role::TextRun)
-            .filter_map(|node| node.value().map(|value| (node.rect().min.x, value)))
+            .filter_map(|node| node.value().map(|value| (node.rect(), value)))
             .filter(|(_, value)| !value.is_empty())
             .collect();
-        found.sort_by(|a, b| a.0.total_cmp(&b.0));
-        found.into_iter().map(|(_, value)| value).collect()
+        found.sort_by(|a, b| a.0.min.x.total_cmp(&b.0.min.x));
+        found
+    }
+
+    /// The cell texts of the Buy list row labelled `row`, left to right, empty cells left out.
+    fn cells(harness: &Harness<'_, App>, row: &str) -> Vec<String> {
+        let anchor = harness
+            .get_all_by_label(row)
+            .max_by(|a, b| a.rect().min.x.total_cmp(&b.rect().min.x))
+            .expect("the row");
+        line_cells(harness, anchor)
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect()
     }
 
     /// Where the Buy list's row labelled `row` starts: the rightmost label of that name, since the
@@ -717,21 +736,11 @@ mod tests {
         harness
     }
 
-    /// The value the Buy list's footer line adds up.
+    /// The value in the Buy list's footer row.
     fn footer_value(harness: &Harness<'_, App>) -> Money {
-        let label = harness
-            .query_all(by().label_contains("· value "))
-            .find_map(|node| {
-                let node = node.accesskit_node();
-                // A `Role::Label` keeps its text in the value, not in the label.
-                node.label().or_else(|| node.value())
-            })
-            .expect("the footer line");
-        let value = label
-            .split_once("· value ")
-            .and_then(|(_, rest)| rest.split_once(" · freight"))
-            .map(|(value, _)| value)
-            .expect("the value in the footer");
+        let total = harness.get_by_label("Total");
+        let cells = line_cells(harness, total);
+        let (_, value) = cells.last().expect("the value in the footer row");
         isk(value)
     }
 
@@ -784,11 +793,13 @@ mod tests {
             &[
                 "Hobgoblin I",
                 "10",
-                "50.00",
+                "0",
+                "10",
                 "27,500.00",
+                "50.00",
+                "275,000.00",
                 "27,500.00",
                 "4m",
-                "275,000.00",
             ],
         );
         assert_row(
@@ -797,11 +808,13 @@ mod tests {
             &[
                 "Guidance Systems",
                 "10",
-                "30.00",
+                "0",
+                "10",
                 "10,450.00",
+                "30.00",
+                "104,500.00",
                 "10,450.00",
                 "4m",
-                "104,500.00",
             ],
         );
         assert_row(
@@ -810,11 +823,13 @@ mod tests {
             &[
                 "Robotics",
                 "10",
-                "30.00",
+                "0",
+                "10",
                 "39,990.00",
+                "30.00",
+                "399,900.00",
                 "39,990.00",
                 "4m",
-                "399,900.00",
             ],
         );
         assert_row(
@@ -823,11 +838,13 @@ mod tests {
             &[
                 "Morphite",
                 "10",
-                "0.10",
+                "0",
+                "10",
                 "2,150.00",
+                "0.10",
+                "21,500.00",
                 "2,150.00",
                 "4m",
-                "21,500.00",
             ],
         );
         assert_row(
@@ -836,11 +853,13 @@ mod tests {
             &[
                 "R.A.M.- Robotics",
                 "10",
-                "0.40",
+                "0",
+                "10",
                 "478.60",
+                "0.40",
+                "4,786.00",
                 "478.60",
                 "4m",
-                "4,786.00",
             ],
         );
         assert_row(
@@ -849,11 +868,13 @@ mod tests {
             &[
                 "Particle Accelerator Unit",
                 "10",
-                "10.00",
+                "0",
+                "10",
                 "30,900.00",
+                "10.00",
+                "309,000.00",
                 "30,900.00",
                 "4m",
-                "309,000.00",
             ],
         );
     }
@@ -866,11 +887,13 @@ mod tests {
             &[
                 "Datacore - Electronic Engineering",
                 "3",
-                "0.30",
+                "0",
+                "3",
                 "50,000.00",
+                "0.30",
+                "150,000.00",
                 "50,000.00",
                 "4m",
-                "150,000.00",
             ],
         );
         assert_row(
@@ -879,28 +902,25 @@ mod tests {
             &[
                 "Datacore - Graviton Physics",
                 "3",
-                "0.30",
+                "0",
+                "3",
                 "43,750.00",
+                "0.30",
+                "131,250.00",
                 "43,750.00",
                 "4m",
-                "131,250.00",
             ],
         );
     }
 
-    /// The price boxes of the Buy list rows labelled `rows`, with what each holds. The table is
-    /// scrolled sideways so the prices are in view. The rows are found before the scroll, since the
-    /// scroll moves their names out of view.
+    /// The price boxes of the Buy list rows labelled `rows`, with what each holds. The Price column
+    /// is in view at 1280 px, so the table is not scrolled.
     fn price_boxes(
         harness: &mut Harness<'_, App>,
         rows: &[&str],
     ) -> Vec<(egui::Rect, Option<String>)> {
-        let lines: Vec<f32> = rows.iter().map(|row| row_anchor(harness, row).1).collect();
-        let (left, y) = row_anchor(harness, rows[0]);
-        scroll_table(harness, left, y, -400.0);
-        lines
-            .into_iter()
-            .map(|y| price_box_at(harness, y))
+        rows.iter()
+            .map(|row| price_box_at(harness, row_anchor(harness, row).1))
             .collect()
     }
 
@@ -966,27 +986,85 @@ mod tests {
     #[test]
     fn the_buy_list_rows_and_the_footer_are_complete() {
         let world = World::new();
-        let harness = complete_list(&world, &standard_services());
+        let mut harness = complete_list(&world, &standard_services());
         assert!(shown(&harness, "Price rule: Forge sell, 5% price"));
         assert_complete_rows(&harness);
         assert_datacore_rows(&harness);
-        assert!(shown(&harness, "m³ 121.10 · value 1,395,936.00 · freight "));
-        assert!(shown(
-            &harness,
-            " · collateral 1,395,936.00 · delivered 1,505,850.68"
-        ));
+        assert!(shown(&harness, "freight "));
+        assert!(shown(&harness, "110 K"));
+        assert!(shown(&harness, " · collateral 1.40 M · delivered 1.51 M"));
         assert!(!shown(&harness, " incomplete"));
         assert!(shown(&harness, "Oldest: 4m"));
         assert!(shown(&harness, "Next refresh in 15m"));
         assert!(has_value(&harness, "Cheapest (Alliance)"));
         assert!(shown(&harness, "1 contract"));
+        let footer: Vec<String> = line_cells(&harness, harness.get_by_label("Total"))
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect();
+        assert_eq!(footer, ["Total", "66", "0", "66", "121.10", "1,395,936.00"]);
+        hover(&mut harness, " · collateral 1.40 M · delivered 1.51 M");
+        assert!(shown(&harness, "1,395,936.00 · 1,505,850.68 ISK"));
+    }
+
+    #[test]
+    fn the_need_own_and_price_headers_are_in_view_at_1280() {
+        let world = World::new();
+        let harness = complete_list(&world, &standard_services());
+        let item = rightmost(&harness, "Item").rect();
+        let need = rightmost(&harness, "Need").rect();
+        let own = rightmost(&harness, "Own").rect();
+        let price = rightmost(&harness, "Price").rect();
+        let volume = rightmost(&harness, "m³").rect();
+        // The Buy list is the rightmost panel of the Build page, so its content ends at the window's
+        // right edge; the Item header sits at its left edge.
+        let panel = egui::Rect::from_min_max(
+            egui::pos2(item.min.x, item.min.y),
+            egui::pos2(harness.ctx.content_rect().max.x, item.max.y),
+        );
+        assert!(need.min.x > item.min.x, "Need is right of Item");
+        assert!(own.min.x > need.min.x, "Own is right of Need");
+        assert!(price.min.x > own.min.x, "Price is right of Own");
+        assert!(volume.min.x >= price.max.x, "m³ starts right of Price");
+        for (name, cell) in [("Need", need), ("Own", own), ("Price", price)] {
+            assert!(
+                cell.min.x >= panel.min.x - 1.0,
+                "{name} starts outside the Buy list panel: {cell:?} vs {panel:?}"
+            );
+            assert!(
+                cell.max.x <= panel.max.x + 1.0,
+                "{name} ends outside the Buy list panel: {cell:?} vs {panel:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_footer_row_lines_up_with_the_headers_at_1600() {
+        let world = World::new();
+        let harness = complete_list_sized(&world, &standard_services(), 1600.0);
+        let headers = line_cells(&harness, rightmost(&harness, "Item"));
+        let footers = line_cells(&harness, harness.get_by_label("Total"));
+        // Item, Need, Own, Buy, Price, m³, Value, Live, Diff and Age.
+        assert_eq!(headers.len(), 10, "{headers:?}");
+        // The footer carries the counts, the volume and the value; Price has no footer text.
+        let values: Vec<&str> = footers.iter().map(|(_, value)| value.as_str()).collect();
+        assert_eq!(values, ["Total", "66", "0", "66", "121.10", "1,395,936.00"]);
+        // Item's footer text starts at its header's left edge.
+        assert!((footers[0].0.min.x - headers[0].0.min.x).abs() <= 1.0);
+        // The count and money columns end at their header's right edge. Price has no footer text,
+        // so m³ and Value follow Buy.
+        for (footer, header) in [(1, 1), (2, 2), (3, 3), (4, 5), (5, 6)] {
+            let (rect, text) = &footers[footer];
+            let off = (rect.max.x - headers[header].0.max.x).abs();
+            assert!(off <= 1.0, "{text} is {off} points off its header");
+        }
     }
 
     #[test]
     fn the_freight_hover_lists_every_service() {
         let world = World::new();
         let mut harness = complete_list_sized(&world, &standard_services(), 1640.0);
-        hover(&mut harness, "109,914.68");
+        hover(&mut harness, "110 K");
         assert!(shown(&harness, "Alliance 109,914.68"));
         assert!(shown(&harness, "Haulers 3,013,959.36"));
     }
@@ -996,11 +1074,8 @@ mod tests {
         let world = World::new();
         let mut harness = complete_list(&world, &standard_services());
         pick(&mut harness, "Cheapest (Alliance)", "Haulers");
-        settle(&mut harness, "3,013,959.36");
-        assert!(shown(
-            &harness,
-            " · collateral 1,395,936.00 · delivered 4,409,895.36"
-        ));
+        settle(&mut harness, "3.01 M");
+        assert!(shown(&harness, " · collateral 1.40 M · delivered 4.41 M"));
         assert!(has_value(&harness, "Haulers"));
     }
 
@@ -1095,7 +1170,17 @@ mod tests {
         );
         assert_row(&harness, "Robotics", &["—"]);
         assert!(shown(&harness, " incomplete"));
-        assert!(shown(&harness, "m³ 121.10 · value 687,036.00 · freight "));
+        // The missing price leaves Robotics' value out of the sum, while the known lines' total
+        // still lands in the footer row; the footer line sums the delivery of what is known.
+        let footer: Vec<String> = line_cells(&harness, harness.get_by_label("Total"))
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect();
+        assert!(
+            footer.iter().any(|value| value == "687,036.00"),
+            "{footer:?}"
+        );
+        assert!(shown(&harness, " · collateral 687 K · delivered 759 K"));
         // The wider list wraps the footer so the incomplete label starts on a later line than
         // the label's own rect centre; hover the run of text itself.
         let incomplete = harness
@@ -1200,14 +1285,14 @@ mod tests {
             &harness,
             "Over a day old. Refresh before you rely on it."
         ));
-        // The copied list says `old` too, not only the drawn cell.
+        // The copied list says `old` too, not only the drawn cell. Age is the last column.
         harness
             .ctx
             .data_mut(|data| data.insert_temp(copy_request(Id::new("Buy list")), true));
         harness.step();
         let copied = copied_text(&harness).expect("the list is copied");
         assert!(
-            copied.contains("\t1d old\t"),
+            copied.lines().any(|line| line.ends_with("\t1d old")),
             "the copied age reads old: {copied}"
         );
     }
@@ -1269,13 +1354,12 @@ mod tests {
         let mut harness = complete_list(&world, &standard_services());
         pick(&mut harness, "Jita → Kiainti", "No freight");
         settle(&mut harness, "No freight");
-        assert!(shown(&harness, "m³ 121.10 · value 1,395,936.00 · freight "));
+        assert!(shown(&harness, "freight "));
         // The freight amount itself is 0.00, as is the collateral.
         assert!(shown(&harness, "0.00"));
-        assert!(shown(
-            &harness,
-            " · collateral 0.00 · delivered 1,395,936.00"
-        ));
+        assert!(shown(&harness, " · collateral 0.00 · delivered 1.40 M"));
+        // The footer row still holds the value of the goods.
+        assert!(shown(&harness, "1,395,936.00"));
         assert!(!shown(&harness, " incomplete"));
     }
 
@@ -1295,10 +1379,10 @@ mod tests {
         );
         let mut harness = complete_list(&world, std::slice::from_ref(&bulk));
         settle(&mut harness, "2 contracts");
-        assert!(shown(&harness, "20,000,000.00"));
+        assert!(shown(&harness, "20.00 M"));
         click(&mut harness, "Top up the last contract");
         settle(&mut harness, "2 contracts");
-        assert!(shown(&harness, "20,000,000.00"));
+        assert!(shown(&harness, "20.00 M"));
     }
 
     #[test]
@@ -1319,9 +1403,9 @@ mod tests {
         );
         let mut harness = complete_list(&world, std::slice::from_ref(&minimum));
         // Top-up is on by default.
-        settle(&mut harness, "122,000.00");
+        settle(&mut harness, "122 K");
         click(&mut harness, "Top up the last contract");
-        settle(&mut harness, "160,000.00");
+        settle(&mut harness, "160 K");
         assert!(shown(&harness, "2 contracts"));
     }
 
@@ -1342,7 +1426,7 @@ mod tests {
         let mut services = standard_services();
         services.push(tiny);
         let mut harness = complete_list_sized(&world, &services, 1640.0);
-        hover(&mut harness, "109,914.68");
+        hover(&mut harness, "110 K");
         assert!(shown(&harness, "Tiny: cannot carry Hobgoblin I"));
         assert!(shown(&harness, "Alliance 109,914.68"));
     }
@@ -1426,7 +1510,7 @@ mod tests {
         buy_list_for(&mut harness);
         settle(&mut harness, "Oldest: 4m");
         pick(&mut harness, "Cheapest (Alliance)", "Haulers");
-        settle(&mut harness, "3,013,959.36");
+        settle(&mut harness, "3.01 M");
         click(&mut harness, "Save");
 
         let mut store = Store::open(&env.data.join("user.sqlite"), NOW)
@@ -1450,9 +1534,9 @@ mod tests {
         harness.run();
         open_saved_plan(&mut harness, "New plan");
         // The new app downloads the file at its start, so the price can arrive after the label.
-        settle(&mut harness, "109,914.68");
+        settle(&mut harness, "110 K");
         settle(&mut harness, "Cheapest (Alliance)");
-        assert!(shown(&harness, "109,914.68"));
+        assert!(shown(&harness, "110 K"));
     }
 
     #[test]
@@ -1487,7 +1571,7 @@ mod tests {
         services.push(cheap);
         let mut harness = complete_list(&world, &services);
         settle(&mut harness, "Cheapest (Cheap)");
-        settle(&mut harness, "12,110.00");
+        settle(&mut harness, "12.11 K");
     }
 
     #[test]
@@ -1507,11 +1591,9 @@ mod tests {
             ],
         );
         // The typed price is in the accent colour; the line on the live price is not.
-        let (left, y) = row_anchor(&harness, "Robotics");
         let boxes = price_boxes(&mut harness, &["Robotics", "Hobgoblin I"]);
         assert!(coloured(&mut harness, boxes[0].0));
         assert!(!coloured(&mut harness, boxes[1].0));
-        scroll_table(&mut harness, left, y, 400.0);
         world.at(NOW + 600);
         lock(&world.forge).publish(
             {
@@ -1575,11 +1657,11 @@ mod tests {
                 "10",
                 "0",
                 "10",
-                "30.00",
                 "39,990.00",
+                "30.00",
+                "399,900.00",
                 "—",
                 "manual",
-                "399,900.00",
             ]
         );
         assert!(!shown(&harness, " incomplete"));
@@ -1599,7 +1681,76 @@ mod tests {
         assert!(!shown(&harness, "Live"));
         assert!(!shown(&harness, "Diff"));
         assert!(!shown(&harness, "Age"));
-        assert!(shown(&harness, "m³ 121.10 · value 1,395,936.00 · freight "));
+        assert!(shown(&harness, "freight "));
+        assert!(shown(&harness, "110 K"));
+        assert!(shown(&harness, " · collateral 1.40 M · delivered 1.51 M"));
+    }
+
+    #[test]
+    fn hiding_need_own_and_price_removes_their_headers_cells_and_footer_sums() {
+        let world = World::new();
+        let env = make_env(&standard_services());
+        let mut harness = start(&env, &world);
+        harness.run();
+        buy_list_for(&mut harness);
+        settle(&mut harness, "Oldest: 4m");
+        let names = [
+            "Hobgoblin I",
+            "Guidance Systems",
+            "Robotics",
+            "Morphite",
+            "R.A.M.- Robotics",
+            "Particle Accelerator Unit",
+            "Datacore - Electronic Engineering",
+            "Datacore - Graviton Physics",
+        ];
+        let tops_before: Vec<f32> = names
+            .iter()
+            .map(|row| row_anchor(&harness, row).1)
+            .collect();
+        let copy_before = copy_multibuy(&mut harness);
+        for column in ["Need", "Own", "Price"] {
+            toggle_column(&mut harness, column);
+        }
+        // The headers and row cells lose the three columns; the Steps panel has its own Need and
+        // Own, so the Buy list header row is read from its Item column.
+        let headers = line_cells(&harness, rightmost(&harness, "Item"));
+        let header_texts: Vec<&str> = headers.iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(
+            header_texts,
+            ["Item", "Buy", "m³", "Value", "Live", "Diff", "Age"]
+        );
+        assert_eq!(
+            cells(&harness, "Hobgoblin I"),
+            [
+                "Hobgoblin I",
+                "10",
+                "50.00",
+                "275,000.00",
+                "27,500.00",
+                "4m",
+            ]
+        );
+        // The footer keeps the Buy sum, the volume and the value under their columns.
+        let footers = line_cells(&harness, harness.get_by_label("Total"));
+        let footer_texts: Vec<&str> = footers.iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(footer_texts, ["Total", "66", "121.10", "1,395,936.00"]);
+        assert!((footers[0].0.min.x - headers[0].0.min.x).abs() <= 1.0);
+        for (footer, header) in [(1, 1), (2, 2), (3, 3)] {
+            let off = (footers[footer].0.max.x - headers[header].0.max.x).abs();
+            assert!(
+                off <= 1.0,
+                "{} is {off} points off its header",
+                footers[footer].1
+            );
+        }
+        // The multibuy copy and the row order do not depend on the shown columns.
+        assert_eq!(copy_multibuy(&mut harness), copy_before);
+        let tops_after: Vec<f32> = names
+            .iter()
+            .map(|row| row_anchor(&harness, row).1)
+            .collect();
+        assert_eq!(tops_after, tops_before);
     }
 
     /// Ticks or unticks the column labelled `label` through the Columns menu.
@@ -1862,16 +2013,16 @@ mod tests {
         assert_eq!(
             copied_text(&harness).as_deref(),
             Some(
-                "Item\tNeed\tOwn\tBuy\tm³\tPrice\tValue\n\
-                 Hobgoblin I\t10\t0\t10\t50\t27500\t275000\n\
-                 Guidance Systems\t10\t0\t10\t30\t10450\t104500\n\
-                 Robotics\t10\t0\t10\t30\t39990\t399900\n\
-                 Morphite\t10\t0\t10\t0.1\t2150\t21500\n\
-                 R.A.M.- Robotics\t10\t0\t10\t0.4\t478.6\t4786\n\
-                 Particle Accelerator Unit\t10\t0\t10\t10\t30900\t309000\n\
-                 Datacore - Electronic Engineering\t3\t0\t3\t0.3\t50000\t150000\n\
-                 Datacore - Graviton Physics\t3\t0\t3\t0.3\t43750\t131250\n\
-                 Total\t\t\t\t121.1\t\t1395936"
+                "Item\tNeed\tOwn\tBuy\tPrice\tm³\tValue\n\
+                 Hobgoblin I\t10\t0\t10\t27500\t50\t275000\n\
+                 Guidance Systems\t10\t0\t10\t10450\t30\t104500\n\
+                 Robotics\t10\t0\t10\t39990\t30\t399900\n\
+                 Morphite\t10\t0\t10\t2150\t0.1\t21500\n\
+                 R.A.M.- Robotics\t10\t0\t10\t478.6\t0.4\t4786\n\
+                 Particle Accelerator Unit\t10\t0\t10\t30900\t10\t309000\n\
+                 Datacore - Electronic Engineering\t3\t0\t3\t50000\t0.3\t150000\n\
+                 Datacore - Graviton Physics\t3\t0\t3\t43750\t0.3\t131250\n\
+                 Total\t66\t0\t66\t\t121.1\t1395936"
             )
         );
     }
@@ -2002,11 +2153,9 @@ mod tests {
         open_saved_plan(&mut harness, "New plan");
         settle(&mut harness, "Oldest: 4m");
         assert_row(&harness, "Robotics", &["1,000,000,000.00", "manual"]);
-        let (left, y) = row_anchor(&harness, "Robotics");
         let boxes = price_boxes(&mut harness, &["Robotics", "Hobgoblin I"]);
         assert!(coloured(&mut harness, boxes[0].0));
         assert!(!coloured(&mut harness, boxes[1].0));
-        scroll_table(&mut harness, left, y, 400.0);
         type_price(&mut harness, "Robotics", "");
         drop(harness);
 
@@ -2079,22 +2228,20 @@ mod tests {
         let mut harness = start(&env, &world);
         harness.run();
         buy_list_for(&mut harness);
-        settle(&mut harness, "m³ 121.10 · value 687,036.00 · freight ");
+        settle(&mut harness, "687,036.00");
         harness.snapshot("buylist-incomplete");
         results.extend_harness(&mut harness);
 
         let world = World::new();
         let mut harness = complete_list_sized(&world, &standard_services(), 1600.0);
-        hover(&mut harness, "109,914.68");
+        hover(&mut harness, "110 K");
         harness.snapshot("buylist-freight-hover");
         results.extend_harness(&mut harness);
 
         let world = World::new();
         let mut harness = complete_list(&world, &standard_services());
         type_price(&mut harness, "Robotics", "1,000,000,000.00");
-        // The price columns are past the right edge at 1280 px, so the picture scrolls to them.
-        let (left, y) = row_anchor(&harness, "Robotics");
-        scroll_table(&mut harness, left, y, -540.0);
+        // The Price column is in view at 1280 px, so the picture needs no sideways scroll.
         // The pointer rests over the Plans panel, so no tooltip covers the row.
         harness.hover_at(egui::pos2(300.0, 600.0));
         harness.run();
@@ -2218,11 +2365,11 @@ mod tests {
                 "3",
                 "1",
                 "2",
-                "0.20",
                 "50,000.00",
+                "0.20",
+                "100,000.00",
                 "50,000.00",
                 "4m",
-                "100,000.00",
             ]
         );
         assert!(

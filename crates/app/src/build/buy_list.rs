@@ -35,7 +35,7 @@ use freight::{cheapest, freight_legs, freight_reason, freight_row};
 
 /// The column ids, in the order the columns are drawn.
 const IDS: [&str; 10] = [
-    "item", "need", "own", "buy", "volume", "price", "live", "diff", "age", "value",
+    "item", "need", "own", "buy", "price", "volume", "value", "live", "diff", "age",
 ];
 
 /// The name the buy list's hidden columns are saved under.
@@ -621,12 +621,12 @@ fn table_cells(row: &BuyRow, view: &View) -> Vec<Cell> {
         count(row.needed),
         count(row.from_stock),
         count(row.to_buy),
-        row.volume.map_or_else(Cell::missing, volume_cell),
         price,
+        row.volume.map_or_else(Cell::missing, volume_cell),
+        value,
         view.live.map_or_else(Cell::missing, Cell::money),
         Cell::text(diff_text(view.manual, view.live)),
         age,
-        value,
     ]
 }
 
@@ -669,16 +669,16 @@ fn count(amount: u64) -> Cell {
 
 fn all_columns() -> Vec<Column> {
     vec![
-        column("item", "Item", ColumnKind::Text, 220.0),
-        column("need", "Need", ColumnKind::Number, 80.0),
-        column("own", "Own", ColumnKind::Number, 80.0),
-        column("buy", "Buy", ColumnKind::Number, 80.0),
-        column("volume", "m³", ColumnKind::Number, 90.0),
-        column("price", "Price", ColumnKind::Money, 120.0),
+        column("item", "Item", ColumnKind::Text, 170.0),
+        column("need", "Need", ColumnKind::Number, 58.0),
+        column("own", "Own", ColumnKind::Number, 58.0),
+        column("buy", "Buy", ColumnKind::Number, 58.0),
+        column("price", "Price", ColumnKind::Money, 100.0),
+        column("volume", "m³", ColumnKind::Number, 80.0),
+        column("value", "Value", ColumnKind::Money, 120.0),
         column("live", "Live", ColumnKind::Money, 110.0),
-        column("diff", "Diff", ColumnKind::Text, 90.0),
+        column("diff", "Diff", ColumnKind::Text, 80.0),
         column("age", "Age", ColumnKind::Text, 70.0),
-        column("value", "Value", ColumnKind::Money, 150.0),
     ]
 }
 
@@ -701,23 +701,35 @@ fn shown<T>(items: Vec<T>, hidden: &[String]) -> Vec<T> {
         .collect()
 }
 
-/// The table's footer row, aligned with the columns: the volume and the value.
+/// The table's footer row, aligned with the columns: the counts, the volume and the value.
 fn footer_cells(buy: &BuyList) -> Vec<Cell> {
+    let needed = buy
+        .rows
+        .iter()
+        .fold(0u64, |sum, row| sum.saturating_add(row.needed));
+    let from_stock = buy
+        .rows
+        .iter()
+        .fold(0u64, |sum, row| sum.saturating_add(row.from_stock));
+    let to_buy = buy
+        .rows
+        .iter()
+        .fold(0u64, |sum, row| sum.saturating_add(row.to_buy));
     vec![
         Cell::text("Total"),
-        Cell::text(""),
-        Cell::text(""),
+        count(needed),
+        count(from_stock),
+        count(to_buy),
         Cell::text(""),
         volume_cell(buy.volume),
-        Cell::text(""),
-        Cell::text(""),
-        Cell::text(""),
-        Cell::text(""),
         Cell::money(buy.value),
+        Cell::text(""),
+        Cell::text(""),
+        Cell::text(""),
     ]
 }
 
-/// The table of the buy rows, with the volume and value in a footer row.
+/// The table of the buy rows, with the counts, the volume and the value in a footer row.
 /// Draws the table and returns the prices typed in it, to save with the plan.
 fn table(
     ui: &mut Ui,
@@ -892,28 +904,32 @@ fn footer_line(ui: &mut Ui, cx: &Shared, totals: &Totals, auto: bool, now: i64) 
         views,
     } = totals;
     ui.horizontal_wrapped(|ui| {
-        ui.label(format!(
-            "m³ {} · value {} · freight ",
-            buy.volume.format_m3(),
-            buy.value.format_isk()
-        ));
-        ui.label(delivered.freight.format_isk()).on_hover_ui(|ui| {
-            if record.route.is_none() {
-                ui.label("No freight");
-                return;
-            }
-            for offer in offers {
-                match &offer.outcome {
-                    Ok(quote) => ui.label(format!("{} {}", offer.name, quote.total.format_isk())),
-                    Err(reason) => ui.label(format!("{}: {reason}", offer.name)),
-                };
-            }
-            if offers.is_empty() {
-                ui.label("no freight service on this route");
-            }
-        });
+        ui.label("freight ");
+        ui.label(delivered.freight.format_isk_short())
+            .on_hover_ui(|ui| {
+                if record.route.is_none() {
+                    ui.label("No freight");
+                    return;
+                }
+                for offer in offers {
+                    match &offer.outcome {
+                        Ok(quote) => {
+                            ui.label(format!("{} {}", offer.name, quote.total.format_isk()))
+                        }
+                        Err(reason) => ui.label(format!("{}: {reason}", offer.name)),
+                    };
+                }
+                if offers.is_empty() {
+                    ui.label("no freight service on this route");
+                }
+            });
         ui.label(format!(
             " · collateral {} · delivered {}",
+            delivered.collateral.format_isk_short(),
+            delivered.total.format_isk_short()
+        ))
+        .on_hover_text(format!(
+            "{} · {} ISK",
             delivered.collateral.format_isk(),
             delivered.total.format_isk()
         ));
