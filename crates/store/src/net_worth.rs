@@ -548,3 +548,301 @@ fn basis_from_code(code: i64) -> Option<PriceBasis> {
         _ => None,
     }
 }
+
+/// A group of the player's characters (an EVE account holds up to three of them), with its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    pub id: i64,
+    pub name: String,
+    /// The character ids in the account, ascending.
+    pub characters: Vec<u64>,
+}
+
+/// The most characters one account holds.
+const ACCOUNT_SIZE: i64 = 3;
+
+impl Store {
+    /// The accounts by name, each with its characters.
+    pub fn accounts(&self) -> Result<Vec<Account>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name FROM accounts ORDER BY name")?;
+        let mut accounts = stmt
+            .query_map([], |row| {
+                Ok(Account {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    characters: Vec::new(),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT character_id, account_id FROM account_characters ORDER BY character_id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut members: BTreeMap<i64, Vec<u64>> = BTreeMap::new();
+        for (character, account) in rows {
+            let character = from_stored(character, "account_characters", account, "character_id")?;
+            members.entry(account).or_default().push(character);
+        }
+        for account in &mut accounts {
+            account.characters = members.remove(&account.id).unwrap_or_default();
+        }
+        Ok(accounts)
+    }
+
+    /// Adds an account under the trimmed name. A used name is refused.
+    pub fn add_account(&mut self, name: &str) -> Result<i64> {
+        let name = account_name(name)?;
+        let tx = self.conn.transaction()?;
+        if name_taken(&tx, name, None)? {
+            return Err(StoreError::NameTaken(name.to_string()));
+        }
+        tx.execute("INSERT INTO accounts (name) VALUES (?1)", params![name])?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Gives an account a new trimmed name. A name used by another account is refused.
+    pub fn rename_account(&mut self, id: i64, name: &str) -> Result<()> {
+        let name = account_name(name)?;
+        let tx = self.conn.transaction()?;
+        require_account(&tx, id)?;
+        if name_taken(&tx, name, Some(id))? {
+            return Err(StoreError::NameTaken(name.to_string()));
+        }
+        tx.execute(
+            "UPDATE accounts SET name = ?2 WHERE id = ?1",
+            params![id, name],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Puts the character in the account, out of any other, or in none when `account` is `None`.
+    /// An account holds at most three characters; a fourth is refused and nothing changes.
+    pub fn set_account(&mut self, character_id: u64, account: Option<i64>) -> Result<()> {
+        let character = to_stored_u64(character_id)?;
+        let tx = self.conn.transaction()?;
+        match account {
+            None => {
+                tx.execute(
+                    "DELETE FROM account_characters WHERE character_id = ?1",
+                    params![character],
+                )?;
+            }
+            Some(account) => {
+                require_account(&tx, account)?;
+                let held: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM account_characters \
+                     WHERE account_id = ?1 AND character_id <> ?2",
+                    params![account, character],
+                    |row| row.get(0),
+                )?;
+                if held >= ACCOUNT_SIZE {
+                    return Err(StoreError::TooLarge);
+                }
+                tx.execute(
+                    "INSERT INTO account_characters (character_id, account_id) VALUES (?1, ?2) \
+                     ON CONFLICT (character_id) DO UPDATE SET account_id = ?2",
+                    params![character, account],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Records the account's PLEX count from time `at`. A count already recorded at `at` is replaced.
+    pub fn set_plex(&mut self, account: i64, count: u64, at: i64) -> Result<()> {
+        let count = to_stored_u64(count)?;
+        let tx = self.conn.transaction()?;
+        require_account(&tx, account)?;
+        tx.execute(
+            "INSERT INTO plex_counts (account_id, at, count) VALUES (?1, ?2, ?3) \
+             ON CONFLICT (account_id, at) DO UPDATE SET count = ?3",
+            params![account, at, count],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The account's PLEX counts by time.
+    pub fn plex_counts(&self, account: i64) -> Result<Vec<(i64, u64)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT at, count FROM plex_counts WHERE account_id = ?1 ORDER BY at")?;
+        let rows = stmt
+            .query_map(params![account], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(at, count)| Ok((at, from_stored(count, "plex_counts", at, "count")?)))
+            .collect()
+    }
+
+    /// Per account, the count of its latest entry at or before `at`. Accounts with none are left out.
+    pub fn plex_at(&self, at: i64) -> Result<BTreeMap<i64, u64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.account_id, p.count FROM plex_counts p \
+             WHERE p.at = (SELECT MAX(q.at) FROM plex_counts q \
+                           WHERE q.account_id = p.account_id AND q.at <= ?1)",
+        )?;
+        let rows = stmt
+            .query_map(params![at], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut counts = BTreeMap::new();
+        for (account, count) in rows {
+            counts.insert(
+                account,
+                from_stored(count, "plex_counts", account, "count")?,
+            );
+        }
+        Ok(counts)
+    }
+}
+
+/// The name without its surrounding spaces, or `EmptyName` when nothing is left.
+fn account_name(name: &str) -> Result<&str> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(StoreError::EmptyName);
+    }
+    Ok(name)
+}
+
+/// Whether another account than `except` already uses the name.
+fn name_taken(tx: &Transaction<'_>, name: &str, except: Option<i64>) -> Result<bool> {
+    let holder: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM accounts WHERE name = ?1",
+            params![name],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(matches!(holder, Some(id) if Some(id) != except))
+}
+
+/// `NotFound` unless the account exists.
+fn require_account(tx: &Transaction<'_>, id: i64) -> Result<()> {
+    let found: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM accounts WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    found.map(|_| ()).ok_or(StoreError::NotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    fn open_temp() -> (tempfile::TempDir, PathBuf, Store) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eve.db");
+        let store = Store::open(&path, 1_000).expect("open").store;
+        (dir, path, store)
+    }
+
+    fn names(store: &Store) -> Vec<(i64, String, Vec<u64>)> {
+        store
+            .accounts()
+            .expect("accounts")
+            .into_iter()
+            .map(|account| (account.id, account.name, account.characters))
+            .collect()
+    }
+
+    #[test]
+    fn add_trims_and_refuses_empty_and_taken_names() {
+        let (_dir, _path, mut store) = open_temp();
+        let id = store.add_account(" Main acct ").expect("add");
+        assert_eq!(names(&store), vec![(id, "Main acct".to_string(), vec![])]);
+        assert!(matches!(
+            store.add_account("Main acct"),
+            Err(StoreError::NameTaken(name)) if name == "Main acct"
+        ));
+        assert!(matches!(
+            store.add_account("  "),
+            Err(StoreError::EmptyName)
+        ));
+        assert!(matches!(
+            store.rename_account(99, "x"),
+            Err(StoreError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn characters_move_between_accounts_and_survive_reopen() {
+        let (_dir, path, mut store) = open_temp();
+        let a = store.add_account("A").expect("add a");
+        let b = store.add_account("B").expect("add b");
+        for character in [101, 102, 103] {
+            store.set_account(character, Some(a)).expect("set");
+        }
+        assert_eq!(names(&store)[0].2, vec![101, 102, 103]);
+        assert!(matches!(
+            store.set_account(104, Some(a)),
+            Err(StoreError::TooLarge)
+        ));
+        assert_eq!(names(&store)[0].2, vec![101, 102, 103]);
+        store.set_account(103, Some(b)).expect("move");
+        store.set_account(102, None).expect("remove");
+        drop(store);
+        let store = Store::open(&path, 1_000).expect("reopen").store;
+        let accounts = names(&store);
+        assert_eq!(accounts[0], (a, "A".to_string(), vec![101]));
+        assert_eq!(accounts[1], (b, "B".to_string(), vec![103]));
+    }
+
+    #[test]
+    fn plex_history_answers_by_time() {
+        let (_dir, _path, mut store) = open_temp();
+        let a = store.add_account("A").expect("add");
+        store.set_plex(a, 500, 1_000_000_000).expect("set");
+        store.set_plex(a, 650, 1_000_604_800).expect("set");
+        assert!(store.plex_at(999_999_999).expect("at").is_empty());
+        assert_eq!(
+            store.plex_at(1_000_000_000).expect("at"),
+            BTreeMap::from([(a, 500)])
+        );
+        assert_eq!(
+            store.plex_at(1_000_604_799).expect("at"),
+            BTreeMap::from([(a, 500)])
+        );
+        assert_eq!(
+            store.plex_at(2_000_000_000).expect("at"),
+            BTreeMap::from([(a, 650)])
+        );
+        assert_eq!(
+            store.plex_counts(a).expect("counts"),
+            vec![(1_000_000_000, 500), (1_000_604_800, 650)]
+        );
+    }
+
+    #[test]
+    fn same_time_replaces_and_unknown_account_is_refused() {
+        let (_dir, _path, mut store) = open_temp();
+        let a = store.add_account("A").expect("add");
+        store.set_plex(a, 500, 1_000_000_000).expect("set");
+        store.set_plex(a, 700, 1_000_000_000).expect("replace");
+        assert_eq!(
+            store.plex_counts(a).expect("counts"),
+            vec![(1_000_000_000, 700)]
+        );
+        assert!(matches!(
+            store.set_plex(99, 1, 0),
+            Err(StoreError::NotFound)
+        ));
+    }
+}

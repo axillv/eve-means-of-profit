@@ -275,6 +275,20 @@ CREATE TABLE history_settings (
     auto_refresh INTEGER NOT NULL
 );
 INSERT INTO history_settings (id, limit_bytes, auto_refresh) VALUES (1, NULL, 1);
+CREATE TABLE accounts (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE CHECK (length(name) > 0)
+);
+CREATE TABLE account_characters (
+    character_id INTEGER PRIMARY KEY CHECK (character_id >= 0),
+    account_id INTEGER NOT NULL REFERENCES accounts (id)
+);
+CREATE TABLE plex_counts (
+    account_id INTEGER NOT NULL REFERENCES accounts (id),
+    at INTEGER NOT NULL,
+    count INTEGER NOT NULL CHECK (count >= 0),
+    PRIMARY KEY (account_id, at)
+) WITHOUT ROWID;
 ";
 
 /// An open database. Every method on it runs in one transaction.
