@@ -16,6 +16,7 @@ use crate::status::Notice;
 pub mod data;
 pub mod record;
 pub mod summary;
+pub mod view;
 
 /// The setting holding the chart's range code.
 const RANGE_SETTING: &str = "net_worth.range";
@@ -119,6 +120,8 @@ impl Default for Choices {
 #[derive(Debug, Default)]
 pub struct NetWorthPage {
     pub choices: Choices,
+    /// The loaded points and the headline of the picked range.
+    pub view: view::View,
     /// Whether the first drawn frame has read the saved choices.
     read: bool,
 }
@@ -151,11 +154,14 @@ pub fn show(page: &mut NetWorthPage, panel: NetWorthPanel, ui: &mut Ui, cx: &mut
             ))),
         }
     }
+    page.view
+        .update(cx, &page.choices, ui.ctx().cumulative_frame_nr());
     if panel != NetWorthPanel::NetWorth {
         dock::placeholder(ui, cx);
         return;
     }
     controls(page, ui, cx);
+    view::show_headline(ui, cx, &page.view, &page.choices);
 }
 
 /// Reads the saved choices; any failed read leaves the defaults.
