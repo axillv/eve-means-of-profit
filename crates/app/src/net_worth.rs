@@ -8,6 +8,7 @@ use crate::dock;
 
 pub mod data;
 pub mod record;
+pub mod summary;
 
 #[derive(Debug, Default)]
 pub struct NetWorthPage;
