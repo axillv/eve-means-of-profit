@@ -1,14 +1,17 @@
-//! The Characters panel: the login characters, how old each kind of their data is, and the buttons
-//! that fetch, log in again and remove.
+//! The Characters panel: the login characters, the account each one belongs to, how old each kind
+//! of their data is, and the buttons that fetch, log in again and remove.
 
-use egui::{Button, Color32, Id, Label, RichText, Ui};
+use egui::{Button, Color32, ComboBox, Id, Label, RichText, TextEdit, Ui};
 use mop_esi::character_data::{CharacterData, Fetched, Kind};
 use mop_esi::characters::Login;
+use mop_store::StoreError;
+use mop_store::net_worth::Account;
 
 use super::Inner;
 use crate::Shared;
 use crate::build::prices::age_text;
 use crate::session::eve::NO_CLIENT_ID;
+use crate::status::Notice;
 use crate::table::Table;
 use crate::table::model::{Cell, Column, ColumnKind, Row};
 use crate::theme::Style;
@@ -172,6 +175,7 @@ fn columns() -> Vec<Column> {
     vec![
         column("character", "Character", 180.0),
         column("login", "Login", 210.0),
+        column("account", "Account", 150.0),
         column("assets", "Assets", 80.0),
         column("orders", "Orders", 80.0),
         column("jobs", "Jobs", 80.0),
@@ -195,7 +199,7 @@ struct Gates {
     login: Option<String>,
 }
 
-pub(super) fn show(ui: &mut Ui, cx: &Shared, view: &View) -> Option<Click> {
+pub(super) fn show(ui: &mut Ui, cx: &mut Shared, view: &View) -> Option<Click> {
     let style = cx.style;
     let busy = view.busy.map(|what| format!("Busy: {what}"));
     let login = busy
@@ -203,6 +207,16 @@ pub(super) fn show(ui: &mut Ui, cx: &Shared, view: &View) -> Option<Click> {
         .or_else(|| (!view.login_possible).then(|| NO_CLIENT_ID.to_owned()));
     let gates = Gates { busy, login };
     let mut click = top(ui, view, &gates);
+    let accounts = match cx.store.accounts() {
+        Ok(held) => Some(held),
+        Err(error) => {
+            ui.colored_label(style.neg, format!("Could not read the accounts: {error}"));
+            None
+        }
+    };
+    if accounts.is_some() {
+        new_account(ui, cx);
+    }
     if let Some(text) = view.keychain {
         ui.label(RichText::new(text).color(style.mute));
     }
@@ -229,7 +243,41 @@ pub(super) fn show(ui: &mut Ui, cx: &Shared, view: &View) -> Option<Click> {
         return click;
     }
     lines.sort_by_key(|line| (line.name.to_lowercase(), line.name.clone()));
-    table(ui, cx, &lines, &gates).or(click)
+    table(ui, cx, &lines, accounts.as_deref(), &gates).or(click)
+}
+
+/// The account holding the character, when the accounts are read and one of them holds it.
+fn held_account(accounts: &[Account], character: u64) -> Option<&Account> {
+    accounts
+        .iter()
+        .find(|account| account.characters.contains(&character))
+}
+
+/// The `New account` field and the `Add account` button, under the buttons. The name being typed
+/// lives in the frame memory, so it survives the frames; a name the store stores empties the
+/// field, and one it refuses becomes an ERROR notice.
+fn new_account(ui: &mut Ui, cx: &mut Shared) {
+    let mut name = ui
+        .data(|data| data.get_temp::<String>(new_account_key()))
+        .unwrap_or_default();
+    let mut add = false;
+    ui.horizontal(|ui| {
+        let caption = ui.label("New account");
+        ui.add(TextEdit::singleline(&mut name).desired_width(220.0))
+            .labelled_by(caption.id);
+        add = ui.button("Add account").clicked();
+    });
+    if add {
+        match cx.store.add_account(&name) {
+            Ok(_) => name.clear(),
+            Err(error) => cx.notices.push(Notice::error(add_error(&error))),
+        }
+    }
+    ui.data_mut(|data| data.insert_temp(new_account_key(), name));
+}
+
+fn new_account_key() -> Id {
+    Id::new("characters new account")
 }
 
 /// The buttons above the table, and the wait for the browser.
@@ -270,15 +318,25 @@ fn confirm(ui: &mut Ui, name: &str) -> Option<Click> {
     click
 }
 
-fn table(ui: &mut Ui, cx: &Shared, lines: &[Line], gates: &Gates) -> Option<Click> {
+fn table(
+    ui: &mut Ui,
+    cx: &mut Shared,
+    lines: &[Line],
+    accounts: Option<&[Account]>,
+    gates: &Gates,
+) -> Option<Click> {
     let style = cx.style;
+    let density = cx.density;
     let mut click = None;
+    // What the player picked in an Account dropdown, applied once the table is drawn.
+    let mut picks: Vec<(u64, Option<i64>)> = Vec::new();
     let rows: Vec<Row> = lines
         .iter()
         .map(|line| {
             let mut cells = vec![
                 Cell::text(line.name.as_str()),
                 Cell::text(login_view(line.expired, &style).0),
+                Cell::text(account_text(accounts, line.id)),
             ];
             cells.extend(line.kinds.iter().map(|kind| Cell::text(kind.text.as_str())));
             cells.push(Cell::text(""));
@@ -299,6 +357,13 @@ fn table(ui: &mut Ui, cx: &Shared, lines: &[Line], gates: &Gates) -> Option<Clic
                 let (text, color) = login_view(line.expired, &style);
                 let text = RichText::new(text).color(color);
                 ui.add(Label::new(text).selectable(false));
+                true
+            }
+            "account" => {
+                let Some(accounts) = accounts else {
+                    return false;
+                };
+                account_cell(ui, accounts, key, &mut picks);
                 true
             }
             "assets" | "orders" | "jobs" | "wallet" => {
@@ -330,8 +395,114 @@ fn table(ui: &mut Ui, cx: &Shared, lines: &[Line], gates: &Gates) -> Option<Clic
         Id::new(super::CharactersPanel::Characters.title()),
         &columns,
     )
-    .show_with(ui, &style, cx.density, &rows, None, &mut draw);
+    .show_with(ui, &style, density, &rows, None, &mut draw);
+    for (character, account) in picks {
+        if let Err(error) = cx.store.set_account(character, account) {
+            cx.notices.push(Notice::error(pick_error(&error)));
+        }
+    }
     click
 }
 
+/// Draws the Account cell of one character: a dropdown of `(none)` and every account, with the
+/// accounts that hold three other characters off. What the player picks is pushed into `picks`,
+/// to be stored once the table is drawn.
+fn account_cell(ui: &mut Ui, accounts: &[Account], key: u64, picks: &mut Vec<(u64, Option<i64>)>) {
+    let held = held_account(accounts, key);
+    let mut picked = None;
+    ComboBox::from_id_salt(("characters account", key))
+        .selected_text(held.map_or(NO_ACCOUNT, |account| account.name.as_str()))
+        .show_ui(ui, |ui| {
+            if ui.selectable_label(held.is_none(), NO_ACCOUNT).clicked() {
+                picked = Some(None);
+            }
+            for account in accounts {
+                let others = account
+                    .characters
+                    .iter()
+                    .filter(|&&character| character != key)
+                    .count();
+                let response = ui.add_enabled(
+                    others < ACCOUNT_SIZE,
+                    Button::selectable(
+                        held.is_some_and(|held| held.id == account.id),
+                        account.name.as_str(),
+                    ),
+                );
+                if others >= ACCOUNT_SIZE {
+                    response.on_disabled_hover_text(ACCOUNT_FULL);
+                } else if response.clicked() {
+                    picked = Some(Some(account.id));
+                }
+            }
+        });
+    if let Some(account) = picked {
+        picks.push((key, account));
+    }
+}
+
+/// What the Account cell shows and copies: the account's name, `(none)` when the character is in
+/// no account, and nothing when the accounts could not be read.
+fn account_text(accounts: Option<&[Account]>, character: u64) -> String {
+    let Some(accounts) = accounts else {
+        return String::new();
+    };
+    held_account(accounts, character)
+        .map_or_else(|| NO_ACCOUNT.to_owned(), |account| account.name.clone())
+}
+
+/// What an error from adding an account says to the player.
+fn add_error(error: &StoreError) -> String {
+    if let StoreError::EmptyName = error {
+        return "Type a name for the account.".to_owned();
+    }
+    if let StoreError::NameTaken(name) = error {
+        return format!("An account called \"{name}\" already exists.");
+    }
+    format!("Could not add the account: {error}")
+}
+
+/// What an error from putting a character in an account says to the player.
+fn pick_error(error: &StoreError) -> String {
+    if let StoreError::TooLarge = error {
+        return ACCOUNT_FULL.to_owned();
+    }
+    format!("Could not save the account: {error}")
+}
+
 const KIND_COLUMNS: [&str; 4] = ["assets", "orders", "jobs", "wallet"];
+
+/// What an Account cell says when the character belongs to no account, and the dropdown's entry
+/// for it.
+const NO_ACCOUNT: &str = "(none)";
+
+/// Why an account's dropdown entry is off: it holds three other characters already.
+const ACCOUNT_FULL: &str = "This account already has 3 characters.";
+
+/// The most characters one EVE account holds.
+const ACCOUNT_SIZE: usize = 3;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_text_of_an_account_error_says_what_happened() {
+        assert_eq!(
+            pick_error(&StoreError::TooLarge),
+            "This account already has 3 characters."
+        );
+        assert_eq!(
+            pick_error(&StoreError::NotFound),
+            "Could not save the account: not found"
+        );
+        assert_eq!(
+            add_error(&StoreError::EmptyName),
+            "Type a name for the account."
+        );
+        assert_eq!(
+            add_error(&StoreError::NameTaken("Main acct".to_owned())),
+            "An account called \"Main acct\" already exists."
+        );
+    }
+}

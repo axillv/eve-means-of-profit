@@ -14,9 +14,10 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use egui::vec2;
+    use egui::accesskit::Role;
+    use egui::{Key, Modifiers, vec2};
     use egui_kittest::Harness;
-    use egui_kittest::kittest::{NodeT, Queryable};
+    use egui_kittest::kittest::{NodeT, Queryable, by};
     use eve_means_of_profit::build::prices::Prices;
     use eve_means_of_profit::characters::list::{kind_view, login_view};
     use eve_means_of_profit::characters::{forget_state, set_client_id_present, set_opener};
@@ -35,6 +36,7 @@ mod tests {
     use mop_market::fuzzwork::{BytesHttp, BytesResponse};
     use mop_sde::{Fetch, FetchError, import};
     use mop_store::Store;
+    use mop_store::net_worth::Account;
     use rusqlite::Connection;
     use tempfile::TempDir;
 
@@ -553,6 +555,165 @@ mod tests {
             .y
     }
 
+    /// Types into the text field that has this caption: clicks it, selects what it holds and types
+    /// `text` over it.
+    fn type_into(harness: &mut Harness<'_, App>, caption: &str, text: &str) {
+        reveal_field(harness, caption);
+        {
+            let field = harness
+                .query_all_by_label(caption)
+                .find(|node| node.accesskit_node().role() == Role::TextInput)
+                .unwrap_or_else(|| panic!("no text field captioned {caption}"));
+            field.hover();
+        }
+        harness.run_steps(2);
+        {
+            let field = harness
+                .query_all_by_label(caption)
+                .find(|node| node.accesskit_node().role() == Role::TextInput)
+                .unwrap_or_else(|| panic!("no text field captioned {caption}"));
+            field.click();
+        }
+        harness.run_steps(2);
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        {
+            let field = harness
+                .query_all_by_label(caption)
+                .find(|node| node.accesskit_node().role() == Role::TextInput)
+                .unwrap_or_else(|| panic!("no text field captioned {caption}"));
+            field.type_text(text);
+        }
+        harness.run_steps(3);
+    }
+
+    fn reveal_field(harness: &mut Harness<'_, App>, caption: &str) {
+        {
+            let field = harness
+                .query_all_by_label(caption)
+                .find(|node| node.accesskit_node().role() == Role::TextInput)
+                .unwrap_or_else(|| panic!("no text field captioned {caption}"));
+            field.scroll_to_me();
+        }
+        harness.run_steps(2);
+    }
+
+    /// The text the field with this caption holds.
+    fn field_text(harness: &Harness<'_, App>, caption: &str) -> Option<String> {
+        harness
+            .query_all_by_label(caption)
+            .find(|node| node.accesskit_node().role() == Role::TextInput)
+            .and_then(|node| node.value())
+    }
+
+    /// Clicks the `index`th node labelled `label`, counting from the top of the page.
+    fn click_nth(harness: &mut Harness<'_, App>, label: &str, index: usize) {
+        {
+            let target = harness
+                .query_all_by_label(label)
+                .nth(index)
+                .unwrap_or_else(|| panic!("no node labelled {label} number {index}"));
+            target.click();
+        }
+        harness.run_steps(3);
+    }
+
+    /// Clicks the `index`th combo box that shows `value`, counting from the top of the page. A combo
+    /// box has no label of its own, only the value it shows.
+    fn click_combo(harness: &mut Harness<'_, App>, value: &str, index: usize) {
+        let mut seen = 0;
+        let found = reveal_combo_in(&harness.root(), value, index, &mut seen);
+        assert!(found, "no combo box shows {value} number {index}");
+        harness.run_steps(2);
+        // A drop-down that was just closed by a pick is still open for a frame: move onto this one
+        // and let that frame pass before the press, or the press only closes the old list.
+        let mut seen = 0;
+        hover_combo_in(&harness.root(), value, index, &mut seen);
+        harness.run_steps(2);
+        let mut seen = 0;
+        click_combo_in(&harness.root(), value, index, &mut seen);
+        harness.run_steps(3);
+    }
+
+    fn hover_combo_in(
+        node: &egui_kittest::Node<'_>,
+        value: &str,
+        index: usize,
+        seen: &mut usize,
+    ) -> bool {
+        let accesskit = node.accesskit_node();
+        if accesskit.role() == Role::ComboBox && accesskit.value().as_deref() == Some(value) {
+            if *seen == index {
+                node.hover();
+                return true;
+            }
+            *seen += 1;
+        }
+        node.children()
+            .any(|child| hover_combo_in(&child, value, index, seen))
+    }
+
+    fn reveal_combo_in(
+        node: &egui_kittest::Node<'_>,
+        value: &str,
+        index: usize,
+        seen: &mut usize,
+    ) -> bool {
+        let accesskit = node.accesskit_node();
+        if accesskit.role() == Role::ComboBox && accesskit.value().as_deref() == Some(value) {
+            if *seen == index {
+                node.scroll_to_me();
+                return true;
+            }
+            *seen += 1;
+        }
+        node.children()
+            .any(|child| reveal_combo_in(&child, value, index, seen))
+    }
+
+    fn click_combo_in(
+        node: &egui_kittest::Node<'_>,
+        value: &str,
+        index: usize,
+        seen: &mut usize,
+    ) -> bool {
+        let accesskit = node.accesskit_node();
+        if accesskit.role() == Role::ComboBox && accesskit.value().as_deref() == Some(value) {
+            if *seen == index {
+                node.click();
+                return true;
+            }
+            *seen += 1;
+        }
+        node.children()
+            .any(|child| click_combo_in(&child, value, index, seen))
+    }
+
+    /// How many combo boxes show this value.
+    fn combos_showing(harness: &Harness<'_, App>, value: &str) -> usize {
+        let mut seen = 0;
+        count_combos_in(&harness.root(), value, &mut seen);
+        seen
+    }
+
+    fn count_combos_in(node: &egui_kittest::Node<'_>, value: &str, seen: &mut usize) {
+        let accesskit = node.accesskit_node();
+        if accesskit.role() == Role::ComboBox && accesskit.value().as_deref() == Some(value) {
+            *seen += 1;
+        }
+        node.children()
+            .for_each(|child| count_combos_in(&child, value, seen));
+    }
+
+    /// The accounts the app's own store holds.
+    fn accounts_in(harness: &mut Harness<'_, App>) -> Vec<Account> {
+        harness
+            .state_mut()
+            .shared_mut()
+            .store
+            .accounts()
+            .expect("the accounts read")
+    }
+
     /// The background price refresh stays off here: the test asks for each download itself.
     fn history_off(db: &Path) {
         let mut store = Store::open(db, NOW).expect("the store opens").store;
@@ -1003,7 +1164,13 @@ mod tests {
         eve.jeve = Some(jeve.path().to_path_buf());
         let mut harness = open(&env, &eve);
         until(&mut harness, "Hauler", |h| shown(h, "Hauler"));
-        harness.get_by_role(egui::accesskit::Role::ComboBox).click();
+        // The Characters panel's account dropdowns come first in the tree; the jEve panel's
+        // profile dropdown is the last one.
+        harness
+            .query_all(by().role(Role::ComboBox))
+            .last()
+            .expect("the profile dropdown")
+            .click();
         frames(&mut harness);
         harness.get_by_label("Other").click();
         until(&mut harness, "Zed", |h| shown(h, "Zed"));
@@ -1223,6 +1390,127 @@ mod tests {
         assert!(!shown(&harness, "Cancel"));
         assert!(!disabled(&harness, "Add character"));
         assert!(!disabled(&harness, "Refresh all"));
+    }
+
+    #[test]
+    fn a_fresh_store_shows_no_account_and_a_new_account_empties_the_field() {
+        let env = env();
+        let eve = FakeEve::new(&env, partial);
+        let mut harness = open(&env, &eve);
+        until(&mut harness, "the rows", |h| shown(h, "5m"));
+        // Both rows say (none) in the Account column.
+        assert_eq!(combos_showing(&harness, "(none)"), 2);
+        type_into(&mut harness, "New account", " Main acct ");
+        press(&mut harness, "Add account", 0);
+        let accounts = accounts_in(&mut harness);
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].name, "Main acct");
+        assert!(accounts[0].characters.is_empty());
+        assert_eq!(field_text(&harness, "New account").as_deref(), Some(""));
+        // Both dropdowns still say (none), and both list the new account.
+        assert_eq!(combos_showing(&harness, "(none)"), 2);
+        click_combo(&mut harness, "(none)", 0);
+        assert!(shown(&harness, "(none)"));
+        assert!(shown(&harness, "Main acct"));
+    }
+
+    #[test]
+    fn picking_an_account_for_a_character_stores_it_and_a_new_app_shows_the_same() {
+        let env = env();
+        let eve = FakeEve::new(&env, partial);
+        let mut harness = open(&env, &eve);
+        type_into(&mut harness, "New account", "Main acct");
+        press(&mut harness, "Add account", 0);
+        // Rows sort by name, so Alt's dropdown is the first one saying (none).
+        click_combo(&mut harness, "(none)", 0);
+        click_nth(&mut harness, "Main acct", 0);
+        until(&mut harness, "Alt's account", |h| {
+            combos_showing(h, "Main acct") == 1
+        });
+        assert_eq!(combos_showing(&harness, "(none)"), 1);
+        let accounts = accounts_in(&mut harness);
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].name, "Main acct");
+        assert_eq!(accounts[0].characters, vec![ALT]);
+
+        // A new app on the same data folder shows the same.
+        let mut again = open(&env, &eve);
+        until(&mut again, "the accounts", |h| {
+            combos_showing(h, "Main acct") == 1
+        });
+        assert_eq!(combos_showing(&again, "(none)"), 1);
+
+        // Picking (none) for Alt empties the account.
+        click_combo(&mut harness, "Main acct", 0);
+        click_nth(&mut harness, "(none)", 0);
+        until(&mut harness, "the account to go", |h| {
+            combos_showing(h, "(none)") == 2
+        });
+        assert!(accounts_in(&mut harness)[0].characters.is_empty());
+    }
+
+    #[test]
+    fn a_taken_or_blank_account_name_is_an_error_and_stores_nothing() {
+        let env = env();
+        let eve = FakeEve::new(&env, partial);
+        let mut harness = open(&env, &eve);
+        type_into(&mut harness, "New account", " Main acct ");
+        press(&mut harness, "Add account", 0);
+        type_into(&mut harness, "New account", "Main acct");
+        press(&mut harness, "Add account", 0);
+        type_into(&mut harness, "New account", "  ");
+        press(&mut harness, "Add account", 0);
+        assert_eq!(
+            notices(&mut harness),
+            vec![
+                "An account called \"Main acct\" already exists.".to_owned(),
+                "Type a name for the account.".to_owned(),
+            ]
+        );
+        let accounts = accounts_in(&mut harness);
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].name, "Main acct");
+        assert!(accounts[0].characters.is_empty());
+    }
+
+    #[test]
+    fn an_account_with_three_other_characters_is_listed_but_disabled() {
+        let env = env();
+        let eve = FakeEve::new(&env, partial);
+        let mut harness = open(&env, &eve);
+        let full = {
+            let store = &mut harness.state_mut().shared_mut().store;
+            let full = store.add_account("Full").expect("the account");
+            for character in [901, 902, 903] {
+                store
+                    .set_account(character, Some(full))
+                    .expect("a character in it");
+            }
+            full
+        };
+        frames(&mut harness);
+        // Rows sort by name, so Main's dropdown is the second one saying (none).
+        click_combo(&mut harness, "(none)", 1);
+        assert!(disabled(&harness, "Full"));
+        harness
+            .get_all_by_label("Full")
+            .next()
+            .expect("the entry")
+            .hover();
+        frames(&mut harness);
+        assert!(shown(&harness, "This account already has 3 characters."));
+
+        // A character already in the account is allowed to stay in it: one of the three moves out
+        // first, or a fourth would be refused.
+        {
+            let store = &mut harness.state_mut().shared_mut().store;
+            store.set_account(903, None).expect("903 out");
+            store.set_account(ALT, Some(full)).expect("Alt in Full");
+        }
+        frames(&mut harness);
+        // Alt's dropdown now shows Full, and its Full entry is enabled.
+        click_combo(&mut harness, "Full", 0);
+        assert!(!disabled(&harness, "Full"));
     }
 
     #[test]
