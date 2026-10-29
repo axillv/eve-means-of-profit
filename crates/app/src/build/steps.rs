@@ -2,14 +2,14 @@
 //! type's children are its materials in recipe order. A type with several consumers is shown once,
 //! under the consumer with the lowest (depth, type id) one level up.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Checkbox, DragValue, Id, Label, RichText, Sense, TextStyle, Ui};
 use mop_core::format::group_thousands;
 use mop_core::industry::{Activity, JobSplit, Recipe, RecipeBook, TypeId};
 use mop_core::make_or_buy::{Choice, Decision};
-use mop_core::plan::{BuyLine, Plan, Step};
+use mop_core::plan::{BuyLine, Plan, PlanProduct, Step};
 use mop_core::reserve;
 use mop_sde::Sde;
 use mop_store::PlanRecord;
@@ -120,14 +120,14 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
                 .or_insert_with(|| type_name(type_id, cx.sde.as_ref(), &mut cx.notices));
         }
     }
-    let lines = tree(plan, &page.recipes, record.product);
+    let lines = tree(plan, &page.recipes, &page.products);
     let views: BTreeMap<u64, View> = lines
         .iter()
         .map(|line| {
             let units = running.get(&line.type_id).copied().unwrap_or(0);
             (
                 u64::from(line.type_id),
-                view(line, record, &costs, &names, units),
+                view(line, record, &page.products, &costs, &names, units),
             )
         })
         .collect();
@@ -326,22 +326,35 @@ fn apply(page: &mut BuildPage, cx: &mut Shared, edits: &[Edit]) {
     page.edited(cx);
 }
 
-/// The chain as a tree, in the order the rows show: each type, then its children in recipe order.
-fn tree<'a>(plan: &'a Plan, recipes: &'a RecipeBook, product: TypeId) -> Vec<Line<'a>> {
+/// The chain as a tree, in the order the rows show: each product at depth 0 in the page's order,
+/// then its children in recipe order. A type is drawn once: a product is never drawn as a child,
+/// and any other type already drawn is skipped.
+fn tree<'a>(plan: &'a Plan, recipes: &'a RecipeBook, products: &[PlanProduct]) -> Vec<Line<'a>> {
     let steps: BTreeMap<TypeId, &Step> =
         plan.steps.iter().map(|step| (step.type_id, step)).collect();
     let buys: BTreeMap<TypeId, &BuyLine> =
         plan.buy.iter().map(|line| (line.type_id, line)).collect();
     let owners = owners(&plan.steps, recipes);
     let children = children(&plan.steps, recipes, &owners);
+    let product_ids: BTreeSet<TypeId> = products.iter().map(|product| product.type_id).collect();
     let mut lines = Vec::new();
+    let mut drawn = BTreeSet::new();
     let context = Tree {
         steps,
         buys,
         children,
         recipes,
     };
-    walk(product, 0, &context, &mut lines);
+    for product in products {
+        walk(
+            product.type_id,
+            0,
+            &context,
+            &product_ids,
+            &mut drawn,
+            &mut lines,
+        );
+    }
     lines
 }
 
@@ -405,7 +418,17 @@ fn children(
     children
 }
 
-fn walk<'a>(type_id: TypeId, depth: u32, tree: &Tree<'a>, out: &mut Vec<Line<'a>>) {
+fn walk<'a>(
+    type_id: TypeId,
+    depth: u32,
+    tree: &Tree<'a>,
+    products: &BTreeSet<TypeId>,
+    drawn: &mut BTreeSet<TypeId>,
+    out: &mut Vec<Line<'a>>,
+) {
+    if !drawn.insert(type_id) {
+        return;
+    }
     let recipes = tree.recipes;
     out.push(Line {
         type_id,
@@ -415,18 +438,22 @@ fn walk<'a>(type_id: TypeId, depth: u32, tree: &Tree<'a>, out: &mut Vec<Line<'a>
         recipe: recipes.get(type_id),
     });
     for child in tree.children.get(&type_id).into_iter().flatten() {
-        walk(*child, depth + 1, tree, out);
+        if products.contains(child) {
+            continue;
+        }
+        walk(*child, depth + 1, tree, products, drawn, out);
     }
 }
 
 fn view(
     line: &Line,
     record: &PlanRecord,
+    products: &[PlanProduct],
     costs: &Costs,
     names: &BTreeMap<TypeId, String>,
     running: u64,
 ) -> View {
-    let is_product = line.type_id == record.product;
+    let is_product = is_product(products, line.type_id);
     let reaction = line
         .recipe
         .is_some_and(|recipe| recipe.activity == Activity::Reaction);
@@ -451,7 +478,7 @@ fn view(
     View {
         type_id: line.type_id,
         has_recipe: line.recipe.is_some(),
-        ticked: is_product || record.build.contains(&line.type_id),
+        ticked: !is_product && record.build.contains(&line.type_id),
         tick_enabled: !is_product && (!reaction || reactions_picked),
         tick_hover: (reaction && !reactions_picked && !is_product).then_some(NO_REACTIONS),
         me,
@@ -466,8 +493,13 @@ fn view(
             .map(|step| jobs_hover(&step.jobs))
             .unwrap_or_default(),
         cost: cost_figure(line, costs, names),
-        decide: decide_figure(line, record, costs),
+        decide: decide_figure(line, products, costs),
     }
+}
+
+/// Whether a type is one of the plan's products.
+fn is_product(products: &[PlanProduct], type_id: TypeId) -> bool {
+    products.iter().any(|product| product.type_id == type_id)
 }
 
 /// The Job cost of a built step: the total, amber with ` incomplete` when an adjusted price is
@@ -524,10 +556,11 @@ fn cost_figure(line: &Line, costs: &Costs, names: &BTreeMap<TypeId, String>) -> 
     }
 }
 
-/// The Make or buy verdict. A part whose activity cannot be costed shows its set-up message in
-/// mute. A verdict the row does not match is amber, and a click applies it.
-fn decide_figure(line: &Line, record: &PlanRecord, costs: &Costs) -> Figure {
-    if line.type_id == record.product || line.recipe.is_none() {
+/// The Make or buy verdict. A product and a part without a recipe show nothing. A part whose
+/// activity cannot be costed shows its set-up message in mute. A verdict the row does not match is
+/// amber, and a click applies it.
+fn decide_figure(line: &Line, products: &[PlanProduct], costs: &Costs) -> Figure {
+    if is_product(products, line.type_id) || line.recipe.is_none() {
         return Figure::default();
     }
     if let Some(message) = costs.messages.get(&line.type_id) {
@@ -756,5 +789,283 @@ mod tests {
             BTreeMap::from([(HOBGOBLIN_I, 1)])
         );
         assert_eq!(running_by_type(&plan, &BTreeMap::new()), BTreeMap::new());
+    }
+
+    const HOBGOBLIN_II: TypeId = 2456;
+    const RIFTER: TypeId = 587;
+    const ROBOTICS: TypeId = 11_481;
+
+    fn recipe(activity: Activity, output: u64, max: u64, materials: &[(TypeId, u64)]) -> Recipe {
+        Recipe {
+            activity,
+            output_per_run: output,
+            max_runs_per_job: max,
+            materials: materials.to_vec(),
+            made_by_invention: false,
+        }
+    }
+
+    /// The recipes of the acceptance's products and their materials, from SDE build 3607705.
+    fn game_book() -> RecipeBook {
+        let mut book = RecipeBook::new();
+        book.insert(
+            HOBGOBLIN_II,
+            recipe(Activity::Manufacturing, 1, 10, &[(ROBOTICS, 1)]),
+        );
+        book.insert(
+            ROBOTICS,
+            recipe(
+                Activity::Manufacturing,
+                100,
+                200,
+                &[(34, 556), (35, 444), (36, 222), (37, 82), (38, 36)],
+            ),
+        );
+        book.insert(
+            RIFTER,
+            recipe(
+                Activity::Manufacturing,
+                1,
+                30,
+                &[(34, 32_000), (35, 6_000), (36, 2_500), (37, 500)],
+            ),
+        );
+        book
+    }
+
+    fn step(
+        type_id: TypeId,
+        depth: u32,
+        needed: u64,
+        from_stock: u64,
+        to_build: u64,
+        runs: u64,
+        spare: u64,
+    ) -> Step {
+        Step {
+            type_id,
+            activity: Activity::Manufacturing,
+            depth,
+            needed,
+            from_stock,
+            to_build,
+            runs,
+            jobs: JobSplit {
+                full_jobs: 0,
+                runs_per_full_job: runs,
+                last_job_runs: runs,
+            },
+            spare,
+        }
+    }
+
+    fn buy(type_id: TypeId, depth: u32, needed: u64, from_stock: u64, to_buy: u64) -> BuyLine {
+        BuyLine {
+            type_id,
+            depth,
+            needed,
+            from_stock,
+            to_buy,
+        }
+    }
+
+    /// The acceptance's plan, holding R.A.M.- Robotics and a Rifter with 1,000 Tritanium in stock.
+    fn products_plan() -> Plan {
+        Plan {
+            steps: vec![
+                step(RIFTER, 0, 2, 0, 2, 2, 0),
+                step(ROBOTICS, 0, 150, 0, 150, 2, 50),
+            ],
+            buy: vec![
+                buy(34, 1, 58_601, 1_000, 57_601),
+                buy(35, 1, 11_600, 0, 11_600),
+                buy(36, 1, 4_900, 0, 4_900),
+                buy(37, 1, 1_048, 0, 1_048),
+                buy(38, 1, 65, 0, 65),
+            ],
+            unused_stock: Vec::new(),
+        }
+    }
+
+    fn products() -> [PlanProduct; 2] {
+        [
+            PlanProduct {
+                type_id: ROBOTICS,
+                quantity: 150,
+            },
+            PlanProduct {
+                type_id: RIFTER,
+                quantity: 2,
+            },
+        ]
+    }
+
+    fn record() -> PlanRecord {
+        PlanRecord {
+            id: 1,
+            name: "Test plan".to_owned(),
+            product: HOBGOBLIN_II,
+            quantity: 1,
+            build: BTreeSet::new(),
+            me: BTreeMap::new(),
+            manufacturing: None,
+            reactions: None,
+            price_rule: Default::default(),
+            route: None,
+            service: None,
+            packing: Default::default(),
+            pasted_stock: String::new(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn products_are_roots_and_shared_materials_show_once() {
+        let plan = products_plan();
+        let book = game_book();
+        let lines = tree(&plan, &book, &products());
+        let types: Vec<TypeId> = lines.iter().map(|line| line.type_id).collect();
+        // The shared materials sit under the lowest (depth, type id) consumer, the Rifter.
+        assert_eq!(types, [ROBOTICS, 38, RIFTER, 34, 35, 36, 37]);
+
+        assert_eq!(lines[0].depth, 0);
+        assert!(lines[0].step.is_some());
+        assert_eq!(lines[1].depth, 1);
+        assert_eq!(lines[2].depth, 0);
+        assert!(lines[2].step.is_some());
+        assert!(lines[3..].iter().all(|line| line.depth == 1));
+
+        assert_eq!(types.iter().filter(|&&type_id| type_id == 34).count(), 1);
+        let tritanium = lines
+            .iter()
+            .find(|line| line.type_id == 34)
+            .expect("the Tritanium line");
+        let buy = tritanium.buy.expect("a bought line");
+        assert_eq!(
+            (buy.needed, buy.from_stock, buy.to_buy),
+            (58_601, 1_000, 57_601)
+        );
+        let products = products();
+        let costs = Costs::default();
+        let names = BTreeMap::new();
+        let record = record();
+        let tritanium_view = view(tritanium, &record, &products, &costs, &names, 0);
+        let mut notices = Vec::new();
+        let tritanium_row = row(tritanium, Some(&tritanium_view), 0, None, &mut notices);
+        assert_eq!(
+            tritanium_row.cells[3..=4]
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<Vec<_>>(),
+            ["58,601", "1,000"]
+        );
+        assert_eq!(tritanium_row.cells[7].text, "57,601");
+        for type_id in [35, 36, 37, 38] {
+            assert_eq!(
+                lines.iter().filter(|line| line.type_id == type_id).count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn a_product_is_never_drawn_as_a_child() {
+        let plan = Plan {
+            steps: vec![
+                step(HOBGOBLIN_II, 0, 10, 0, 10, 10, 0),
+                step(ROBOTICS, 0, 150, 0, 150, 2, 50),
+            ],
+            buy: Vec::new(),
+            unused_stock: Vec::new(),
+        };
+        let products = [
+            PlanProduct {
+                type_id: HOBGOBLIN_II,
+                quantity: 10,
+            },
+            PlanProduct {
+                type_id: ROBOTICS,
+                quantity: 150,
+            },
+        ];
+        let book = game_book();
+        let lines = tree(&plan, &book, &products);
+        let types: Vec<TypeId> = lines.iter().map(|line| line.type_id).collect();
+        assert_eq!(types, [HOBGOBLIN_II, ROBOTICS, 34, 35, 36, 37, 38]);
+        assert_eq!(lines[1].depth, 0);
+        assert_eq!(
+            types.iter().filter(|&&type_id| type_id == ROBOTICS).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_one_product_plan_keeps_its_rows() {
+        let mut plan = products_plan();
+        plan.steps.remove(0);
+        let book = game_book();
+        let lines = tree(
+            &plan,
+            &book,
+            &[PlanProduct {
+                type_id: ROBOTICS,
+                quantity: 150,
+            }],
+        );
+        let types: Vec<TypeId> = lines.iter().map(|line| line.type_id).collect();
+        assert_eq!(types, [ROBOTICS, 34, 35, 36, 37, 38]);
+        assert_eq!(lines[0].depth, 0);
+        assert!(lines[1..].iter().all(|line| line.depth == 1));
+    }
+
+    #[test]
+    fn every_product_has_no_clickable_tick_and_no_make_or_buy() {
+        let plan = Plan {
+            steps: vec![
+                step(HOBGOBLIN_II, 0, 10, 0, 10, 10, 0),
+                step(RIFTER, 0, 1, 0, 1, 1, 0),
+            ],
+            buy: Vec::new(),
+            unused_stock: Vec::new(),
+        };
+        let products = [
+            PlanProduct {
+                type_id: HOBGOBLIN_II,
+                quantity: 10,
+            },
+            PlanProduct {
+                type_id: RIFTER,
+                quantity: 1,
+            },
+        ];
+        let mut costs = Costs::default();
+        costs
+            .messages
+            .insert(HOBGOBLIN_II, "no facility".to_owned());
+        costs.messages.insert(RIFTER, "no facility".to_owned());
+        let names = BTreeMap::new();
+        let record = record();
+        let book = game_book();
+        let lines = tree(&plan, &book, &products);
+
+        for product in &products {
+            let line = lines
+                .iter()
+                .find(|line| line.type_id == product.type_id)
+                .expect("the product's row");
+            let view = view(line, &record, &products, &costs, &names, 0);
+            assert!(view.has_recipe);
+            assert!(!view.ticked);
+            assert!(!view.tick_enabled);
+            assert!(view.decide.text.is_empty());
+        }
+
+        let material = lines
+            .iter()
+            .find(|line| line.type_id == ROBOTICS)
+            .expect("a material with a recipe");
+        let view = view(material, &record, &products, &costs, &names, 0);
+        assert!(view.tick_enabled);
     }
 }

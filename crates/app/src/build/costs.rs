@@ -10,7 +10,7 @@ use mop_core::invention::{AttemptRule, Decryptor, Skills};
 use mop_core::job_cost::{CostSetup, SCC_SURCHARGE, StepCost, job_cost, step_cost};
 use mop_core::make_or_buy::{Decision, MakeOrBuyInput, make_or_buy};
 use mop_core::money::Money;
-use mop_core::plan::Plan;
+use mop_core::plan::{Plan, PlanProduct};
 use mop_core::volume::Volume;
 use mop_sde::invention::{InventionActivity, InventionProduct, split_skills};
 use mop_sde::{Facility, Sde, Security};
@@ -330,10 +330,10 @@ pub(super) fn setup(
     })
 }
 
-/// Every type reachable from the product through the recipes, the product included.
-fn reachable(product: TypeId, recipes: &RecipeBook) -> BTreeSet<TypeId> {
+/// Every type reachable from any of the products through the recipes, the products included.
+fn reachable(products: &[PlanProduct], recipes: &RecipeBook) -> BTreeSet<TypeId> {
     let mut seen = BTreeSet::new();
-    let mut stack = vec![product];
+    let mut stack: Vec<TypeId> = products.iter().map(|product| product.type_id).collect();
     while let Some(type_id) = stack.pop() {
         if !seen.insert(type_id) {
             continue;
@@ -345,18 +345,26 @@ fn reachable(product: TypeId, recipes: &RecipeBook) -> BTreeSet<TypeId> {
     seen
 }
 
-/// The modifier of every type with a recipe below the product. A type whose modifier cannot be
-/// read gets none; the decision then leaves it out.
+/// The modifier of every type with a recipe that the plan can build: the types reachable from the
+/// products, the record's Build ticks and every product. A type whose modifier cannot be read gets
+/// none; the decision then leaves it out.
 fn modifiers(
     record: &PlanRecord,
     types: &BTreeSet<TypeId>,
+    products: &[PlanProduct],
     recipes: &RecipeBook,
     sde: &Sde,
     facilities: &[FacilityRow],
     copy_mes: &BTreeMap<TypeId, u8>,
 ) -> BTreeMap<TypeId, Modifier> {
+    let covered: BTreeSet<TypeId> = types
+        .iter()
+        .copied()
+        .chain(record.build.iter().copied())
+        .chain(products.iter().map(|product| product.type_id))
+        .collect();
     let mut modifiers = BTreeMap::new();
-    for &type_id in types {
+    for type_id in covered {
         let Some(recipe) = recipes.get(type_id) else {
             continue;
         };
@@ -685,10 +693,11 @@ fn compute_inner(
     // A buy list that cannot be worked out has no chosen freight: the decision would then leave
     // freight out silently, so it is the costs' error line instead.
     let card = buy_list::chosen_card(ui, record, plan, cx, &held, now)?;
-    let types = reachable(record.product, recipes);
+    let types = reachable(&page.products, recipes);
     let modifiers = modifiers(
         record,
         &types,
+        &page.products,
         recipes,
         cx.sde.as_ref().ok_or("the game data is not loaded yet")?,
         facilities,
@@ -765,6 +774,9 @@ mod tests {
     use mop_core::money::Rate;
     use mop_core::plan::Step;
     use mop_sde::invention::SkillRequirement;
+    use mop_sde::{Sde, import};
+    use std::path::Path;
+    use tempfile::TempDir;
 
     use super::*;
 
@@ -1105,5 +1117,122 @@ mod tests {
         assert!(inventions.parts.is_empty());
         assert!(!inventions.skills_unset);
         assert_eq!(inventions.rule, AttemptRule::Expected);
+    }
+
+    const RIFTER: TypeId = 587;
+    const ROBOTICS: TypeId = 11_481;
+
+    fn plan_product(type_id: TypeId, quantity: u64) -> PlanProduct {
+        PlanProduct { type_id, quantity }
+    }
+
+    fn chain_recipe(
+        activity: Activity,
+        output: u64,
+        max: u64,
+        materials: &[(TypeId, u64)],
+    ) -> Recipe {
+        Recipe {
+            activity,
+            output_per_run: output,
+            max_runs_per_job: max,
+            materials: materials.to_vec(),
+            made_by_invention: false,
+        }
+    }
+
+    /// The recipes of the acceptance's products and their materials, from SDE build 3607705.
+    fn game_book() -> RecipeBook {
+        let mut book = RecipeBook::new();
+        book.insert(
+            ROBOTICS,
+            chain_recipe(
+                Activity::Manufacturing,
+                100,
+                200,
+                &[(34, 556), (35, 444), (36, 222), (37, 82), (38, 36)],
+            ),
+        );
+        book.insert(
+            RIFTER,
+            chain_recipe(
+                Activity::Manufacturing,
+                1,
+                30,
+                &[(34, 32_000), (35, 6_000), (36, 2_500), (37, 500)],
+            ),
+        );
+        book
+    }
+
+    /// The build 3607705 fixture imported into `dir`.
+    fn fixture_sde(dir: &TempDir) -> Sde {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../sde/tests/fixtures/sde-3607705");
+        let db = dir.path().join("sde.sqlite");
+        import(&source, &db).expect("the fixture imports");
+        Sde::open(&db).expect("the fixture opens")
+    }
+
+    fn record(build: BTreeSet<TypeId>) -> PlanRecord {
+        PlanRecord {
+            id: 1,
+            name: "Test plan".to_owned(),
+            product: ROBOTICS,
+            quantity: 1,
+            build,
+            me: BTreeMap::new(),
+            manufacturing: None,
+            reactions: None,
+            price_rule: Default::default(),
+            route: None,
+            service: None,
+            packing: Default::default(),
+            pasted_stock: String::new(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn reachable_covers_every_product_and_its_materials() {
+        let products = [plan_product(ROBOTICS, 150), plan_product(RIFTER, 2)];
+        assert_eq!(
+            reachable(&products, &game_book()),
+            BTreeSet::from([34, 35, 36, 37, 38, RIFTER, ROBOTICS])
+        );
+    }
+
+    #[test]
+    fn modifiers_cover_every_product_and_the_record_build_ticks() {
+        let dir = TempDir::new().expect("a temp folder");
+        let sde = fixture_sde(&dir);
+        let recipes = sde.recipe_book().expect("the fixture recipe book");
+        let products = [plan_product(ROBOTICS, 150), plan_product(RIFTER, 2)];
+        let types = reachable(&products, &recipes);
+        let found = modifiers(
+            &record(BTreeSet::new()),
+            &types,
+            &products,
+            &recipes,
+            &sde,
+            &[],
+            &BTreeMap::new(),
+        );
+        assert!(found.contains_key(&ROBOTICS));
+        assert!(found.contains_key(&RIFTER));
+
+        // A type in the record's Build ticks gets a modifier even when no product reaches it.
+        let types = reachable(&[plan_product(ROBOTICS, 150)], &recipes);
+        let found = modifiers(
+            &record(BTreeSet::from([HOBGOBLIN_II])),
+            &types,
+            &[plan_product(ROBOTICS, 150)],
+            &recipes,
+            &sde,
+            &[],
+            &BTreeMap::new(),
+        );
+        assert!(found.contains_key(&HOBGOBLIN_II));
     }
 }
