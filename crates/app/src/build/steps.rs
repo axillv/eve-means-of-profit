@@ -14,7 +14,7 @@ use mop_core::reserve;
 use mop_sde::Sde;
 use mop_store::PlanRecord;
 
-use super::costs::{self, Costs, PENDING};
+use super::costs::{self, Costs, InventionShown, PENDING};
 use super::prices::age_text;
 use super::state::{BuildPage, NO_REACTIONS, me_of, push_error, type_name};
 use crate::status::Notice;
@@ -22,6 +22,10 @@ use crate::table::Table;
 use crate::table::model::{Cell, Column, ColumnKind, Row};
 use crate::theme::Style;
 use crate::{INDUSTRY_AGE_SECS, Shared};
+
+/// Above the table while a shown part has an invention skill with no saved level.
+const SKILLS_HINT: &str =
+    "Invention skills not set: type them in Settings or read them from a character.";
 
 /// A change the table asked for, applied to the plan after the table is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +44,7 @@ struct Line<'a> {
 }
 
 /// What the drawing of one row needs beyond its cells.
-struct View {
+struct View<'a> {
     type_id: TypeId,
     has_recipe: bool,
     ticked: bool,
@@ -54,6 +58,8 @@ struct View {
     jobs_hover: String,
     cost: Figure,
     decide: Figure,
+    /// The invention of the part this row builds, when the plan invents it.
+    invention: Option<&'a InventionShown>,
 }
 
 /// The text of a Job cost or Make or buy cell, its tone, its hover, and the change a click asks for.
@@ -121,13 +127,22 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
         }
     }
     let lines = tree(plan, &page.recipes, &page.products);
-    let views: BTreeMap<u64, View> = lines
+    let inventions = &costs.inventions.parts;
+    let views: BTreeMap<u64, View<'_>> = lines
         .iter()
         .map(|line| {
             let units = running.get(&line.type_id).copied().unwrap_or(0);
             (
                 u64::from(line.type_id),
-                view(line, record, &page.products, &costs, &names, units),
+                view(
+                    line,
+                    record,
+                    &page.products,
+                    &costs,
+                    &names,
+                    units,
+                    inventions,
+                ),
             )
         })
         .collect();
@@ -144,11 +159,7 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
             )
         })
         .collect();
-    if let Some(error) = &costs.error {
-        ui.label(
-            RichText::new(format!("Could not work out the costs: {error}")).color(cx.style.neg),
-        );
-    }
+    above_table(ui, &costs, &cx.style);
     let columns = columns();
     let mut edits = Vec::new();
     let style = cx.style;
@@ -163,7 +174,7 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
             "jobs" => jobs_label(ui, view),
             "cost" => figure_cell(ui, &view.cost, &style, &mut edits),
             "decide" => figure_cell(ui, &view.decide, &style, &mut edits),
-            _ => false,
+            _ => invention_index(column).is_some_and(|index| invention_cell(ui, view, index)),
         }
     };
     let response = Table::new(Id::new(super::BuildPanel::Steps.title()), &columns)
@@ -175,6 +186,16 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
     }
     total_line(ui, &costs, &cx.style);
     edits
+}
+
+/// The lines above the table: the cost error, and the hint that invention skills are not set.
+fn above_table(ui: &mut Ui, costs: &Costs, style: &Style) {
+    if let Some(error) = &costs.error {
+        ui.label(RichText::new(format!("Could not work out the costs: {error}")).color(style.neg));
+    }
+    if costs.inventions.skills_unset {
+        ui.label(RichText::new(SKILLS_HINT).color(style.mute));
+    }
 }
 
 /// A Job cost or Make or buy cell: its text in its tone, its hover, and its click. Returns
@@ -197,6 +218,34 @@ fn figure_cell(ui: &mut Ui, figure: &Figure, style: &Style, edits: &mut Vec<Edit
         && response.clicked()
     {
         edits.push(edit);
+    }
+    true
+}
+
+/// The position of an invention column among the seven, or `None` for another column.
+fn invention_index(column: &str) -> Option<usize> {
+    [
+        "chance",
+        "copies",
+        "attempts",
+        "fee",
+        "per_copy",
+        "carried",
+        "invention",
+    ]
+    .iter()
+    .position(|id| *id == column)
+}
+
+/// One invention cell: its text, drawn only once the table has scrolled it into view. Returns
+/// whether it drew the cell.
+fn invention_cell(ui: &mut Ui, view: &View<'_>, index: usize) -> bool {
+    if !ui.is_rect_visible(ui.max_rect()) {
+        return true;
+    }
+    let cells = invention_cells(view.invention);
+    if let Some(cell) = cells.get(index) {
+        ui.add(Label::new(cell.text.as_str()).selectable(false));
     }
     true
 }
@@ -445,14 +494,15 @@ fn walk<'a>(
     }
 }
 
-fn view(
+fn view<'a>(
     line: &Line,
     record: &PlanRecord,
     products: &[PlanProduct],
     costs: &Costs,
     names: &BTreeMap<TypeId, String>,
     running: u64,
-) -> View {
+    inventions: &'a BTreeMap<TypeId, InventionShown>,
+) -> View<'a> {
     let is_product = is_product(products, line.type_id);
     let reaction = line
         .recipe
@@ -494,6 +544,7 @@ fn view(
             .unwrap_or_default(),
         cost: cost_figure(line, costs, names),
         decide: decide_figure(line, products, costs),
+        invention: inventions.get(&line.type_id),
     }
 }
 
@@ -661,11 +712,66 @@ fn row(
     }
     cells.push(Cell::text(""));
     cells.push(Cell::text(""));
+    cells.extend(invention_cells(view.and_then(|view| view.invention)));
     Row {
         key: u64::from(line.type_id),
         depth: line.depth,
         cells,
     }
+}
+
+/// The seven invention cells of a row, in column order.
+fn invention_cells(shown: Option<&InventionShown>) -> [Cell; 7] {
+    match shown {
+        None => std::array::from_fn(|_| Cell::text("")),
+        Some(InventionShown::Not) => {
+            let mut cells = missing_cells();
+            cells[6] = Cell::text("Not invented: you have the copies.");
+            cells
+        }
+        Some(InventionShown::Unavailable(text)) => {
+            let mut cells = missing_cells();
+            cells[6] = Cell::text(text.clone());
+            cells
+        }
+        Some(InventionShown::Counted {
+            numbers,
+            fee,
+            fee_note,
+            ..
+        }) => {
+            let need = &numbers.need;
+            let mut notes = Vec::new();
+            if let Some(note) = fee_note {
+                notes.push(note.clone());
+            }
+            if need.spare_runs > 0 {
+                let runs = if need.spare_runs == 1 { "run" } else { "runs" };
+                notes.push(format!(
+                    "{} {runs} left on the copy",
+                    grouped(need.spare_runs)
+                ));
+            }
+            [
+                Cell::text(format!("{}%", numbers.chance.percent_string())),
+                Cell::text(format!(
+                    "{} × {} runs",
+                    grouped(need.copies),
+                    grouped(u64::from(numbers.copy.runs))
+                )),
+                number(need.attempts),
+                Cell::money(*fee),
+                Cell::money(need.cost_per_copy),
+                Cell::money(need.carried),
+                Cell::text(notes.join(" · ")),
+            ]
+        }
+    }
+}
+
+/// Seven missing values: one for each invention column.
+fn missing_cells() -> [Cell; 7] {
+    std::array::from_fn(|_| Cell::missing())
 }
 
 /// Need and Own.
@@ -734,6 +840,13 @@ fn columns() -> Vec<Column> {
         column("spare", "Spare", ColumnKind::Number, 90.0),
         column("cost", "Job cost", ColumnKind::Number, 150.0),
         column("decide", "Make or buy", ColumnKind::Text, 330.0),
+        column("chance", "Chance", ColumnKind::Number, 90.0),
+        column("copies", "Copies", ColumnKind::Number, 120.0),
+        column("attempts", "Attempts", ColumnKind::Number, 90.0),
+        column("fee", "Fee", ColumnKind::Money, 110.0),
+        column("per_copy", "Per copy", ColumnKind::Money, 120.0),
+        column("carried", "Carried", ColumnKind::Money, 120.0),
+        column("invention", "Invention", ColumnKind::Text, 330.0),
     ]
 }
 
@@ -950,7 +1063,16 @@ mod tests {
         let costs = Costs::default();
         let names = BTreeMap::new();
         let record = record();
-        let tritanium_view = view(tritanium, &record, &products, &costs, &names, 0);
+        let inventions = BTreeMap::new();
+        let tritanium_view = view(
+            tritanium,
+            &record,
+            &products,
+            &costs,
+            &names,
+            0,
+            &inventions,
+        );
         let mut notices = Vec::new();
         let tritanium_row = row(tritanium, Some(&tritanium_view), 0, None, &mut notices);
         assert_eq!(
@@ -1048,13 +1170,14 @@ mod tests {
         let record = record();
         let book = game_book();
         let lines = tree(&plan, &book, &products);
+        let inventions = BTreeMap::new();
 
         for product in &products {
             let line = lines
                 .iter()
                 .find(|line| line.type_id == product.type_id)
                 .expect("the product's row");
-            let view = view(line, &record, &products, &costs, &names, 0);
+            let view = view(line, &record, &products, &costs, &names, 0, &inventions);
             assert!(view.has_recipe);
             assert!(!view.ticked);
             assert!(!view.tick_enabled);
@@ -1065,7 +1188,7 @@ mod tests {
             .iter()
             .find(|line| line.type_id == ROBOTICS)
             .expect("a material with a recipe");
-        let view = view(material, &record, &products, &costs, &names, 0);
+        let view = view(material, &record, &products, &costs, &names, 0, &inventions);
         assert!(view.tick_enabled);
     }
 }

@@ -6,6 +6,7 @@ mod buy_list;
 mod characters;
 mod costs;
 mod history;
+mod invention;
 mod item_panel;
 mod jobs;
 mod layout_model;
