@@ -5,6 +5,8 @@
 
 use egui::{CornerRadius, Id, RichText, Ui, WidgetText};
 use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
+use mop_store::Store;
+use mop_store::StoreError;
 
 use crate::Shared;
 use crate::assets::AssetsPanel;
@@ -16,6 +18,41 @@ use crate::orders::OrdersPanel;
 use crate::setup::SetupPanel;
 use crate::table::{copy_request, has_table};
 use crate::theme::Style;
+
+/// The Build panels the Panels menu lists. Item is the inspector and is never listed.
+pub const BUILD_PANELS: [BuildPanel; 5] = [
+    BuildPanel::Plans,
+    BuildPanel::PastedStock,
+    BuildPanel::Plan,
+    BuildPanel::Steps,
+    BuildPanel::BuyList,
+];
+
+/// The Assets panels the Panels menu lists. Item is the inspector and is never listed.
+pub const ASSETS_PANELS: [AssetsPanel; 2] = [AssetsPanel::Places, AssetsPanel::Assets];
+
+/// The Net worth panels the Panels menu lists.
+pub const NET_WORTH_PANELS: [NetWorthPanel; 3] = [
+    NetWorthPanel::NetWorth,
+    NetWorthPanel::ByCharacter,
+    NetWorthPanel::RightNow,
+];
+
+/// The Characters panels the Panels menu lists.
+pub const CHARACTERS_PANELS: [CharactersPanel; 2] =
+    [CharactersPanel::Characters, CharactersPanel::JeveData];
+
+/// The Settings panels the Panels menu lists.
+pub const SETUP_PANELS: [SetupPanel; 8] = [
+    SetupPanel::Facilities,
+    SetupPanel::FreightServices,
+    SetupPanel::PriceHistory,
+    SetupPanel::PriceRule,
+    SetupPanel::Structures,
+    SetupPanel::Fees,
+    SetupPanel::Invention,
+    SetupPanel::Display,
+];
 
 /// The Build page: Plans over Pasted stock on the left; Plan on top, then Steps and Buy list, with
 /// Item on the right of them.
@@ -98,6 +135,152 @@ pub fn placeholder(ui: &mut Ui, cx: &Shared) {
     }
 }
 
+/// Draws a locked page with its Panels menu. `all` is the page's tickable panels in menu order;
+/// `title` names a panel. Returns the open panels as their titles joined with commas when a tick
+/// changed the page, so the caller can save them, and `None` when no tick happened. A page with
+/// fewer than two tickable panels draws no menu.
+pub fn show_page<T: Copy + PartialEq>(
+    ui: &mut Ui,
+    theme: &Style,
+    page: &str,
+    all: &[T],
+    state: &mut DockState<T>,
+    title: fn(T) -> &'static str,
+    body: impl FnMut(&mut Ui, T),
+) -> Option<String> {
+    let mut changed = false;
+    if all.len() >= 2 {
+        // The strip sits on the dock's top edge rather than above it: a row of its own would take
+        // height from the panels, and the tables are laid out to fit the window.
+        // A compact strip: the panels size their tables to the window, so every point the menu
+        // takes from the dock would hide a row.
+        ui.push_id(page, |ui| {
+            ui.scope(|ui| {
+                ui.spacing_mut().interact_size.y = 12.0;
+                ui.spacing_mut().button_padding = egui::vec2(6.0, 0.0);
+                ui.horizontal(|ui| {
+                    ui.menu_button(RichText::new("Panels").size(11.0), |ui| {
+                        for &panel in all {
+                            let mut open = state.find_tab(&panel).is_some();
+                            if ui.checkbox(&mut open, title(panel)).changed()
+                                && toggle(state, panel)
+                            {
+                                changed = true;
+                            }
+                        }
+                    });
+                });
+            });
+        });
+    }
+    show_locked(ui, theme, state, title, body);
+    if changed {
+        Some(open_text(state, all, title))
+    } else {
+        None
+    }
+}
+
+/// Opens or closes `panel`. Returns whether the page changed; closing the last open tab is
+/// refused, so a page never ends up with no panel at all (Item counts).
+fn toggle<T: Copy + PartialEq>(state: &mut DockState<T>, panel: T) -> bool {
+    match state.find_tab(&panel) {
+        Some(path) => {
+            if state.iter_all_tabs().count() <= 1 {
+                return false;
+            }
+            state.remove_tab(path).is_some()
+        }
+        None => {
+            state
+                .main_surface_mut()
+                .split_right(NodeIndex::root(), 0.5, vec![panel]);
+            true
+        }
+    }
+}
+
+/// The panels of `all` that are open, in list order, as their titles joined with commas.
+fn open_text<T: Copy + PartialEq>(
+    state: &DockState<T>,
+    all: &[T],
+    title: fn(T) -> &'static str,
+) -> String {
+    all.iter()
+        .filter(|panel| state.find_tab(panel).is_some())
+        .map(|&panel| title(panel))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Makes the page show the panels named in `text`: closes the listed panels it does not name and
+/// opens the named ones that are missing, right of the whole layout at 50%, in list order. Empty
+/// parts, names outside `all` and unknown names are ignored; a text with no valid name leaves the
+/// page as it is.
+fn apply_open<T: Copy + PartialEq>(
+    state: &mut DockState<T>,
+    text: &str,
+    all: &[T],
+    title: fn(T) -> &'static str,
+) {
+    // The app itself saves an empty text when only panels outside `all` are left open, such as
+    // Item: that legal state closes every listed panel. A text with names that all fail to match
+    // is corrupt instead, and leaves the page as it is.
+    if text.trim().is_empty() {
+        for &panel in all {
+            let Some(path) = state.find_tab(&panel) else {
+                continue;
+            };
+            if state.iter_all_tabs().count() > 1 {
+                state.remove_tab(path);
+            }
+        }
+        return;
+    }
+    let named: Vec<T> = text
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .filter_map(|name| all.iter().copied().find(|panel| title(*panel) == name))
+        .collect();
+    if named.is_empty() {
+        return;
+    }
+    for &panel in all {
+        if named.contains(&panel) {
+            continue;
+        }
+        let Some(path) = state.find_tab(&panel) else {
+            continue;
+        };
+        if state.iter_all_tabs().count() > 1 {
+            state.remove_tab(path);
+        }
+    }
+    for &panel in all {
+        if named.contains(&panel) && state.find_tab(&panel).is_none() {
+            state
+                .main_surface_mut()
+                .split_right(NodeIndex::root(), 0.5, vec![panel]);
+        }
+    }
+}
+
+/// The default layout for `page`, shaped by its saved panel list when there is one. A read error
+/// fails the start, and no saved setting means the default layout.
+pub fn with_saved<T: Copy + PartialEq>(
+    store: &Store,
+    page: &str,
+    mut state: DockState<T>,
+    all: &[T],
+    title: fn(T) -> &'static str,
+) -> Result<DockState<T>, StoreError> {
+    if let Some(text) = store.setting(&format!("panels.{page}"))? {
+        apply_open(&mut state, &text, all, title);
+    }
+    Ok(state)
+}
+
 /// Draws a locked page. `title` names a panel; `body` draws the inside of one panel.
 pub fn show_locked<T: Copy>(
     ui: &mut Ui,
@@ -129,6 +312,9 @@ fn style(ui: &Ui, theme: &Style) -> egui_dock::Style {
     let mut style = egui_dock::Style::from_egui(ui.style());
     style.buttons.show_tab_bar_size = 0.0;
     style.buttons.show_tab_bar_hover_expand = 0.0;
+    // The pages draw their own headers, so the tab body needs no padding of its own; the Panels
+    // strip above the dock takes that room without shrinking the tables.
+    style.tab.tab_body.inner_margin = egui::Margin::ZERO;
     style.tab.tab_body.corner_radius = CornerRadius::same(theme.radius);
     style
 }
@@ -180,6 +366,8 @@ impl<T: Copy, B: FnMut(&mut Ui, T)> TabViewer for Locked<T, B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui_dock::Node;
+    use tempfile::TempDir;
 
     const SETUP_PANELS: [SetupPanel; 8] = [
         SetupPanel::Facilities,
@@ -191,6 +379,200 @@ mod tests {
         SetupPanel::Invention,
         SetupPanel::Display,
     ];
+
+    fn store(dir: &TempDir) -> Store {
+        Store::open(&dir.path().join("user.sqlite"), 0)
+            .expect("the store opens")
+            .store
+    }
+
+    fn tabs<T: Copy>(state: &DockState<T>) -> Vec<T> {
+        state.iter_all_tabs().map(|(_, tab)| *tab).collect()
+    }
+
+    #[test]
+    fn a_saved_build_list_closes_the_panels_it_does_not_name_and_keeps_item() {
+        let mut dock = build_layout();
+        apply_open(
+            &mut dock,
+            "Plans,Buy list",
+            &BUILD_PANELS,
+            BuildPanel::title,
+        );
+        assert_eq!(
+            tabs(&dock),
+            [BuildPanel::Plans, BuildPanel::BuyList, BuildPanel::Item],
+            "only the named panels and the inspector stay open"
+        );
+        apply_open(
+            &mut dock,
+            "Plans,Buy list,Item,Foo",
+            &BUILD_PANELS,
+            BuildPanel::title,
+        );
+        assert_eq!(
+            tabs(&dock),
+            [BuildPanel::Plans, BuildPanel::BuyList, BuildPanel::Item],
+            "Item is not tickable and Foo is unknown, so neither changes the page"
+        );
+    }
+
+    #[test]
+    fn toggling_a_panel_off_removes_it_and_a_page_never_empties() {
+        let mut dock = build_layout();
+        assert!(toggle(&mut dock, BuildPanel::BuyList), "Buy list closes");
+        let open = tabs(&dock);
+        assert_eq!(open.len(), 5, "five tabs are left");
+        assert!(!open.contains(&BuildPanel::BuyList), "Buy list is gone");
+
+        let mut orders = DockState::new(vec![OrdersPanel::Orders]);
+        assert!(
+            !toggle(&mut orders, OrdersPanel::Orders),
+            "the last tab stays"
+        );
+        assert_eq!(tabs(&orders), [OrdersPanel::Orders]);
+    }
+
+    #[test]
+    fn characters_tick_off_and_on_again_right_of_the_layout_at_half() {
+        let mut dock = characters_layout();
+        assert!(
+            toggle(&mut dock, CharactersPanel::JeveData),
+            "jEve data closes"
+        );
+        assert_eq!(
+            tabs(&dock),
+            [CharactersPanel::Characters],
+            "one tab is left"
+        );
+
+        assert!(
+            toggle(&mut dock, CharactersPanel::JeveData),
+            "jEve data opens"
+        );
+        assert_eq!(
+            tabs(&dock),
+            [CharactersPanel::Characters, CharactersPanel::JeveData],
+            "both tabs are back"
+        );
+        assert_eq!(
+            open_text(&dock, &CHARACTERS_PANELS, CharactersPanel::title),
+            "Characters,jEve data"
+        );
+        match dock.main_surface().root_node() {
+            Some(Node::Horizontal(split)) => assert_eq!(split.fraction, 0.5),
+            _ => panic!("the opened panel splits the whole layout at half"),
+        }
+    }
+
+    #[test]
+    fn with_saved_reads_the_page_panel_list_and_keeps_the_default_without_one() {
+        let dir = TempDir::new().expect("a temp folder");
+        let mut store = store(&dir);
+        store
+            .set_setting("panels.characters", "Characters")
+            .expect("the panel list saves");
+
+        let saved = with_saved(
+            &store,
+            "characters",
+            characters_layout(),
+            &CHARACTERS_PANELS,
+            CharactersPanel::title,
+        )
+        .expect("the panel list reads");
+        assert_eq!(tabs(&saved), [CharactersPanel::Characters]);
+
+        let default = with_saved(
+            &store,
+            "build",
+            build_layout(),
+            &BUILD_PANELS,
+            BuildPanel::title,
+        )
+        .expect("no setting is not an error");
+        assert_eq!(
+            tabs(&default),
+            [
+                BuildPanel::Plans,
+                BuildPanel::PastedStock,
+                BuildPanel::Plan,
+                BuildPanel::Item,
+                BuildPanel::Steps,
+                BuildPanel::BuyList,
+            ],
+            "without a setting the page keeps its default layout"
+        );
+    }
+
+    #[test]
+    fn closing_every_listed_panel_is_remembered_when_item_stays() {
+        let mut dock = build_layout();
+        for panel in BUILD_PANELS {
+            assert!(toggle(&mut dock, panel), "{} closes", panel.title());
+        }
+        assert_eq!(
+            tabs(&dock),
+            [BuildPanel::Item],
+            "only the inspector is left"
+        );
+        assert_eq!(
+            open_text(&dock, &BUILD_PANELS, BuildPanel::title),
+            "",
+            "no listed panel is open"
+        );
+
+        let dir = TempDir::new().expect("a temp folder");
+        let mut store = store(&dir);
+        store
+            .set_setting("panels.build", "")
+            .expect("the empty panel list saves");
+        let saved = with_saved(
+            &store,
+            "build",
+            build_layout(),
+            &BUILD_PANELS,
+            BuildPanel::title,
+        )
+        .expect("the empty panel list reads");
+        assert_eq!(
+            tabs(&saved),
+            [BuildPanel::Item],
+            "the page comes back with only Item open"
+        );
+    }
+
+    #[test]
+    fn a_saved_text_holds_only_the_pages_own_titles() {
+        let mut dock = characters_layout();
+        apply_open(
+            &mut dock,
+            "Characters,Item,Foo,Buy list,, jEve data ",
+            &CHARACTERS_PANELS,
+            CharactersPanel::title,
+        );
+        assert_eq!(
+            open_text(&dock, &CHARACTERS_PANELS, CharactersPanel::title),
+            "Characters,jEve data",
+            "names outside the page and empty parts are ignored"
+        );
+    }
+
+    #[test]
+    fn a_name_with_no_match_leaves_the_page_alone() {
+        let mut dock = characters_layout();
+        apply_open(
+            &mut dock,
+            " , Foo,",
+            &CHARACTERS_PANELS,
+            CharactersPanel::title,
+        );
+        assert_eq!(
+            tabs(&dock),
+            [CharactersPanel::Characters, CharactersPanel::JeveData],
+            "a corrupt list does not empty the page"
+        );
+    }
 
     #[test]
     fn the_setup_layout_holds_each_panel_exactly_once_including_display() {

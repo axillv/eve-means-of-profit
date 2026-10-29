@@ -197,6 +197,85 @@ impl Shared {
     }
 }
 
+/// Saves the open panels of `page` under `panels.<page>`; `None` is no change and saves nothing. A
+/// save that fails becomes an error notice.
+fn save_panels(cx: &mut Shared, page: &str, text: Option<String>) {
+    let Some(text) = text else {
+        return;
+    };
+    if let Err(error) = cx.store.set_setting(&format!("panels.{page}"), &text) {
+        cx.notices.push(Notice::error(format!(
+            "Could not save the settings: {error}"
+        )));
+    }
+}
+
+/// The seven page docks, each shaped by its saved panel list.
+struct Docks {
+    build: DockState<BuildPanel>,
+    assets: DockState<AssetsPanel>,
+    net_worth: DockState<NetWorthPanel>,
+    orders: DockState<OrdersPanel>,
+    jobs: DockState<JobsPanel>,
+    characters: DockState<CharactersPanel>,
+    setup: DockState<SetupPanel>,
+}
+
+/// Builds every page's dock from its default layout and the panel list saved for it.
+fn saved_docks(store: &Store) -> Result<Docks, mop_store::StoreError> {
+    Ok(Docks {
+        build: dock::with_saved(
+            store,
+            "build",
+            dock::build_layout(),
+            &dock::BUILD_PANELS,
+            BuildPanel::title,
+        )?,
+        assets: dock::with_saved(
+            store,
+            "assets",
+            dock::assets_layout(),
+            &dock::ASSETS_PANELS,
+            AssetsPanel::title,
+        )?,
+        net_worth: dock::with_saved(
+            store,
+            "net_worth",
+            dock::net_worth_layout(),
+            &dock::NET_WORTH_PANELS,
+            NetWorthPanel::title,
+        )?,
+        orders: dock::with_saved(
+            store,
+            "orders",
+            dock::orders_layout(),
+            &[OrdersPanel::Orders],
+            OrdersPanel::title,
+        )?,
+        jobs: dock::with_saved(
+            store,
+            "jobs",
+            dock::jobs_layout(),
+            &[JobsPanel::IndustryJobs],
+            JobsPanel::title,
+        )?,
+        characters: dock::with_saved(
+            store,
+            "characters",
+            dock::characters_layout(),
+            &dock::CHARACTERS_PANELS,
+            CharactersPanel::title,
+        )?,
+        setup: dock::with_saved(
+            store,
+            "setup",
+            dock::setup_layout(),
+            &dock::SETUP_PANELS,
+            SetupPanel::title,
+        )?,
+    })
+}
+
 pub struct App {
     ctx: Context,
     shared: Shared,
@@ -288,6 +367,7 @@ impl App {
         style.apply(ctx);
         ctx.options_mut(|options| options.zoom_with_keyboard = false);
         ctx.set_zoom_factor(f32::from(settings.interface_size.percent()) / 100.0);
+        let docks = saved_docks(&store)?;
         let (events_tx, events) = mpsc::channel();
         let mut app = Self {
             ctx: ctx.clone(),
@@ -323,21 +403,21 @@ impl App {
             events_tx,
             page: Page::Today,
             build_page: BuildPage::default(),
-            build_dock: dock::build_layout(),
+            build_dock: docks.build,
             assets_page: AssetsPage,
-            assets_dock: dock::assets_layout(),
+            assets_dock: docks.assets,
             net_worth_page: NetWorthPage::default(),
-            net_worth_dock: dock::net_worth_layout(),
+            net_worth_dock: docks.net_worth,
             net_worth_seen: BTreeMap::new(),
             net_worth_started: false,
             orders_page: OrdersPage,
-            orders_dock: dock::orders_layout(),
+            orders_dock: docks.orders,
             jobs_page: JobsPage,
-            jobs_dock: dock::jobs_layout(),
+            jobs_dock: docks.jobs,
             characters_page: CharactersPage,
-            characters_dock: dock::characters_layout(),
+            characters_dock: docks.characters,
             setup_page: SetupPage,
-            setup_dock: dock::setup_layout(),
+            setup_dock: docks.setup,
             interface_size: settings.interface_size,
             industry_loaded: false,
             industry_timing: IndustryTimings::default(),
@@ -456,27 +536,44 @@ impl App {
                     self.page = page;
                 }
             }
-            Page::Build => dock::show_locked(
-                ui,
-                &style,
-                &mut self.build_dock,
-                BuildPanel::title,
-                |ui, panel| build::show(&mut self.build_page, panel, ui, &mut self.shared),
-            ),
-            Page::Assets => dock::show_locked(
-                ui,
-                &style,
-                &mut self.assets_dock,
-                AssetsPanel::title,
-                |ui, panel| assets::show(&mut self.assets_page, panel, ui, &mut self.shared),
-            ),
-            Page::NetWorth => dock::show_locked(
-                ui,
-                &style,
-                &mut self.net_worth_dock,
-                NetWorthPanel::title,
-                |ui, panel| net_worth::show(&mut self.net_worth_page, panel, ui, &mut self.shared),
-            ),
+            Page::Build => {
+                let text = dock::show_page(
+                    ui,
+                    &style,
+                    "build",
+                    &dock::BUILD_PANELS,
+                    &mut self.build_dock,
+                    BuildPanel::title,
+                    |ui, panel| build::show(&mut self.build_page, panel, ui, &mut self.shared),
+                );
+                save_panels(&mut self.shared, "build", text);
+            }
+            Page::Assets => {
+                let text = dock::show_page(
+                    ui,
+                    &style,
+                    "assets",
+                    &dock::ASSETS_PANELS,
+                    &mut self.assets_dock,
+                    AssetsPanel::title,
+                    |ui, panel| assets::show(&mut self.assets_page, panel, ui, &mut self.shared),
+                );
+                save_panels(&mut self.shared, "assets", text);
+            }
+            Page::NetWorth => {
+                let text = dock::show_page(
+                    ui,
+                    &style,
+                    "net_worth",
+                    &dock::NET_WORTH_PANELS,
+                    &mut self.net_worth_dock,
+                    NetWorthPanel::title,
+                    |ui, panel| {
+                        net_worth::show(&mut self.net_worth_page, panel, ui, &mut self.shared);
+                    },
+                );
+                save_panels(&mut self.shared, "net_worth", text);
+            }
             Page::Orders => dock::show_locked(
                 ui,
                 &style,
@@ -491,22 +588,32 @@ impl App {
                 JobsPanel::title,
                 |ui, panel| jobs::show(&mut self.jobs_page, panel, ui, &mut self.shared),
             ),
-            Page::Characters => dock::show_locked(
-                ui,
-                &style,
-                &mut self.characters_dock,
-                CharactersPanel::title,
-                |ui, panel| {
-                    characters::show(&mut self.characters_page, panel, ui, &mut self.shared);
-                },
-            ),
-            Page::Setup => dock::show_locked(
-                ui,
-                &style,
-                &mut self.setup_dock,
-                SetupPanel::title,
-                |ui, panel| setup::show(&mut self.setup_page, panel, ui, &mut self.shared),
-            ),
+            Page::Characters => {
+                let text = dock::show_page(
+                    ui,
+                    &style,
+                    "characters",
+                    &dock::CHARACTERS_PANELS,
+                    &mut self.characters_dock,
+                    CharactersPanel::title,
+                    |ui, panel| {
+                        characters::show(&mut self.characters_page, panel, ui, &mut self.shared);
+                    },
+                );
+                save_panels(&mut self.shared, "characters", text);
+            }
+            Page::Setup => {
+                let text = dock::show_page(
+                    ui,
+                    &style,
+                    "setup",
+                    &dock::SETUP_PANELS,
+                    &mut self.setup_dock,
+                    SetupPanel::title,
+                    |ui, panel| setup::show(&mut self.setup_page, panel, ui, &mut self.shared),
+                );
+                save_panels(&mut self.shared, "setup", text);
+            }
         });
     }
 
@@ -959,5 +1066,165 @@ fn open_sde(path: &Path) -> Result<Option<Sde>, SdeError> {
         Ok(sde) => Ok(Some(sde)),
         Err(SdeError::NotImported) => Ok(None),
         Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::ops::ControlFlow;
+
+    use mop_market::cache::HttpResponse;
+    use mop_market::error::MarketError;
+    use mop_market::fuzzwork::{BytesHttp, BytesResponse};
+    use mop_sde::{Fetch, FetchError};
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::session::NoEve;
+
+    const NOW: i64 = 1_000_000;
+
+    /// Nothing is fetched in these tests.
+    struct NoNetwork;
+
+    impl Fetch for NoNetwork {
+        fn get_text(&self, _url: &str) -> Result<String, FetchError> {
+            Err(FetchError::Http { status: 503 })
+        }
+
+        fn download(
+            &self,
+            _url: &str,
+            _dest: &mut dyn Write,
+            _progress: &mut dyn FnMut(u64, Option<u64>) -> ControlFlow<()>,
+        ) -> Result<u64, FetchError> {
+            Err(FetchError::Http { status: 503 })
+        }
+    }
+
+    /// A market that never answers: no price is read in these tests.
+    struct NoHttp;
+
+    impl BytesHttp for NoHttp {
+        fn get_bytes(
+            &self,
+            _url: &str,
+            _if_none_match: Option<&str>,
+        ) -> Result<BytesResponse, MarketError> {
+            Err(MarketError::Network("not in these tests".to_owned()))
+        }
+    }
+
+    /// The PLEX market that never answers either.
+    struct NoPlex;
+
+    impl Http for NoPlex {
+        fn get(
+            &self,
+            _url: &str,
+            _if_none_match: Option<&str>,
+        ) -> Result<HttpResponse, MarketError> {
+            Err(MarketError::Network("not in these tests".to_owned()))
+        }
+    }
+
+    fn shared(dir: &TempDir) -> Shared {
+        let store = Store::open(&dir.path().join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
+        Shared {
+            sde: None,
+            store,
+            worker: Worker::spawn(Context::default(), Box::new(NoNetwork)),
+            market: Arc::new(build::prices::Prices::new(Box::new(NoHttp))),
+            plex_http: Arc::new(NoPlex),
+            copy_notices: Arc::new(Mutex::new(Vec::new())),
+            style: Style::eve_dense(),
+            density: Density::Normal,
+            rail_icons_only: false,
+            data_dir: dir.path().to_path_buf(),
+            notices: Vec::new(),
+            clock: Box::new(|| NOW),
+            session: Session::new(Box::new(NoEve)),
+            selection: Selection::default(),
+            industry: IndustryData::default(),
+            claims: ClaimsState::default(),
+        }
+    }
+
+    fn config(data: PathBuf, cache: PathBuf) -> AppConfig {
+        AppConfig {
+            data_dir: data,
+            cache_dir: cache,
+            fetch: Box::new(NoNetwork),
+            clock: Box::new(|| NOW),
+            eve: Box::new(NoEve),
+            market: Box::new(NoHttp),
+        }
+    }
+
+    fn tabs<T: Copy>(state: &DockState<T>) -> Vec<T> {
+        state.iter_all_tabs().map(|(_, tab)| *tab).collect()
+    }
+
+    #[test]
+    fn a_tick_saves_the_open_panels_under_the_page_key() {
+        let dir = TempDir::new().expect("a temp folder");
+        let mut cx = shared(&dir);
+        save_panels(&mut cx, "build", Some("Plans,Buy list".to_owned()));
+        assert_eq!(
+            cx.store
+                .setting("panels.build")
+                .expect("the setting reads")
+                .as_deref(),
+            Some("Plans,Buy list")
+        );
+        save_panels(&mut cx, "build", None);
+        assert_eq!(
+            cx.store
+                .setting("panels.build")
+                .expect("the setting reads")
+                .as_deref(),
+            Some("Plans,Buy list"),
+            "no tick saves nothing"
+        );
+    }
+
+    #[test]
+    fn a_failed_panel_save_becomes_an_error_notice() {
+        let dir = TempDir::new().expect("a temp folder");
+        let mut cx = shared(&dir);
+        // A space is not allowed in a setting name, so the store refuses the key.
+        save_panels(&mut cx, "Build page", Some("Plans".to_owned()));
+        assert_eq!(cx.notices.len(), 1);
+        assert!(
+            cx.notices[0]
+                .text
+                .starts_with("Could not save the settings:"),
+            "the notice names the save failure"
+        );
+    }
+
+    #[test]
+    fn the_app_starts_the_characters_dock_from_its_saved_panel_list() {
+        let dir = TempDir::new().expect("a temp folder");
+        let data = dir.path().join("data");
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&data).expect("the data folder");
+        let mut store = Store::open(&data.join(USER_DB), NOW)
+            .expect("the store opens")
+            .store;
+        store
+            .set_setting("panels.characters", "Characters")
+            .expect("the panel list saves");
+        drop(store);
+
+        let app = App::new(&Context::default(), config(data, cache)).expect("the app starts");
+        assert_eq!(
+            tabs(&app.characters_dock),
+            [CharactersPanel::Characters],
+            "the saved list replaces the default layout"
+        );
     }
 }
