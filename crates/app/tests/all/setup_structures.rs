@@ -379,12 +379,11 @@ mod tests {
         folders.write_places();
         folders.type_names();
         let mut harness = start(&folders);
-        crate::ui::hide_database_size(&harness);
         assert!(shown(&harness, "Structures"), "the Structures panel shows");
-        harness.snapshot("setup_structures");
+        crate::ui::picture(&mut harness, "setup_structures");
 
         click(&mut harness, "Structure 1035466617999 (no access)");
         press(&mut harness, Key::Enter, 1);
-        harness.snapshot("setup_structures_edit");
+        crate::ui::picture(&mut harness, "setup_structures_edit");
     }
 }

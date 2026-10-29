@@ -877,7 +877,6 @@ mod tests {
         let folders = Folders::new();
         seed_forge_history(&folders);
         let mut harness = start_at(&folders, vec2(1280.0, 800.0));
-        crate::ui::hide_database_size(&harness);
         harness.run_steps(2);
         click_nth(&mut harness, "The Forge", 0);
         harness.run_steps(3);
@@ -885,14 +884,13 @@ mod tests {
             &harness,
             "Forecast for The Forge: about 39.0 kB after 1 year"
         ));
-        harness.snapshot("history-panel");
+        crate::ui::picture(&mut harness, "history-panel");
     }
 
     #[test]
     fn the_setup_pictures_for_the_owner_are_taken() {
         let folders = Folders::new();
         let mut harness = start_at(&folders, vec2(1280.0, 800.0));
-        crate::ui::hide_database_size(&harness);
         new_facility(&mut harness, "Raitaru null");
         click_combo(&mut harness, "NPC station", 0);
         click_nth(&mut harness, "Raitaru", 0);
@@ -911,7 +909,7 @@ mod tests {
             0,
         );
         harness.run_steps(2);
-        harness.snapshot("setup-facilities");
+        crate::ui::picture(&mut harness, "setup-facilities");
         // The facility form is left unsaved for the picture: close it before the services.
         click_nth(&mut harness, "Cancel", 0);
 
@@ -928,10 +926,10 @@ mod tests {
         click_nth(&mut harness, "Save", 0);
         click(&mut harness, "Alliance");
         harness.run_steps(2);
-        harness.snapshot("setup-freight");
+        crate::ui::picture(&mut harness, "setup-freight");
 
         click(&mut harness, "Forge buy, highest");
         harness.run_steps(2);
-        harness.snapshot("setup-price-rule");
+        crate::ui::picture(&mut harness, "setup-price-rule");
     }
 }

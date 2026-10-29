@@ -399,6 +399,6 @@ mod tests {
         click_combo(&mut harness, "Expected (average)", 0);
         click_nth(&mut harness, "90% sure", 0);
         harness.run_steps(2);
-        harness.snapshot("setup-invention");
+        crate::ui::picture(&mut harness, "setup-invention");
     }
 }
