@@ -204,6 +204,10 @@ pub fn tick(cx: &mut Shared, ctx: &Context) {
 /// pressed `Refresh all`, so a price answer that is too soon is shown only then. A character job
 /// already running is left alone; `Prices::refresh` refuses a second price request itself.
 pub fn refresh_all(cx: &mut Shared, ctx: &Context, explicit: bool) {
+    if explicit {
+        // The player started this refresh, so the tables sort at once with the new values.
+        crate::table::resort_all(ctx);
+    }
     let held = handle(ctx);
     let mut inner = lock(&held.0);
     if inner.busy.is_none() {
@@ -271,6 +275,8 @@ fn act(inner: &mut Inner, cx: &mut Shared, ctx: &Context, click: list::Click) {
     match click {
         list::Click::Add => start_login(inner, cx, ctx),
         list::Click::RefreshAll => {
+            // The player started this refresh, so the tables sort at once with the new values.
+            crate::table::resort_all(ctx);
             let ids: Vec<u64> = cx
                 .session
                 .characters()
@@ -279,7 +285,10 @@ fn act(inner: &mut Inner, cx: &mut Shared, ctx: &Context, click: list::Click) {
                 .collect();
             start_refresh(inner, cx, ctx, &ids);
         }
-        list::Click::Refresh(id) => start_refresh(inner, cx, ctx, &[id]),
+        list::Click::Refresh(id) => {
+            crate::table::resort_all(ctx);
+            start_refresh(inner, cx, ctx, &[id]);
+        }
         list::Click::Remove(id) => {
             let name = name_of(cx, id);
             inner.confirm = Some((id, name));

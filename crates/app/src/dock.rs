@@ -19,7 +19,7 @@ use crate::net_worth::NetWorthPanel;
 use crate::orders::OrdersPanel;
 use crate::setup::SetupPanel;
 use crate::stockpiles::StockpilesPanel;
-use crate::table::{copy_request, has_table};
+use crate::table::{copy_request, has_table, resort_request, rows_moved};
 use crate::theme::Style;
 
 /// The panel name last asked for by an `Add to layout…` item.
@@ -486,6 +486,15 @@ fn layout_menu(
     });
 }
 
+/// The text of the re-sort button: how many rows moved since the table kept its order.
+fn resort_label(moved: usize) -> String {
+    if moved == 1 {
+        "Re-sort (1 row moved)".to_owned()
+    } else {
+        format!("Re-sort ({moved} rows moved)")
+    }
+}
+
 struct UserViewer<'a, B> {
     panels: &'a [PanelInfo],
     selected_plan: Option<(i64, &'a str)>,
@@ -523,6 +532,10 @@ impl<B: FnMut(&mut Ui, &Slot)> TabViewer for UserViewer<'_, B> {
         let table_shown = ui
             .data(|data| data.get_temp::<bool>(has_table(id)))
             .unwrap_or(false);
+        // The table wrote these on the previous frame, so they say what it showed then.
+        let moved = ui
+            .data(|data| data.get_temp::<usize>(rows_moved(id)))
+            .unwrap_or(0);
         ui.horizontal(|ui| {
             ui.strong(&name);
             if tab.binding == Binding::Follow {
@@ -545,10 +558,14 @@ impl<B: FnMut(&mut Ui, &Slot)> TabViewer for UserViewer<'_, B> {
             {
                 ui.data_mut(|data| data.insert_temp(copy_request(id), true));
             }
+            if table_shown && moved > 0 && ui.button(resort_label(moved)).clicked() {
+                ui.data_mut(|data| data.insert_temp(resort_request(id), true));
+            }
         });
         // Cleared before the body draws, so a panel whose table stops showing loses the button on
         // the next frame.
         ui.data_mut(|data| data.remove_temp::<bool>(has_table(id)));
+        ui.data_mut(|data| data.remove_temp::<usize>(rows_moved(id)));
         let shows_body = follows.is_some()
             && match &tab.binding {
                 Binding::Follow => true,
@@ -576,6 +593,8 @@ impl<B: FnMut(&mut Ui, &Slot)> TabViewer for UserViewer<'_, B> {
         }
         // A copy asked for on a panel with no table is dropped, not kept for a table shown later.
         ui.data_mut(|data| data.remove_temp::<bool>(copy_request(id)));
+        // The table clears this itself in the same frame; a body with no table leaves it dropped.
+        ui.data_mut(|data| data.remove_temp::<bool>(resort_request(id)));
     }
 }
 
@@ -615,6 +634,10 @@ impl<T: Copy, B: FnMut(&mut Ui, T)> TabViewer for Locked<T, B> {
         let table_shown = ui
             .data(|data| data.get_temp::<bool>(has_table(id)))
             .unwrap_or(false);
+        // The table wrote these on the previous frame, so they say what it showed then.
+        let moved = ui
+            .data(|data| data.get_temp::<usize>(rows_moved(id)))
+            .unwrap_or(0);
         ui.horizontal(|ui| {
             ui.strong(title);
             ui.menu_button("Layout", |ui| add_to_layout(ui, title));
@@ -626,13 +649,19 @@ impl<T: Copy, B: FnMut(&mut Ui, T)> TabViewer for Locked<T, B> {
             {
                 ui.data_mut(|data| data.insert_temp(copy_request(id), true));
             }
+            if table_shown && moved > 0 && ui.button(resort_label(moved)).clicked() {
+                ui.data_mut(|data| data.insert_temp(resort_request(id), true));
+            }
         });
         // Cleared before the body draws, so a panel whose table stops showing loses the button on
         // the next frame.
         ui.data_mut(|data| data.remove_temp::<bool>(has_table(id)));
+        ui.data_mut(|data| data.remove_temp::<usize>(rows_moved(id)));
         (self.body)(ui, *tab);
         // A copy asked for on a panel with no table is dropped, not kept for a table shown later.
         ui.data_mut(|data| data.remove_temp::<bool>(copy_request(id)));
+        // The table clears this itself in the same frame; a body with no table leaves it dropped.
+        ui.data_mut(|data| data.remove_temp::<bool>(resort_request(id)));
     }
 }
 

@@ -206,6 +206,8 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Option<Edit> {
             .on_hover_text("Asks Fuzzwork for the prices again. Its file changes about every 30 minutes, so a request within 15 minutes of the last one is not made.")
             .clicked()
         {
+            // The player started this refresh, so the tables sort at once with the new values.
+            crate::table::resort_all(ui.ctx());
             cx.market.refresh(&cx.worker, now, true);
         }
         if ui

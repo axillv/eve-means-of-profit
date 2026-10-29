@@ -5,7 +5,7 @@
 //! depth 0.
 
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use mop_core::money::Money;
@@ -189,6 +189,85 @@ pub fn visible(rows: &[Row], order: &[usize], collapsed: &BTreeSet<u64>) -> Vec<
     shown
 }
 
+/// Each cell's [`Cell::plain`] by row key and column.
+pub fn cell_values(rows: &[Row]) -> BTreeMap<(u64, usize), String> {
+    let mut values = BTreeMap::new();
+    for row in rows {
+        for (position, cell) in row.cells.iter().enumerate() {
+            values.insert((row.key, position), cell.plain.clone());
+        }
+    }
+    values
+}
+
+/// The cells of `rows` whose [`Cell::plain`] differs from `seen`. A cell of a row `seen` does not
+/// know is not marked: a new row has no old value to differ from.
+pub fn changed_cells(
+    rows: &[Row],
+    seen: &BTreeMap<(u64, usize), String>,
+) -> BTreeSet<(u64, usize)> {
+    let mut changed = BTreeSet::new();
+    for row in rows {
+        let known = seen
+            .range((row.key, 0)..=(row.key, usize::MAX))
+            .next()
+            .is_some();
+        if !known {
+            continue;
+        }
+        for (position, cell) in row.cells.iter().enumerate() {
+            if seen.get(&(row.key, position)) != Some(&cell.plain) {
+                changed.insert((row.key, position));
+            }
+        }
+    }
+    changed
+}
+
+/// The row indices in the order that keeps the keys of `frozen`, followed by the keys `fresh` has
+/// that `frozen` does not. A new key deeper than a root row has no place in a flat kept order, so
+/// the whole order is `None` then.
+pub fn frozen_order(rows: &[Row], fresh: &[usize], frozen: &[u64]) -> Option<Vec<usize>> {
+    let mut by_key = BTreeMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        by_key.insert(row.key, index);
+    }
+    let kept: BTreeSet<u64> = frozen.iter().copied().collect();
+    let mut order = Vec::with_capacity(rows.len());
+    for key in frozen {
+        if let Some(&index) = by_key.get(key) {
+            order.push(index);
+        }
+    }
+    for &index in fresh {
+        let Some(row) = rows.get(index) else {
+            continue;
+        };
+        if kept.contains(&row.key) {
+            continue;
+        }
+        if row.depth > 0 {
+            return None;
+        }
+        order.push(index);
+    }
+    Some(order)
+}
+
+/// How many keys of `frozen` sit at another rank in `fresh`: the rows a kept order moved.
+pub fn moved_rows(rows: &[Row], fresh: &[usize], frozen: &[u64]) -> usize {
+    let ranks: BTreeMap<u64, usize> = fresh
+        .iter()
+        .enumerate()
+        .filter_map(|(rank, &index)| rows.get(index).map(|row| (row.key, rank)))
+        .collect();
+    frozen
+        .iter()
+        .enumerate()
+        .filter(|(rank, key)| ranks.get(*key).is_some_and(|fresh| fresh != rank))
+        .count()
+}
+
 /// The rows that touch the view, one above and one below, and where they sit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Span {
@@ -296,5 +375,78 @@ pub fn row_height(density: Density) -> f32 {
         Density::Sparse => 28.0,
         Density::Normal => 24.0,
         Density::Dense => 20.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A row with an item name and a plain number in the second column.
+    fn row(key: u64, depth: u32, value: i128) -> Row {
+        Row {
+            key,
+            depth,
+            cells: vec![
+                Cell::text(format!("row {key}")),
+                Cell::int(value, value.to_string()),
+            ],
+        }
+    }
+
+    fn keys(rows: &[Row]) -> Vec<u64> {
+        rows.iter().map(|row| row.key).collect()
+    }
+
+    #[test]
+    fn cell_values_keys_each_cell_by_its_row_and_column() {
+        let rows = vec![row(1, 0, 10), row(2, 0, 20)];
+        let values = cell_values(&rows);
+        assert_eq!(values.get(&(1, 0)).map(String::as_str), Some("row 1"));
+        assert_eq!(values.get(&(1, 1)).map(String::as_str), Some("10"));
+        assert_eq!(values.get(&(2, 1)).map(String::as_str), Some("20"));
+        assert_eq!(values.len(), 4);
+    }
+
+    #[test]
+    fn changed_cells_marks_a_changed_value_but_not_a_new_row() {
+        let before = vec![row(1, 0, 10), row(2, 0, 20)];
+        let after = vec![row(1, 0, 10), row(2, 0, 30), row(3, 0, 40)];
+        let changed = changed_cells(&after, &cell_values(&before));
+        assert_eq!(changed, BTreeSet::from([(2, 1)]));
+    }
+
+    #[test]
+    fn frozen_order_keeps_the_frozen_keys_and_appends_new_root_rows() {
+        let rows = vec![row(1, 0, 10), row(2, 0, 20), row(3, 0, 30)];
+        let fresh = vec![0, 1, 2];
+        assert_eq!(
+            frozen_order(&rows, &fresh, &keys(&rows)),
+            Some(vec![0, 1, 2])
+        );
+        // A frozen order that is not the given one is kept as it is.
+        assert_eq!(frozen_order(&rows, &fresh, &[2, 1, 3]), Some(vec![1, 0, 2]));
+
+        let grown = vec![row(1, 0, 10), row(2, 0, 20), row(3, 0, 30), row(4, 0, 40)];
+        assert_eq!(
+            frozen_order(&grown, &[0, 1, 2, 3], &[1, 2, 3]),
+            Some(vec![0, 1, 2, 3])
+        );
+    }
+
+    #[test]
+    fn frozen_order_gives_none_when_a_new_key_is_a_child() {
+        let rows = vec![row(1, 0, 10), row(2, 0, 20), row(3, 0, 30), row(4, 1, 40)];
+        assert_eq!(frozen_order(&rows, &[0, 1, 2, 3], &[1, 2, 3]), None);
+    }
+
+    #[test]
+    fn moved_rows_counts_the_rows_that_changed_rank() {
+        let rows = vec![row(1, 0, 10), row(2, 0, 20), row(3, 0, 30)];
+        assert_eq!(moved_rows(&rows, &[1, 0, 2], &[1, 2, 3]), 2);
+        assert_eq!(moved_rows(&rows, &[0, 1, 2], &[1, 2, 3]), 0);
+        assert_eq!(moved_rows(&rows, &[1, 0, 2], &[2, 1, 3]), 0);
+        // A row that has left the table is not a row that moved.
+        assert_eq!(moved_rows(&rows, &[0, 1, 2], &[1, 2, 3, 9]), 0);
     }
 }
