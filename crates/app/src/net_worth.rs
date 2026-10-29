@@ -2,14 +2,18 @@
 //! page task fills the panels; [`show`] draws one panel's body.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use egui::{ComboBox, Ui};
-use mop_core::net_worth::Part;
+use mop_core::net_worth::{Part, Record};
+use mop_jeve::{read_tracker, tracker_path};
 use mop_market::book::PriceRule;
 use mop_store::{NetWorthSettings, StoreError};
 
 use crate::Shared;
 use crate::build::inputs::{PRICE_RULES, price_text};
+use crate::session::lock_eve;
 use crate::status::Notice;
 
 pub mod chart;
@@ -127,6 +131,23 @@ pub struct NetWorthPage {
     pub view: view::View,
     /// Whether the first drawn frame has read the saved choices.
     read: bool,
+    /// What the worker's jEve history read left behind, until the next frame takes it.
+    import: Arc<Mutex<Option<ImportOutcome>>>,
+    /// Whether the jEve history import is queued or running.
+    importing: bool,
+}
+
+/// What reading jEve's Tracker file found, handed from the worker to the UI thread.
+#[derive(Debug)]
+enum ImportOutcome {
+    /// jEve has no profile folder, or its folder has no parent to hold `data`.
+    NoFolder,
+    /// The jEve folder holds no Tracker file; the path is where it looked.
+    NoHistory(PathBuf),
+    /// The Tracker file's points, to import on the UI thread.
+    Records(Vec<Record>),
+    /// The read failed; the text is the error to show.
+    Failed(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +178,7 @@ pub fn show(page: &mut NetWorthPage, panel: NetWorthPanel, ui: &mut Ui, cx: &mut
             ))),
         }
     }
+    take_import(page, cx);
     page.view
         .update(cx, &page.choices, ui.ctx().cumulative_frame_nr());
     match panel {
@@ -222,7 +244,90 @@ fn controls(page: &mut NetWorthPage, ui: &mut Ui, cx: &mut Shared) {
         if ui.checkbox(&mut plex, "PLEX vault").changed() {
             save_plex(page, cx, plex);
         }
+        let label = if page.importing {
+            "Importing…"
+        } else {
+            "Import jEve history"
+        };
+        if ui
+            .add_enabled(!page.importing, egui::Button::new(label))
+            .clicked()
+        {
+            start_import(page, cx);
+        }
     });
+}
+
+/// Queues the Tracker read on the worker. The job takes a login clone, so the UI never waits for
+/// the login lock or the file.
+fn start_import(page: &mut NetWorthPage, cx: &mut Shared) {
+    if page.importing {
+        return;
+    }
+    page.importing = true;
+    let eve = cx.session.eve();
+    let slot = Arc::clone(&page.import);
+    let job = move || {
+        let folder = lock_eve(&eve).jeve_folder();
+        let outcome = match folder {
+            Some(profiles) => match profiles.parent() {
+                Some(dir) => {
+                    let path = tracker_path(dir);
+                    match read_tracker(&path) {
+                        Ok(None) => ImportOutcome::NoHistory(path),
+                        Ok(Some(records)) => ImportOutcome::Records(records),
+                        Err(error) => ImportOutcome::Failed(error.to_string()),
+                    }
+                }
+                None => ImportOutcome::NoFolder,
+            },
+            None => ImportOutcome::NoFolder,
+        };
+        *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(outcome);
+    };
+    if !cx.worker.run(Box::new(job)) {
+        page.importing = false;
+        cx.notices.push(Notice::error(
+            "Could not import jEve history: the background worker has stopped",
+        ));
+    }
+}
+
+/// Takes a finished read from the worker and imports its records on the UI thread.
+fn take_import(page: &mut NetWorthPage, cx: &mut Shared) {
+    let outcome = page
+        .import
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
+    let Some(outcome) = outcome else {
+        return;
+    };
+    page.importing = false;
+    match outcome {
+        ImportOutcome::NoFolder => cx.notices.push(Notice::info(
+            "No jEve folder found, so there is no history to import.",
+        )),
+        ImportOutcome::NoHistory(path) => cx.notices.push(Notice::info(format!(
+            "No jEve history found at {}.",
+            path.display()
+        ))),
+        ImportOutcome::Failed(error) => cx.notices.push(Notice::error(format!(
+            "Could not import jEve history: {error}"
+        ))),
+        ImportOutcome::Records(records) => match cx.store.import_records(&records) {
+            Ok(report) => {
+                cx.notices.push(Notice::info(format!(
+                    "Imported {} points from jEve ({} already there, {} after the app's own data).",
+                    report.added, report.duplicates, report.after_app_data
+                )));
+                page.view.invalidate();
+            }
+            Err(error) => cx.notices.push(Notice::error(format!(
+                "Could not import jEve history: {error}"
+            ))),
+        },
+    }
 }
 
 /// The part's name in the ticks.
