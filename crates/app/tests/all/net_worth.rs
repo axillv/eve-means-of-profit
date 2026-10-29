@@ -12,8 +12,10 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    use egui::accesskit::{Role, Toggled};
     use egui::vec2;
     use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
     use eve_means_of_profit::build::prices::Prices;
     use eve_means_of_profit::net_worth::data::load::{Loaded, load};
     use eve_means_of_profit::net_worth::data::pricer::PriceSource;
@@ -23,7 +25,7 @@ mod tests {
     use flate2::write::GzEncoder;
     use mop_core::industry::TypeId;
     use mop_core::money::Money;
-    use mop_core::net_worth::{CharacterKey, Holdings, Part, Record, Snapshot};
+    use mop_core::net_worth::{CharacterKey, Holdings, Part, PriceBasis, Record, Snapshot};
     use mop_core::stock::{Asset, CharacterAssets};
     use mop_esi::character_data::{
         CharacterData, Fetched, Job, JobStatus, Kind, Order, OwnedAssets, Refreshed,
@@ -37,9 +39,9 @@ mod tests {
     use mop_market::fuzzwork::{BytesHttp, BytesResponse, FORGE, Side, SummaryRow};
     use mop_market::plex::PLEX;
     use mop_sde::{Fetch, FetchError, Sde, import};
-    use mop_store::Store;
     use mop_store::price_history::{MarketKind, PointPrices};
     use mop_store::settings::{RuleTarget, RuleValue};
+    use mop_store::{NetWorthSettings, Store};
     use tempfile::TempDir;
 
     const NOW: i64 = 1_000_000_000;
@@ -628,6 +630,137 @@ mod tests {
             .iter()
             .map(|notice| notice.text.clone())
             .collect()
+    }
+
+    /// Opens the Net worth page by its rail entry. The Today page has a shortcut with the same
+    /// label, and the rail is drawn first.
+    fn open_net_worth(harness: &mut Harness<'static, App>) {
+        harness
+            .get_all_by_label("Net worth")
+            .next()
+            .expect("a rail entry")
+            .click();
+        harness.run();
+    }
+
+    /// Whether a dropdown shows `value`. A combo box has no label of its own, only its value.
+    fn has_combo(harness: &Harness<'static, App>, value: &str) -> bool {
+        fn find(node: &egui_kittest::Node<'_>, value: &str) -> bool {
+            let accesskit = node.accesskit_node();
+            if accesskit.role() == Role::ComboBox && accesskit.value().as_deref() == Some(value) {
+                return true;
+            }
+            node.children().any(|child| find(&child, value))
+        }
+        find(&harness.root(), value)
+    }
+
+    /// Whether the checkbox labelled `label` is ticked.
+    fn ticked(harness: &Harness<'static, App>, label: &str) -> bool {
+        harness
+            .query_all_by_label(label)
+            .find(|node| node.accesskit_node().role() == Role::CheckBox)
+            .unwrap_or_else(|| panic!("no checkbox labelled {label}"))
+            .accesskit_node()
+            .toggled()
+            == Some(Toggled::True)
+    }
+
+    fn click(harness: &mut Harness<'static, App>, label: &str) {
+        harness.get_by_label(label).hover();
+        // A pick closes its list for a frame; the press must come after that frame.
+        harness.run_steps(2);
+        harness.get_by_label(label).click();
+        harness.run_steps(3);
+    }
+
+    fn click_checkbox(harness: &mut Harness<'static, App>, label: &str) {
+        {
+            let target = harness
+                .query_all_by_label(label)
+                .find(|node| node.accesskit_node().role() == Role::CheckBox)
+                .unwrap_or_else(|| panic!("no checkbox labelled {label}"));
+            target.hover();
+        }
+        harness.run_steps(2);
+        {
+            let target = harness
+                .query_all_by_label(label)
+                .find(|node| node.accesskit_node().role() == Role::CheckBox)
+                .unwrap_or_else(|| panic!("no checkbox labelled {label}"));
+            target.click();
+        }
+        harness.run_steps(3);
+    }
+
+    /// Clicks the `index`th combo box that shows `value`, counting from the top of the page.
+    fn click_combo(harness: &mut Harness<'static, App>, value: &str, index: usize) {
+        let mut seen = 0;
+        let found = reveal_combo_in(&harness.root(), value, index, &mut seen);
+        assert!(found, "no combo box shows {value} number {index}");
+        harness.run_steps(2);
+        // A drop-down that was just closed by a pick is still open for a frame: move onto this one
+        // and let that frame pass before the press, or the press only closes the old list.
+        let mut seen = 0;
+        hover_combo_in(&harness.root(), value, index, &mut seen);
+        harness.run_steps(2);
+        let mut seen = 0;
+        click_combo_in(&harness.root(), value, index, &mut seen);
+        harness.run_steps(3);
+    }
+
+    fn hover_combo_in(
+        node: &egui_kittest::Node<'_>,
+        value: &str,
+        index: usize,
+        seen: &mut usize,
+    ) -> bool {
+        let accesskit = node.accesskit_node();
+        if accesskit.role() == Role::ComboBox && accesskit.value().as_deref() == Some(value) {
+            if *seen == index {
+                node.hover();
+                return true;
+            }
+            *seen += 1;
+        }
+        node.children()
+            .any(|child| hover_combo_in(&child, value, index, seen))
+    }
+
+    fn reveal_combo_in(
+        node: &egui_kittest::Node<'_>,
+        value: &str,
+        index: usize,
+        seen: &mut usize,
+    ) -> bool {
+        let accesskit = node.accesskit_node();
+        if accesskit.role() == Role::ComboBox && accesskit.value().as_deref() == Some(value) {
+            if *seen == index {
+                node.scroll_to_me();
+                return true;
+            }
+            *seen += 1;
+        }
+        node.children()
+            .any(|child| reveal_combo_in(&child, value, index, seen))
+    }
+
+    fn click_combo_in(
+        node: &egui_kittest::Node<'_>,
+        value: &str,
+        index: usize,
+        seen: &mut usize,
+    ) -> bool {
+        let accesskit = node.accesskit_node();
+        if accesskit.role() == Role::ComboBox && accesskit.value().as_deref() == Some(value) {
+            if *seen == index {
+                node.click();
+                return true;
+            }
+            *seen += 1;
+        }
+        node.children()
+            .any(|child| click_combo_in(&child, value, index, seen))
     }
 
     #[test]
@@ -1602,5 +1735,211 @@ mod tests {
             loaded.points.last().expect("the latest point").total,
             isk("18,808,667.89")
         );
+    }
+
+    // The controls tests below open the Net worth page by its rail label. The controls save at
+    // once and change nothing that is stored: no record and no price copy moves.
+
+    /// All eight part ticks, in the order the panel lists them.
+    fn part_labels() -> [&'static str; 8] {
+        [
+            "Wallet",
+            "Assets",
+            "Sell orders",
+            "Buy escrow",
+            "Industry jobs",
+            "Contract collateral",
+            "Contracts",
+            "Implants",
+        ]
+    }
+
+    #[test]
+    fn the_controls_start_at_the_defaults_and_a_pick_is_saved_at_once() {
+        let dir = TempDir::new().expect("a temp folder");
+        let mut harness = start(&dir);
+        // A record and a copy already exist; picking a price must leave both alone.
+        {
+            let mut store = store_of(&dir.path().join("data"));
+            add_main_first(&mut store);
+            store
+                .save_point_prices(&load_copy(false))
+                .expect("the copy is saved");
+        }
+        assert_eq!(stored_records(&dir), 1);
+        assert_eq!(copies(&dir).len(), 1);
+
+        open_net_worth(&mut harness);
+        assert!(
+            has_combo(&harness, "30 days"),
+            "the range starts at 30 days"
+        );
+        assert!(
+            has_combo(&harness, "Forge sell, 5% price"),
+            "the price starts at the app-wide default"
+        );
+        for part in part_labels() {
+            assert!(ticked(&harness, part), "{part} is ticked");
+        }
+        assert!(ticked(&harness, "PLEX vault"), "the vault is ticked");
+        assert!(
+            errors(&mut harness).is_empty(),
+            "{:?}",
+            errors(&mut harness)
+        );
+
+        click_combo(&mut harness, "30 days", 0);
+        click(&mut harness, "90 days");
+        assert!(has_combo(&harness, "90 days"));
+        assert_eq!(
+            store_of(&dir.path().join("data"))
+                .setting("net_worth.range")
+                .expect("the range setting"),
+            Some("90d".to_owned())
+        );
+
+        click_combo(&mut harness, "Forge sell, 5% price", 0);
+        click(&mut harness, "Forge buy, 5% price");
+        assert!(has_combo(&harness, "Forge buy, 5% price"));
+        let store = store_of(&dir.path().join("data"));
+        assert_eq!(
+            store.value_price().expect("the saved price"),
+            PriceRule::BuyFivePercent
+        );
+        assert!(
+            errors(&mut harness).is_empty(),
+            "{:?}",
+            errors(&mut harness)
+        );
+        drop(store);
+        assert_eq!(stored_records(&dir), 1, "the records are unchanged");
+        assert_eq!(copies(&dir).len(), 1, "the price copies are unchanged");
+        drop(harness);
+
+        let mut restarted = start(&dir);
+        open_net_worth(&mut restarted);
+        assert!(
+            has_combo(&restarted, "90 days"),
+            "the range is still there after a restart"
+        );
+        assert!(has_combo(&restarted, "Forge buy, 5% price"));
+    }
+
+    #[test]
+    fn part_ticks_keep_the_basis_and_plex_is_saved_on_its_own() {
+        let dir = TempDir::new().expect("a temp folder");
+        let mut harness = start(&dir);
+        {
+            let mut store = store_of(&dir.path().join("data"));
+            store
+                .save_net_worth_settings(&NetWorthSettings {
+                    basis: PriceBasis::LowestSell,
+                    shown: all_parts(),
+                })
+                .expect("the basis is saved");
+        }
+
+        open_net_worth(&mut harness);
+        for part in part_labels() {
+            assert!(ticked(&harness, part), "{part} is ticked");
+        }
+
+        click_checkbox(&mut harness, "Sell orders");
+        assert!(!ticked(&harness, "Sell orders"));
+        let mut store = store_of(&dir.path().join("data"));
+        let settings = store.net_worth_settings().expect("the settings read");
+        assert_eq!(settings.basis, PriceBasis::LowestSell, "the basis is kept");
+        let mut seven = all_parts();
+        seven.remove(&Part::SellOrders);
+        assert_eq!(settings.shown, seven);
+        assert_eq!(settings.shown.len(), 7);
+        drop(store);
+
+        click_checkbox(&mut harness, "Sell orders");
+        assert!(ticked(&harness, "Sell orders"));
+        assert_eq!(
+            store_of(&dir.path().join("data"))
+                .net_worth_settings()
+                .expect("the settings read")
+                .shown,
+            all_parts()
+        );
+
+        click_checkbox(&mut harness, "PLEX vault");
+        assert!(!ticked(&harness, "PLEX vault"));
+        assert_eq!(
+            store_of(&dir.path().join("data"))
+                .setting("net_worth.plex")
+                .expect("the PLEX setting"),
+            Some("0".to_owned())
+        );
+
+        click_checkbox(&mut harness, "PLEX vault");
+        assert!(ticked(&harness, "PLEX vault"));
+        assert_eq!(
+            store_of(&dir.path().join("data"))
+                .setting("net_worth.plex")
+                .expect("the PLEX setting"),
+            Some("1".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_failed_save_says_so_and_keeps_the_old_choice() {
+        let dir = TempDir::new().expect("a temp folder");
+        let mut harness = start(&dir);
+        open_net_worth(&mut harness);
+        assert!(has_combo(&harness, "30 days"));
+
+        let db = dir.path().join("data").join("user.sqlite");
+        rusqlite::Connection::open(&db)
+            .expect("the database opens")
+            .execute_batch("PRAGMA foreign_keys = OFF; DROP TABLE app_settings;")
+            .expect("the settings table drops");
+
+        click_combo(&mut harness, "30 days", 0);
+        click(&mut harness, "7 days");
+        assert!(
+            has_combo(&harness, "30 days"),
+            "the old range is still shown"
+        );
+        assert!(!has_combo(&harness, "7 days"));
+        assert!(
+            errors(&mut harness).iter().any(|text| {
+                text.starts_with("Could not save the net worth settings: ")
+                    && text.contains("no such table: app_settings")
+            }),
+            "{:?}",
+            errors(&mut harness)
+        );
+    }
+
+    #[test]
+    fn a_failed_read_says_so_once_and_uses_the_defaults() {
+        let dir = TempDir::new().expect("a temp folder");
+        let mut harness = start(&dir);
+        let db = dir.path().join("data").join("user.sqlite");
+        rusqlite::Connection::open(&db)
+            .expect("the database opens")
+            .execute_batch("PRAGMA foreign_keys = OFF; DROP TABLE net_worth_settings;")
+            .expect("the settings table drops");
+
+        open_net_worth(&mut harness);
+        harness.run_steps(4);
+        let read_errors: Vec<String> = errors(&mut harness)
+            .into_iter()
+            .filter(|text| text.starts_with("Could not read the net worth settings: "))
+            .collect();
+        assert_eq!(read_errors.len(), 1, "{read_errors:?}");
+        assert!(
+            read_errors[0].contains("no such table: net_worth_settings"),
+            "{read_errors:?}"
+        );
+        assert!(has_combo(&harness, "30 days"));
+        assert!(has_combo(&harness, "Forge sell, 5% price"));
+        for part in part_labels() {
+            assert!(ticked(&harness, part), "{part} keeps its default");
+        }
+        assert!(ticked(&harness, "PLEX vault"));
     }
 }

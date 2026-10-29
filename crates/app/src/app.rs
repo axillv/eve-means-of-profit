@@ -326,7 +326,7 @@ impl App {
             build_dock: dock::build_layout(),
             assets_page: AssetsPage,
             assets_dock: dock::assets_layout(),
-            net_worth_page: NetWorthPage,
+            net_worth_page: NetWorthPage::default(),
             net_worth_dock: dock::net_worth_layout(),
             net_worth_seen: BTreeMap::new(),
             net_worth_started: false,
