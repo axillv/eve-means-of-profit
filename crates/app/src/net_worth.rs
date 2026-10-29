@@ -15,6 +15,7 @@ use crate::status::Notice;
 
 pub mod chart;
 pub mod data;
+pub mod plot;
 pub mod record;
 pub mod summary;
 pub mod today;
@@ -164,6 +165,7 @@ pub fn show(page: &mut NetWorthPage, panel: NetWorthPanel, ui: &mut Ui, cx: &mut
     }
     controls(page, ui, cx);
     view::show_headline(ui, cx, &page.view, &page.choices);
+    plot::show(ui, cx, &page.view, &page.choices);
 }
 
 /// Reads the saved choices; any failed read leaves the defaults.
