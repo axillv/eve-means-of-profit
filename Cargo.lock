@@ -1446,6 +1446,7 @@ dependencies = [
  "egui_dock",
  "egui_kittest",
  "flate2",
+ "image",
  "mop-core",
  "mop-esi",
  "mop-jeve",
@@ -1455,6 +1456,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "tempfile",
+ "ureq",
  "zip",
 ]
 

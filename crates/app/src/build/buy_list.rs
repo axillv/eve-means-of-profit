@@ -777,6 +777,7 @@ fn table(
     };
     let clicked = Table::new(Id::new(super::BuildPanel::BuyList.title()), &columns)
         .fit_rows(rows.len())
+        .icons("item", &|key| u32::try_from(key).ok())
         .show_with(ui, &cx.style, cx.density, &rows, Some(&footer), &mut draw)
         .clicked;
     (typed, clicked)

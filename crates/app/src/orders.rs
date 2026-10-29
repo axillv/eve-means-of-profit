@@ -125,14 +125,14 @@ pub fn show(_page: &mut OrdersPage, panel: OrdersPanel, ui: &mut Ui, cx: &mut Sh
             _ => false,
         }
     };
-    let response = Table::new(Id::new(panel.title()), &columns).show_with(
-        ui,
-        &cx.style,
-        cx.density,
-        &table_rows,
-        None,
-        &mut draw,
-    );
+    let response = Table::new(Id::new(panel.title()), &columns)
+        .icons("item", &|key| {
+            usize::try_from(key)
+                .ok()
+                .and_then(|index| shown.get(index))
+                .map(|entry| entry.type_id)
+        })
+        .show_with(ui, &cx.style, cx.density, &table_rows, None, &mut draw);
     if let Some(key) = response.clicked {
         let picked = usize::try_from(key)
             .ok()

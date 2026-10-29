@@ -456,6 +456,7 @@ mod tests {
             .with_size(size)
             .with_max_steps(crate::SETTLE_STEPS)
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
+        crate::ui::no_images(&mut harness);
         harness.state_mut().shared_mut().market = market;
         harness.state_mut().show_page(Page::Build);
         harness

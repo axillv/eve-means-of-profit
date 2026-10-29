@@ -12,6 +12,7 @@ pub mod dock;
 pub mod empty;
 pub mod first_run;
 pub mod history;
+pub mod images;
 pub mod item_panel;
 pub mod jobs;
 pub mod layout;
@@ -360,6 +361,11 @@ impl App {
     pub fn new(ctx: &Context, config: AppConfig) -> Result<Self, Box<dyn Error + Send + Sync>> {
         fs::create_dir_all(&config.data_dir)?;
         fs::create_dir_all(&config.cache_dir)?;
+        images::init(
+            ctx,
+            config.data_dir.join("images"),
+            Arc::new(images::Ureq::new()),
+        );
         let now = (config.clock)();
         let opened = Store::open(&config.data_dir.join(USER_DB), now)?;
         let notices = fresh_start_notice(opened.started_fresh.as_ref());

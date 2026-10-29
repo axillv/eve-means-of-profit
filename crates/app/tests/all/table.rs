@@ -13,6 +13,7 @@ mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
     use eve_means_of_profit::dock::show_locked;
+    use eve_means_of_profit::images::{self, Fetch, Picture};
     use eve_means_of_profit::table::model::{
         Cell, Column, ColumnKind, Direction, Row, row_height, row_range, sort_order, span, to_tsv,
         visible,
@@ -24,6 +25,7 @@ mod tests {
     use mop_core::money::Money;
     use mop_store::Density;
     use std::collections::BTreeSet;
+    use tempfile::tempdir;
 
     fn columns() -> Vec<Column> {
         vec![
@@ -790,6 +792,65 @@ mod tests {
         assert_eq!(size(TextStyle::Heading), 18.0);
         assert_eq!(style.spacing.interact_size.y, 24.0);
         assert_eq!(style.spacing.button_padding, vec2(8.0, 4.0));
+    }
+
+    /// A 16 by 16 picture that is red everywhere.
+    const RED_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x10, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0xf3, 0xff, 0x61, 0x00, 0x00, 0x00, 0x19, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xf8,
+        0xcf, 0xc0, 0xf0, 0x9f, 0x12, 0xcc, 0x30, 0x6a, 0xc0, 0xa8, 0x01, 0xa3, 0x06, 0x0c, 0x17,
+        0x03, 0x00, 0x30, 0xc4, 0xfe, 0x10, 0x8a, 0xc6, 0x4c, 0xe5, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    struct NoImages;
+
+    impl Fetch for NoImages {
+        fn get(&self, _url: &str) -> Result<Vec<u8>, String> {
+            Err("offline".to_owned())
+        }
+    }
+
+    fn icon_harness(with_icons: bool) -> Harness<'static> {
+        let rows = vec![
+            row(34, 0, "Rifter", 1, Some(1)),
+            row(99, 0, "Hobgoblin II", 1, Some(1)),
+        ];
+        let columns = columns();
+        let style = Style::eve_dense();
+        Harness::builder()
+            .with_size(vec2(800.0, 400.0))
+            .build_ui(move |ui: &mut Ui| {
+                style.apply(ui.ctx());
+                let icon = |key: u64| -> Option<u32> { u32::try_from(key).ok() };
+                let table = if with_icons {
+                    Table::new(Id::new("icons test"), &columns).icons("item", &icon)
+                } else {
+                    Table::new(Id::new("icons test"), &columns)
+                };
+                table.show(ui, &style, Density::Normal, &rows, None);
+            })
+    }
+
+    #[test]
+    fn a_kept_picture_draws_by_its_row_and_the_named_column() {
+        let dir = tempdir().expect("a temporary folder");
+        let path = images::cache_path(dir.path(), Picture::Type(34));
+        std::fs::write(&path, RED_PNG).expect("the kept picture");
+
+        let mut harness = icon_harness(true);
+        images::init(&harness.ctx, dir.path(), Arc::new(NoImages));
+        harness.run();
+        assert!(images::is_loaded(&harness.ctx, Picture::Type(34)));
+        assert!(!images::is_loaded(&harness.ctx, Picture::Type(99)));
+        harness.get_by_label("Rifter");
+        harness.get_by_label("Hobgoblin II");
+
+        let mut plain = icon_harness(false);
+        images::init(&plain.ctx, dir.path(), Arc::new(NoImages));
+        plain.run();
+        assert!(!images::is_loaded(&plain.ctx, Picture::Type(34)));
     }
 
     /// The saved sorts through a whole app: the Orders page's table, saved by its header and read

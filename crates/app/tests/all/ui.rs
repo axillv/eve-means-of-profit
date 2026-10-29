@@ -2,11 +2,33 @@
 //! Shared helpers for the UI tests: find a label, check that two texts share a row, click, hover
 //! and read the tooltip, check a colour, wait for the app, and take a snapshot. Every helper is
 //! generic over the harness state, so the helpers' own tests can use a small test UI.
+use std::sync::{Arc, LazyLock};
 use std::thread;
 use std::time::Duration;
 
 use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::{Harness, Node};
+use eve_means_of_profit::images;
+
+/// An image server that never answers, so a snapshot does not depend on the network.
+pub(crate) struct NoImages;
+
+impl images::Fetch for NoImages {
+    fn get(&self, _url: &str) -> Result<Vec<u8>, String> {
+        Err("offline".to_owned())
+    }
+}
+
+/// The empty image folder every harness uses: it lives for the whole test process, so the state
+/// `no_images` installs keeps a real directory.
+static EMPTY_IMAGES: LazyLock<tempfile::TempDir> =
+    LazyLock::new(|| tempfile::tempdir().expect("a temporary image folder"));
+
+/// Forgets every loaded picture and fetches none, so a snapshot shows blank squares instead of
+/// whatever the image server answered during the run.
+pub(crate) fn no_images<S>(harness: &mut Harness<'_, S>) {
+    images::init(&harness.ctx, EMPTY_IMAGES.path(), Arc::new(NoImages));
+}
 
 /// The first node that shows `text`: labelled with it, or holding it as a value (dropdowns and
 /// table cells keep their text as a value). None when no node does.
@@ -182,6 +204,7 @@ pub(crate) fn picture<S>(harness: &mut Harness<'_, S>, name: &str) {
 
 /// Takes a snapshot named `name`, with no hover highlight: the pointer is removed and frames run.
 pub(crate) fn snapshot<S>(harness: &mut Harness<'_, S>, name: &str) {
+    no_images(harness);
     harness.remove_cursor();
     harness.run();
     picture(harness, name);

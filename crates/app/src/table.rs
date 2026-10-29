@@ -169,6 +169,9 @@ enum Hit {
     Toggled(u64),
 }
 
+/// The column whose cells get an icon, and the type id of a row's picture.
+type Icon<'a> = (&'static str, &'a dyn Fn(u64) -> Option<u32>);
+
 /// What every row needs to be drawn.
 #[derive(Clone, Copy)]
 struct Look<'a> {
@@ -178,6 +181,7 @@ struct Look<'a> {
     height: f32,
     selected: Option<u64>,
     collapsed: &'a BTreeSet<u64>,
+    icons: Option<Icon<'a>>,
 }
 
 /// A table of `rows` under `columns`. Pass the same `id` every frame: the sort and the folds are kept under it.
@@ -187,6 +191,7 @@ pub struct Table<'a> {
     columns: &'a [Column],
     selected: Option<u64>,
     fit_rows: Option<usize>,
+    icons: Option<Icon<'a>>,
 }
 
 impl<'a> Table<'a> {
@@ -197,7 +202,15 @@ impl<'a> Table<'a> {
             columns,
             selected: None,
             fit_rows: None,
+            icons: None,
         }
+    }
+
+    /// Draws the item icon of each row before the text of `column`. `icon` reads the row key and
+    /// gives the type id of its picture, or none when the row has no icon.
+    pub fn icons(mut self, column: &'static str, icon: &'a dyn Fn(u64) -> Option<u32>) -> Self {
+        self.icons = Some((column, icon));
+        self
     }
 
     /// Tells the table which panel it belongs to, when the panel draws more than one table: the
@@ -329,6 +342,7 @@ impl<'a> Table<'a> {
             height,
             selected: self.selected,
             collapsed: &state.collapsed,
+            icons: self.icons,
         };
         // The footer is drawn below the scroll area, so the rows leave room for it.
         let footer_height = if footer.is_some() { height } else { 0.0 };
@@ -592,6 +606,18 @@ fn draw_row(
             |ui| {
                 // A cell the callback drew is left as it is.
                 if !draw(ui, row.key, column.id) {
+                    let icon = look
+                        .icons
+                        .filter(|(id, _)| *id == column.id)
+                        .and_then(|(_, icon)| icon(row.key));
+                    if let Some(id) = icon {
+                        crate::images::show(
+                            ui,
+                            crate::images::Picture::Type(id),
+                            (look.height - 4.0).max(8.0),
+                        );
+                        ui.add_space(4.0);
+                    }
                     let text = row
                         .cells
                         .get(position)

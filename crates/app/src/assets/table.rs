@@ -1050,7 +1050,14 @@ fn table(ui: &mut Ui, cx: &Shared, built: &Built) -> crate::table::TableResponse
         });
         true
     };
+    let icons = |key: u64| {
+        data.index
+            .get(&key)
+            .and_then(|&position| data.entries.get(position))
+            .map(|entry| entry.type_id)
+    };
     Table::new(Id::new(super::AssetsPanel::Assets.title()), &columns)
+        .icons("item", &icons)
         .show_with(ui, &cx.style, cx.density, &data.rows, None, &mut draw)
 }
 

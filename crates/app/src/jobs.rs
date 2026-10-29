@@ -89,14 +89,14 @@ pub fn show(_page: &mut JobsPage, panel: JobsPanel, ui: &mut Ui, cx: &mut Shared
         };
         draw_plan(ui, entry, cx)
     };
-    let response = Table::new(Id::new(panel.title()), &columns).show_with(
-        ui,
-        &style,
-        density,
-        &table_rows,
-        None,
-        &mut draw,
-    );
+    let response = Table::new(Id::new(panel.title()), &columns)
+        .icons("product", &|key| {
+            usize::try_from(key)
+                .ok()
+                .and_then(|index| shown.get(index))
+                .map(|entry| entry.type_id)
+        })
+        .show_with(ui, &style, density, &table_rows, None, &mut draw);
     if let Some(key) = response.clicked {
         let picked = usize::try_from(key)
             .ok()
