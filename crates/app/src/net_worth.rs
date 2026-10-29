@@ -17,6 +17,7 @@ pub mod chart;
 pub mod data;
 pub mod record;
 pub mod summary;
+pub mod today;
 pub mod view;
 
 /// The setting holding the chart's range code.

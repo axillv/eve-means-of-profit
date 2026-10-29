@@ -153,6 +153,7 @@ pub fn show(ui: &mut Ui, cx: &mut Shared) -> Option<Page> {
                                     Block::Orders if !no_characters => {
                                         orders_block(ui, &style, &orders)
                                     }
+                                    Block::NetWorth if !no_characters => net_worth_block(ui, cx),
                                     Block::Jobs
                                     | Block::Orders
                                     | Block::Plans
@@ -188,6 +189,14 @@ fn heading(ui: &mut Ui, style: &Style, block: Block, count: &str) {
             ui.label(RichText::new(count).color(style.mute));
         },
     );
+}
+
+/// Draws the Net worth block for a login: its title, then the latest total and its change.
+fn net_worth_block(ui: &mut Ui, cx: &mut Shared) -> Option<Page> {
+    let style = cx.style;
+    heading(ui, &style, Block::NetWorth, "");
+    crate::net_worth::today::body(ui, cx);
+    None
 }
 
 /// Draws the Jobs block: every job ready to deliver, oldest first. Returns `Page::Jobs` when a row
