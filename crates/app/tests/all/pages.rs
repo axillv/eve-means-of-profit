@@ -1808,6 +1808,18 @@ mod tests {
             shown(&harness, "Price moves +192 K, everything else +7.52 M"),
             "the change splits into price moves and everything else"
         );
+        let change_hover =
+            "7,708,667.89 ISK at Forge sell, 5% price, since 2001-09-02 01:46".to_owned();
+        assert_eq!(
+            crate::ui::hover(&mut harness, "+7.71 M"),
+            vec![change_hover],
+            "the change's hover names its amount, basis and earlier point"
+        );
+        assert_eq!(
+            crate::ui::hover(&mut harness, "Price moves +192 K, everything else +7.52 M"),
+            vec!["Price moves: the same items repriced at both points. Everything else: quantity changes, items that appeared or left, the wallet and PLEX.".to_owned()],
+            "the split's hover says what each part counts"
+        );
         let labels = labels(&harness);
         let position = |text: &str| {
             labels
@@ -1855,6 +1867,36 @@ mod tests {
         assert!(
             !shown_starting(&harness, "Price moves "),
             "a single point has no split line"
+        );
+        let total_tip = crate::ui::hover(&mut harness, "1.00 M ISK");
+        assert!(
+            total_tip
+                .iter()
+                .any(|text| text.starts_with("1,000,000.00 ISK · ")),
+            "the total's hover is shown: {total_tip:?}"
+        );
+        assert!(
+            !total_tip
+                .iter()
+                .any(|text| text.contains(" at Forge sell, 5% price, since ")),
+            "a single point has no change hover: {total_tip:?}"
+        );
+        assert!(
+            !total_tip
+                .iter()
+                .any(|text| text.starts_with("Price moves:")),
+            "a single point has no split hover: {total_tip:?}"
+        );
+        let texts = labels(&harness);
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains(" at Forge sell, 5% price, since ")),
+            "no change hover exists: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.starts_with("Price moves:")),
+            "no split hover exists: {texts:?}"
         );
         assert!(shown(
             &harness,
@@ -1916,6 +1958,16 @@ mod tests {
         assert!(
             shown(&harness, "Price moves +192 K, everything else +612 K"),
             "the change splits into price moves and everything else"
+        );
+        assert_eq!(
+            crate::ui::hover(&mut harness, "+804 K"),
+            vec!["804,000.00 ISK at Forge sell, 5% price, since 2001-09-08 02:00".to_owned()],
+            "the change's hover names yesterday's point"
+        );
+        assert_eq!(
+            crate::ui::hover(&mut harness, "Price moves +192 K, everything else +612 K"),
+            vec!["Price moves: the same items repriced at both points. Everything else: quantity changes, items that appeared or left, the wallet and PLEX.".to_owned()],
+            "the split's hover says what each part counts"
         );
     }
 

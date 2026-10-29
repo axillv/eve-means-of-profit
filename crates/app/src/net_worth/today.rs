@@ -15,7 +15,7 @@ use crate::Shared;
 use crate::build::inputs::price_text;
 use crate::net_worth::Range;
 use crate::net_worth::data::load::{Loaded, load};
-use crate::net_worth::summary::{Summary, SummaryError, summarise};
+use crate::net_worth::summary::{Since, Summary, SummaryError, summarise};
 use crate::net_worth::view::basis_text;
 use crate::orders::rows::utc_text;
 use crate::status::Notice;
@@ -26,6 +26,8 @@ const CACHE_KEY: &str = "today.net_worth";
 const NOTHING: &str = "No net worth points yet. Refresh your characters to record the first one.";
 /// What the block says when the points could not be read.
 const FAILED: &str = "Could not read net worth.";
+/// What the split line counts, on hover.
+const SPLIT_HOVER: &str = "Price moves: the same items repriced at both points. Everything else: quantity changes, items that appeared or left, the wallet and PLEX.";
 
 /// The block's lines and the state they were read in.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,8 +59,12 @@ struct Lines {
     hover: String,
     /// The change and the day it is since, with the colour its size asks for.
     change: Option<(String, String, Sign)>,
+    /// The change's hover text: its amount, the basis and the earlier point.
+    change_hover: Option<String>,
     /// The change split into price moves and everything else, when there is a change to split.
     split: Option<String>,
+    /// The split's hover text: what each part counts.
+    split_hover: Option<String>,
     /// How many item types have no price, when there are any.
     unpriced: Option<String>,
 }
@@ -192,7 +198,8 @@ fn loaded_body(cx: &mut Shared, loaded: &Loaded, price: PriceRule) -> Body {
         last.total.format_isk(),
         basis_text(price_text(price), last.source),
     );
-    let change = summary.and_then(|summary| summary.since).map(|since| {
+    let since = summary.and_then(|summary| summary.since);
+    let change = since.map(|since| {
         let amount = since.change.amount;
         let phrase = since_phrase(since.from_at, since.from_day, day_of(last.value.at));
         (
@@ -201,7 +208,8 @@ fn loaded_body(cx: &mut Shared, loaded: &Loaded, price: PriceRule) -> Body {
             sign(amount),
         )
     });
-    let split = summary.and_then(|summary| summary.since).map(|since| {
+    let (change_hover, split_hover) = hover_texts(since, price);
+    let split = since.map(|since| {
         format!(
             "Price moves {}, everything else {}",
             since.price_moves.format_isk_short_signed(),
@@ -219,9 +227,43 @@ fn loaded_body(cx: &mut Shared, loaded: &Loaded, price: PriceRule) -> Body {
         total,
         hover,
         change,
+        change_hover,
         split,
+        split_hover,
         unpriced,
     })
+}
+
+/// The change and split hover texts, when there is a change to describe.
+fn hover_texts(since: Option<Since>, price: PriceRule) -> (Option<String>, Option<String>) {
+    let Some(since) = since else {
+        return (None, None);
+    };
+    (
+        Some(change_hover_text(since, price)),
+        Some(SPLIT_HOVER.to_owned()),
+    )
+}
+
+/// The change's hover text: its amount, the basis and the point it is since.
+fn change_hover_text(since: Since, price: PriceRule) -> String {
+    format!(
+        "{} ISK at {}, since {}",
+        since.change.amount.format_isk(),
+        price_text(price),
+        utc_text(since.from_at),
+    )
+}
+
+#[cfg(test)]
+impl Body {
+    /// The hover texts this body would draw; the empty and failed states draw none.
+    fn hovers(&self) -> (Option<&str>, Option<&str>) {
+        match self {
+            Body::Shown(lines) => (lines.change_hover.as_deref(), lines.split_hover.as_deref()),
+            Body::Nothing | Body::Failed => (None, None),
+        }
+    }
 }
 
 /// Whether a change is a gain, a loss or neither.
@@ -252,13 +294,22 @@ fn show(ui: &mut Ui, cx: &Shared, body: &Body) {
                     Sign::None => cx.style.mute,
                 };
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(amount).color(color));
+                    let amount = ui.label(RichText::new(amount).color(color));
+                    if let Some(hover) = &lines.change_hover {
+                        amount.on_hover_text(hover.as_str());
+                    }
                     ui.add_space(4.0);
-                    ui.colored_label(cx.style.mute, since);
+                    let since = ui.colored_label(cx.style.mute, since);
+                    if let Some(hover) = &lines.change_hover {
+                        since.on_hover_text(hover.as_str());
+                    }
                 });
             }
             if let Some(split) = &lines.split {
-                ui.colored_label(cx.style.mute, split);
+                let split = ui.colored_label(cx.style.mute, split);
+                if let Some(hover) = &lines.split_hover {
+                    split.on_hover_text(hover.as_str());
+                }
             }
             if let Some(unpriced) = &lines.unpriced {
                 ui.colored_label(cx.style.stale, unpriced);
@@ -318,11 +369,79 @@ fn month_name(month: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use mop_core::money::Money;
+    use mop_market::book::PriceRule;
 
-    use super::{Sign, date_text, sign, since_phrase};
+    use super::{
+        Body, Lines, SPLIT_HOVER, Sign, change_hover_text, date_text, hover_texts, sign,
+        since_phrase,
+    };
+    use crate::net_worth::summary::{Change, Since};
 
     fn isk(text: &str) -> Money {
         Money::parse_isk(text).expect("a test amount")
+    }
+
+    fn since(from_at: i64, amount: &str, price_moves: &str, everything_else: &str) -> Since {
+        Since {
+            from_at,
+            from_day: 0,
+            change: Change {
+                amount: isk(amount),
+                percent: None,
+            },
+            price_moves: isk(price_moves),
+            everything_else: isk(everything_else),
+        }
+    }
+
+    #[test]
+    fn the_change_hover_names_the_amount_the_basis_and_the_earlier_point() {
+        let since = since(999_395_200, "7,708,667.89", "192,000.00", "7,516,667.89");
+        let (change, split) = hover_texts(Some(since), PriceRule::SellFivePercent);
+        assert_eq!(
+            change.as_deref(),
+            Some("7,708,667.89 ISK at Forge sell, 5% price, since 2001-09-02 01:46")
+        );
+        assert_eq!(
+            split.as_deref(),
+            Some(
+                "Price moves: the same items repriced at both points. Everything else: quantity changes, items that appeared or left, the wallet and PLEX."
+            )
+        );
+        assert_eq!(
+            SPLIT_HOVER,
+            "Price moves: the same items repriced at both points. Everything else: quantity changes, items that appeared or left, the wallet and PLEX."
+        );
+    }
+
+    #[test]
+    fn a_single_point_has_no_hover_texts() {
+        assert_eq!(hover_texts(None, PriceRule::SellFivePercent), (None, None));
+    }
+
+    #[test]
+    fn the_empty_and_failed_states_have_no_hovers() {
+        assert_eq!(Body::Nothing.hovers(), (None, None));
+        assert_eq!(Body::Failed.hovers(), (None, None));
+        let shown = Lines {
+            total: String::new(),
+            hover: String::new(),
+            change: None,
+            change_hover: None,
+            split: None,
+            split_hover: None,
+            unpriced: None,
+        };
+        assert_eq!(Body::Shown(shown).hovers(), (None, None));
+    }
+
+    #[test]
+    fn the_change_hover_of_yesterdays_points_names_their_time() {
+        let since = since(999_914_400, "804,000.00", "192,000.00", "612,000.00");
+        assert_eq!(
+            change_hover_text(since, PriceRule::SellFivePercent),
+            "804,000.00 ISK at Forge sell, 5% price, since 2001-09-08 02:00"
+        );
     }
 
     #[test]
