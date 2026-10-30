@@ -402,9 +402,31 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_item_id_is_accepted() {
+        let body = BODY.replace("\"item_id\":1003", "\"item_id\":0");
+        let (_fake, result) = read_with(vec![reply(200, &[], &body)]);
+        let held = result.expect("blueprints");
+        assert_eq!(held.data[0].item_id, 0);
+    }
+
+    #[test]
     fn a_missing_location_id_is_bad_data() {
         let body = BODY.replace("\"location_id\":60003760,", "");
         assert_eq!(bad_field(&body), "location_id");
+    }
+
+    #[test]
+    fn a_negative_location_id_is_bad_data() {
+        let body = BODY.replace("\"location_id\":60003760,", "\"location_id\":-1,");
+        assert_eq!(bad_field(&body), "location_id");
+    }
+
+    #[test]
+    fn a_zero_location_id_is_accepted() {
+        let body = BODY.replace("\"location_id\":60003760,", "\"location_id\":0,");
+        let (_fake, result) = read_with(vec![reply(200, &[], &body)]);
+        let held = result.expect("blueprints");
+        assert!(held.data.iter().all(|row| row.location_id == 0));
     }
 
     #[test]
