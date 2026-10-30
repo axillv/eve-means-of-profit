@@ -20,10 +20,11 @@ use mop_market::fuzzwork::{
 use crate::history::Recorder;
 use crate::worker::Worker;
 
-/// A price older than this, in seconds (6 hours), is shown in the stale colour.
+/// A price, or an order's data, older than this many seconds (6 hours) is shown in the stale
+/// colour.
 pub const STALE_SECS: i64 = 21_600;
 
-/// Past this age a price is called old in words, not only by colour.
+/// Past this age a price, or an order's data, is called old in words, not only by colour.
 pub const OLD_SECS: i64 = 86_400;
 
 /// The hover text for a price older than a day.
@@ -371,8 +372,8 @@ pub(crate) fn age_text(seconds: i64) -> String {
     }
 }
 
-/// [`age_text`], with `" old"` added once the age passes a day. The buy list and the Orders
-/// pages show it; nothing in this module calls it yet.
+/// [`age_text`], with `" old"` added once the age passes a day. The buy list and the Orders page
+/// show it.
 pub fn aged_text(seconds: i64) -> String {
     let text = age_text(seconds);
     if seconds > OLD_SECS {

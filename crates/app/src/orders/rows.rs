@@ -10,11 +10,8 @@ use crate::Shared;
 use crate::build::prices::{age_text, aged_text};
 use crate::build::state::type_name;
 
-/// An order whose character's data is older than this many seconds (6 hours) shows its age amber.
-pub(crate) const STALE_SECS: i64 = 21_600;
-
-/// Past this age the order's data is called old in words.
-pub(crate) const OLD_SECS: i64 = 86_400;
+// The Orders page shares the buy list's age thresholds, so both pages agree on what is stale.
+pub(crate) use crate::build::prices::{OLD_SECS, STALE_SECS};
 
 /// One market order, as the table shows it.
 pub(crate) struct Entry {
