@@ -983,4 +983,52 @@ mod tests {
 
         assert_eq!(products(&mut store, id), vec![product(PRODUCT, 10)]);
     }
+
+    #[test]
+    fn the_label_of_every_stage_is_its_word() {
+        let stages = [
+            PlanStage::Planned,
+            PlanStage::Buying,
+            PlanStage::Building,
+            PlanStage::Done,
+            PlanStage::Sold,
+        ];
+        assert_eq!(
+            stages.map(PlanStage::label),
+            ["Planned", "Buying", "Building", "Done", "Sold"]
+        );
+    }
+
+    #[test]
+    fn every_stage_code_reads_back() {
+        let stages = [
+            PlanStage::Planned,
+            PlanStage::Buying,
+            PlanStage::Building,
+            PlanStage::Done,
+            PlanStage::Sold,
+        ];
+        assert_eq!(
+            (0..=4).map(stage_from_code).collect::<Vec<_>>(),
+            Vec::from(stages.map(Some))
+        );
+        assert_eq!(stage_from_code(5), None);
+    }
+
+    #[test]
+    fn advancing_to_the_current_stage_writes_nothing() {
+        let (_dir, mut store) = open_temp();
+        let id = store.create_plan(&record(), 1_000).expect("create");
+        store
+            .advance_plan_stage(id, PlanStage::Buying)
+            .expect("advance to Buying");
+        let before = store.conn.total_changes();
+
+        store
+            .advance_plan_stage(id, PlanStage::Buying)
+            .expect("advance to Buying again");
+
+        assert_eq!(store.conn.total_changes(), before);
+        assert_eq!(summary(&mut store, id).stage, PlanStage::Buying);
+    }
 }
