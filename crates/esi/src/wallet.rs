@@ -509,6 +509,17 @@ mod tests {
     }
 
     #[test]
+    fn a_journal_entry_with_id_zero_is_kept() {
+        let body = journal_body().replace("\"id\":9000000001", "\"id\":0");
+        let (_fake, result) = read_journal_with(vec![timed(200, Some(1), &body)]);
+        let held = result.expect("journal");
+        let ids: Vec<i64> = held.data.iter().map(|entry| entry.id).collect();
+        assert_eq!(ids, [0, 9_000_000_002]);
+        assert_eq!(held.data[0].ref_type, "player_trading");
+        assert_eq!(held.data[0].description, "sold");
+    }
+
+    #[test]
     fn bad_journal_fields_are_bad_data_naming_the_field() {
         let cases = [
             (
