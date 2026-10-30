@@ -442,4 +442,50 @@ mod tests {
         let days = vec![day(20_484, 10_000, 1), day(20_485, 10_001, 1)];
         assert_eq!(summarise(&days).expect("stat").middle, m(10_001));
     }
+
+    #[test]
+    fn parse_history_accepts_zero_prices() {
+        let zero = r#"[{"average":0,"date":"2026-01-01","highest":0,"lowest":0,"order_count":1,"volume":0}]"#;
+        let days = parse_history(zero).expect("parse");
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].day, 20_454);
+        assert_eq!(days[0].average, m(0));
+        assert_eq!(days[0].highest, m(0));
+        assert_eq!(days[0].lowest, m(0));
+    }
+
+    #[test]
+    fn parse_date_needs_three_parts_and_two_digit_month_and_day() {
+        assert_eq!(parse_date("2026-01-01-05"), None);
+        assert_eq!(parse_date("2026-1-01"), None);
+        assert_eq!(parse_date("2026-01-1"), None);
+        assert_eq!(parse_date("2026-01-31"), Some(20_484));
+    }
+
+    #[test]
+    fn digits_refuses_a_sign() {
+        assert_eq!(digits("+5"), None);
+        assert_eq!(digits(""), None);
+        assert_eq!(digits("5"), Some(5));
+    }
+
+    #[test]
+    fn parse_date_keeps_month_ends_and_leap_days() {
+        assert_eq!(parse_date("2026-02-01"), Some(20_485));
+        assert_eq!(parse_date("2026-02-28"), Some(20_512));
+        assert_eq!(parse_date("2026-04-30"), Some(20_573));
+        assert_eq!(parse_date("2026-06-30"), Some(20_634));
+        assert_eq!(parse_date("2026-09-30"), Some(20_726));
+        assert_eq!(parse_date("2026-11-30"), Some(20_787));
+        assert_eq!(parse_date("2024-02-29"), Some(19_782));
+        assert_eq!(parse_date("2000-02-29"), Some(11_016));
+        assert_eq!(parse_date("2026-02-29"), None);
+        assert_eq!(parse_date("1900-02-29"), None);
+    }
+
+    #[test]
+    fn the_even_middle_of_negative_prices_rounds_half_away_from_zero() {
+        let days = vec![day(20_484, -3_000, 1), day(20_485, -2_000, 1)];
+        assert_eq!(summarise(&days).expect("stat").middle, m(-2_500));
+    }
 }
