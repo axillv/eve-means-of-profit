@@ -49,6 +49,7 @@ mod tests {
     use mop_market::error::MarketError;
     use mop_market::fuzzwork::{BytesHttp, BytesResponse, FORGE, Side, SummaryRow};
     use mop_sde::{Fetch, FetchError, import};
+    use mop_store::blueprints::BlueprintDefault;
     use mop_store::price_history::{MarketKind, PointPrices};
     use mop_store::{Density, PlanRecord, Store};
     use rusqlite::Connection;
@@ -178,6 +179,9 @@ mod tests {
         let mut settings = store.settings().expect("settings");
         settings.last_sde_check = Some(NOW);
         store.save_settings(&settings).expect("settings saved");
+        store
+            .set_blueprint_default(BlueprintDefault::Own)
+            .expect("the blueprint answer is saved");
         let places = format!(
             "{{\"version\":1,\"structures\":{{\"{HOME_FORT}\":{{\"name\":\"Home Fort\",\"system_id\":null,\"refused\":false,\"checked_at\":900000}}}}}}"
         );
@@ -871,12 +875,26 @@ mod tests {
         what_to_build_page_harness(page)
     }
 
-    /// The page drawn on its own with the state `page` already holds.
+    /// The page drawn on its own with the state `page` already holds, and the user having
+    /// answered `Own` so every row's assumption line says so.
     fn what_to_build_page_harness(page: WhatToBuildPage) -> Harness<'static, WhatToBuildRig> {
+        what_to_build_page_harness_with(page, Some(BlueprintDefault::Own))
+    }
+
+    /// The page drawn on its own with the state `page` already holds and `answer` saved, or none.
+    fn what_to_build_page_harness_with(
+        page: WhatToBuildPage,
+        answer: Option<BlueprintDefault>,
+    ) -> Harness<'static, WhatToBuildRig> {
         let dir = TempDir::new().expect("a temp folder");
-        let store = Store::open(&dir.path().join("user.sqlite"), NOW)
+        let mut store = Store::open(&dir.path().join("user.sqlite"), NOW)
             .expect("the store opens")
             .store;
+        if let Some(answer) = answer {
+            store
+                .set_blueprint_default(answer)
+                .expect("the blueprint answer is saved");
+        }
         let rig = WhatToBuildRig {
             page,
             cx: Shared {
@@ -1030,6 +1048,66 @@ mod tests {
         assert!(
             !crate::ui::shown(&harness, "D"),
             "the toggle hides its rows again"
+        );
+    }
+
+    #[test]
+    fn the_blueprint_question_is_asked_once_and_saved() {
+        let mut page = WhatToBuildPage::default();
+        page.rows = vec![dead_row(
+            "A",
+            Blueprint::Default {
+                me: 10,
+                te: 20,
+                assumed: true,
+            },
+            "300.00",
+            None,
+        )];
+        let mut harness = what_to_build_page_harness_with(page, None);
+        harness.run();
+
+        assert!(
+            crate::ui::shown(&harness, "Where do your blueprints come from?"),
+            "a page with no answer asks the question"
+        );
+        for label in ["Copies", "Buy from NPCs", "Only my own"] {
+            assert!(crate::ui::shown(&harness, label), "{label} is offered");
+        }
+        assert!(
+            crate::ui::shown(
+                &harness,
+                "Blueprints you don't hold: copies at ME 10 / TE 20 (assumed)"
+            ),
+            "the no-answer line is the assumption"
+        );
+
+        harness.set_size(vec2(1280.0, 800.0));
+        crate::ui::snapshot(&mut harness, "what-to-build-blueprints");
+
+        harness.state_mut().page.blueprint_pick = BlueprintDefault::Copies { me: 8, te: 16 };
+        harness.run();
+        crate::ui::click(&mut harness, "Save");
+
+        assert!(
+            crate::ui::shown(
+                &harness,
+                "Blueprints you don't hold: copies at ME 8 / TE 16 (your answer)"
+            ),
+            "the saved line is the user's answer"
+        );
+        assert!(
+            !crate::ui::shown(&harness, "Where do your blueprints come from?"),
+            "the question closes once it is answered"
+        );
+        assert_eq!(
+            harness
+                .state_mut()
+                .cx
+                .store
+                .blueprint_default()
+                .expect("the answer reads back"),
+            Some(BlueprintDefault::Copies { me: 8, te: 16 })
         );
     }
 

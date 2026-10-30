@@ -11,6 +11,7 @@ use egui::{ComboBox, Id, RichText, Ui};
 use mop_core::format::group_thousands;
 use mop_core::industry::TypeId;
 use mop_core::money::Money;
+use mop_store::blueprints::{BlueprintDefault, BlueprintOverride};
 
 use crate::Shared;
 use crate::rail::Page;
@@ -48,9 +49,24 @@ impl Level {
 /// The blueprint a product's row would build from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Blueprint {
-    Owned { me: u8 },
-    Buy { price: Money },
+    Owned {
+        me: u8,
+    },
+    Buy {
+        price: Money,
+    },
     ContractsOnly,
+    /// The user set this blueprint's ME and TE by hand.
+    Override {
+        me: u8,
+        te: u8,
+    },
+    /// No blueprint is held, so the first-visit answer or the assumption fills in.
+    Default {
+        me: u8,
+        te: u8,
+        assumed: bool,
+    },
 }
 
 /// One of the four named views: which question the page answers. Each keeps its own rows and
@@ -271,6 +287,12 @@ pub struct WhatToBuildPage {
     ticked: BTreeSet<TypeId>,
     view: View,
     filters: RankFilters,
+    /// Whether the blueprint question is open again, from a click on `Change`.
+    pub asking: bool,
+    /// The answer the question's controls hold.
+    pub blueprint_pick: BlueprintDefault,
+    /// Why the last save of the blueprint answer failed.
+    blueprint_error: Option<String>,
     /// How many view buttons have been clicked. Each click gives the table a fresh id, so the
     /// header sort the last view or a header click left is cleared and the view's own sort shows.
     view_clicks: u64,
@@ -287,9 +309,69 @@ impl Default for WhatToBuildPage {
             ticked: BTreeSet::new(),
             view: View::default(),
             filters: RankFilters::default(),
+            asking: false,
+            blueprint_pick: BlueprintDefault::default(),
+            blueprint_error: None,
             view_clicks: 0,
         }
     }
+}
+
+/// Which blueprint a product's row uses. The character's own blueprint wins by the highest ME,
+/// then TE, then the lowest item id; else the blueprint's override; else the first-visit answer,
+/// with no answer assuming copies at ME 10 / TE 20 and an NPC answer needing a price.
+///
+/// The row feed (U-08 to U-11, out of scope here) is its production caller: it will pass the
+/// character's held blueprints, the saved override, the first-visit answer and the NPC price when
+/// it builds the real rows. M1-210 supplies this choice and keeps the answer.
+pub fn choice(
+    held: &[(i64, u8, u8)],
+    over: Option<&BlueprintOverride>,
+    default: Option<&BlueprintDefault>,
+    npc_price: Option<Money>,
+) -> Option<Blueprint> {
+    let best = held.iter().max_by(|left, right| {
+        left.1
+            .cmp(&right.1)
+            .then_with(|| left.2.cmp(&right.2))
+            .then_with(|| right.0.cmp(&left.0))
+    });
+    if let Some(&(_, me, _)) = best {
+        return Some(Blueprint::Owned { me });
+    }
+    if let Some(over) = over {
+        return Some(Blueprint::Override {
+            me: over.me,
+            te: over.te,
+        });
+    }
+    match default {
+        None => Some(Blueprint::Default {
+            me: 10,
+            te: 20,
+            assumed: true,
+        }),
+        Some(BlueprintDefault::Npc) => npc_price.map(|price| Blueprint::Buy { price }),
+        Some(BlueprintDefault::Copies { me, te }) => Some(Blueprint::Default {
+            me: *me,
+            te: *te,
+            assumed: false,
+        }),
+        Some(BlueprintDefault::Own) => None,
+    }
+}
+
+/// The line above the table saying where the blueprints the character does not hold come from.
+pub fn assumption_text(answer: Option<&BlueprintDefault>) -> String {
+    let answer = match answer {
+        None => "copies at ME 10 / TE 20 (assumed)".to_owned(),
+        Some(BlueprintDefault::Npc) => "buy from NPCs (your answer)".to_owned(),
+        Some(BlueprintDefault::Copies { me, te }) => {
+            format!("copies at ME {me} / TE {te} (your answer)")
+        }
+        Some(BlueprintDefault::Own) => "only your own (your answer)".to_owned(),
+    };
+    format!("Blueprints you don't hold: {answer}")
 }
 
 /// The profit a day the row's product could make at `share` percent of its daily sales, never more
@@ -626,6 +708,11 @@ fn blueprint_text(blueprint: &Blueprint) -> String {
         Blueprint::Owned { me } => format!("Owned ME {me}"),
         Blueprint::Buy { price } => format!("Buy {}", price.format_isk()),
         Blueprint::ContractsOnly => "Contracts only".to_owned(),
+        Blueprint::Override { me, te } => format!("You: ME {me} / TE {te}"),
+        Blueprint::Default { me, te, assumed } => {
+            let answer = if *assumed { "assumed" } else { "your answer" };
+            format!("ME {me} / TE {te} ({answer})")
+        }
     }
 }
 
@@ -784,6 +871,78 @@ fn draw_dead_line(ui: &mut Ui, page: &mut WhatToBuildPage, counts: &[usize; 3]) 
     });
 }
 
+/// The saved answer's line and, when there is no answer or `Change` was clicked, the question
+/// with its three answers and the ME/TE fields. Saving keeps the answer in the store.
+fn draw_blueprint_answer(
+    ui: &mut Ui,
+    page: &mut WhatToBuildPage,
+    saved: Option<&BlueprintDefault>,
+    cx: &mut Shared,
+) {
+    if page.rows.is_empty() {
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.label(assumption_text(saved));
+        if ui.button("Change").clicked() {
+            page.blueprint_pick = saved.copied().unwrap_or_default();
+            page.asking = true;
+            page.blueprint_error = None;
+        }
+    });
+    if let Some(error) = &page.blueprint_error {
+        ui.label(error);
+    }
+    if !page.asking && saved.is_some() {
+        return;
+    }
+    ui.label("Where do your blueprints come from?");
+    ui.horizontal(|ui| {
+        let mut pick = page.blueprint_pick;
+        if ui
+            .selectable_label(matches!(pick, BlueprintDefault::Copies { .. }), "Copies")
+            .clicked()
+            && !matches!(pick, BlueprintDefault::Copies { .. })
+        {
+            pick = BlueprintDefault::Copies { me: 10, te: 20 };
+        }
+        if ui
+            .selectable_label(pick == BlueprintDefault::Npc, "Buy from NPCs")
+            .clicked()
+        {
+            pick = BlueprintDefault::Npc;
+        }
+        if ui
+            .selectable_label(pick == BlueprintDefault::Own, "Only my own")
+            .clicked()
+        {
+            pick = BlueprintDefault::Own;
+        }
+        page.blueprint_pick = pick;
+    });
+    if let BlueprintDefault::Copies { me, te } = &mut page.blueprint_pick {
+        ui.horizontal(|ui| {
+            ui.label("ME");
+            ui.add(egui::DragValue::new(me).range(0..=10));
+            ui.label("TE");
+            ui.add(egui::DragValue::new(te).range(0..=20));
+        });
+    }
+    if ui.button("Save").clicked() {
+        match cx.store.set_blueprint_default(page.blueprint_pick) {
+            Ok(()) => {
+                page.asking = false;
+                page.blueprint_error = None;
+            }
+            Err(error) => {
+                page.blueprint_error =
+                    Some(format!("Could not save the blueprint answer: {error}"));
+                page.asking = false;
+            }
+        }
+    }
+}
+
 /// Draws the page. Returns the page a button asks for, when one was clicked.
 pub fn show(ui: &mut Ui, page: &mut WhatToBuildPage, cx: &mut Shared) -> Option<Page> {
     ui.heading("What could I build?");
@@ -801,6 +960,19 @@ pub fn show(ui: &mut Ui, page: &mut WhatToBuildPage, cx: &mut Shared) -> Option<
     });
     draw_views(ui, page);
     draw_filters(ui, page);
+    let blueprint_answer = if page.rows.is_empty() {
+        None
+    } else {
+        match cx.store.blueprint_default() {
+            Ok(answer) => answer,
+            Err(error) => {
+                page.blueprint_error =
+                    Some(format!("Could not read the blueprint answer: {error}"));
+                None
+            }
+        }
+    };
+    draw_blueprint_answer(ui, page, blueprint_answer.as_ref(), cx);
 
     let share = page.share_percent;
     let wallet = wallet_sum(&cx.session);
@@ -1693,6 +1865,154 @@ mod tests {
         assert_eq!(
             cells(&contracts, Level::Summary, 5)[5].text,
             "Contracts only"
+        );
+
+        let overridden = RankRow {
+            blueprint: Blueprint::Override { me: 8, te: 16 },
+            ..row("Overridden")
+        };
+        assert_eq!(
+            cells(&overridden, Level::Summary, 5)[5].text,
+            "You: ME 8 / TE 16"
+        );
+
+        let assumed = RankRow {
+            blueprint: Blueprint::Default {
+                me: 10,
+                te: 20,
+                assumed: true,
+            },
+            ..row("Assumed")
+        };
+        assert_eq!(
+            cells(&assumed, Level::Summary, 5)[5].text,
+            "ME 10 / TE 20 (assumed)"
+        );
+
+        let answered = RankRow {
+            blueprint: Blueprint::Default {
+                me: 10,
+                te: 20,
+                assumed: false,
+            },
+            ..row("Answered")
+        };
+        assert_eq!(
+            cells(&answered, Level::Summary, 5)[5].text,
+            "ME 10 / TE 20 (your answer)"
+        );
+    }
+
+    fn over(me: u8, te: u8) -> BlueprintOverride {
+        BlueprintOverride {
+            blueprint: 2455,
+            me,
+            te,
+            price_paid: None,
+            set_at: 1_000,
+        }
+    }
+
+    #[test]
+    fn choice_takes_a_held_blueprint_then_the_override_then_the_answer() {
+        let held = [(1003, 10, 20), (1007, 9, 14)];
+        let override_eight = over(8, 16);
+        assert_eq!(
+            choice(
+                &held,
+                Some(&override_eight),
+                Some(&BlueprintDefault::Own),
+                None
+            ),
+            Some(Blueprint::Owned { me: 10 }),
+            "the highest ME wins"
+        );
+        assert_eq!(
+            choice(
+                &[],
+                Some(&override_eight),
+                Some(&BlueprintDefault::Copies { me: 10, te: 20 }),
+                None
+            ),
+            Some(Blueprint::Override { me: 8, te: 16 }),
+            "the override wins over the answer"
+        );
+        assert_eq!(
+            choice(&[], None, None, None),
+            Some(Blueprint::Default {
+                me: 10,
+                te: 20,
+                assumed: true,
+            }),
+            "no answer assumes copies at ME 10 / TE 20"
+        );
+        assert_eq!(
+            choice(
+                &[],
+                None,
+                Some(&BlueprintDefault::Copies { me: 8, te: 16 }),
+                None
+            ),
+            Some(Blueprint::Default {
+                me: 8,
+                te: 16,
+                assumed: false,
+            })
+        );
+        let price = money("499,639.39");
+        assert_eq!(
+            choice(&[], None, Some(&BlueprintDefault::Npc), Some(price)),
+            Some(Blueprint::Buy { price })
+        );
+        assert_eq!(
+            choice(&[], None, Some(&BlueprintDefault::Npc), None),
+            None,
+            "an NPC answer with no price leaves the row without a blueprint"
+        );
+        assert_eq!(choice(&[], None, Some(&BlueprintDefault::Own), None), None);
+    }
+
+    #[test]
+    fn choice_breaks_ties_by_te_then_the_lowest_item_id() {
+        assert_eq!(
+            choice(
+                &[(1007, 9, 14), (1003, 10, 10), (1005, 10, 10)],
+                None,
+                None,
+                None
+            ),
+            Some(Blueprint::Owned { me: 10 }),
+            "the highest ME comes first"
+        );
+        assert_eq!(
+            choice(&[(1007, 9, 14), (1003, 9, 16)], None, None, None),
+            Some(Blueprint::Owned { me: 9 }),
+            "the highest TE comes next"
+        );
+        assert_eq!(
+            choice(&[(1007, 9, 14), (1003, 9, 14)], None, None, None),
+            Some(Blueprint::Owned { me: 9 }),
+            "the lowest item id breaks the last tie"
+        );
+    }
+
+    #[test]
+    fn the_assumption_line_says_copies_npcs_or_your_own() {
+        assert_eq!(
+            assumption_text(None),
+            "Blueprints you don't hold: copies at ME 10 / TE 20 (assumed)"
+        );
+        assert_eq!(
+            assumption_text(Some(&BlueprintDefault::Npc)),
+            "Blueprints you don't hold: buy from NPCs (your answer)"
+        );
+        assert_eq!(
+            assumption_text(Some(&BlueprintDefault::Copies { me: 8, te: 16 })),
+            "Blueprints you don't hold: copies at ME 8 / TE 16 (your answer)"
+        );
+        assert_eq!(
+            assumption_text(Some(&BlueprintDefault::Own)),
+            "Blueprints you don't hold: only your own (your answer)"
         );
     }
 

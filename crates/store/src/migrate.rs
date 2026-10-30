@@ -322,6 +322,22 @@ CREATE TABLE blueprints (
     te INTEGER NOT NULL CHECK (te BETWEEN 0 AND 20),
     PRIMARY KEY (character_id, item_id)
 ) WITHOUT ROWID;
+CREATE TABLE blueprint_overrides (
+    blueprint_id INTEGER PRIMARY KEY,
+    me INTEGER NOT NULL CHECK (me BETWEEN 0 AND 10),
+    te INTEGER NOT NULL CHECK (te BETWEEN 0 AND 20),
+    price_paid INTEGER CHECK (price_paid IS NULL OR price_paid >= 0),
+    set_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE plan_blueprints (
+    plan_id INTEGER NOT NULL REFERENCES plans (id) ON DELETE CASCADE,
+    blueprint_id INTEGER NOT NULL,
+    me INTEGER NOT NULL CHECK (me BETWEEN 0 AND 10),
+    te INTEGER NOT NULL CHECK (te BETWEEN 0 AND 20),
+    price_paid INTEGER CHECK (price_paid IS NULL OR price_paid >= 0),
+    set_at INTEGER NOT NULL,
+    PRIMARY KEY (plan_id, blueprint_id)
+) WITHOUT ROWID;
 CREATE TABLE wallet_journal_fetches (
     character_id INTEGER PRIMARY KEY,
     fetched_at INTEGER NOT NULL
