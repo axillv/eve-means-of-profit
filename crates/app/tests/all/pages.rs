@@ -25,7 +25,9 @@ mod tests {
     use eve_means_of_profit::selection::Selection;
     use eve_means_of_profit::session::{EveAccess, NoEve, PendingLogin, Session};
     use eve_means_of_profit::theme::Style;
-    use eve_means_of_profit::what_to_build::{self, Blueprint, DeadEnd, RankRow, WhatToBuildPage};
+    use eve_means_of_profit::what_to_build::{
+        self, Blueprint, CharacterSlots, DeadEnd, RankRow, WhatToBuildPage,
+    };
     use eve_means_of_profit::worker::Worker;
     use eve_means_of_profit::{App, AppConfig, Shared};
     use flate2::Compression;
@@ -864,12 +866,17 @@ mod tests {
     /// The page drawn on its own with `rows` in it: the app's feed makes no rows yet, so the
     /// dead-end test gives the page rows and a shared state of its own.
     fn what_to_build_harness(rows: Vec<RankRow>) -> Harness<'static, WhatToBuildRig> {
+        let mut page = WhatToBuildPage::default();
+        page.rows = rows;
+        what_to_build_page_harness(page)
+    }
+
+    /// The page drawn on its own with the state `page` already holds.
+    fn what_to_build_page_harness(page: WhatToBuildPage) -> Harness<'static, WhatToBuildRig> {
         let dir = TempDir::new().expect("a temp folder");
         let store = Store::open(&dir.path().join("user.sqlite"), NOW)
             .expect("the store opens")
             .store;
-        let mut page = WhatToBuildPage::default();
-        page.rows = rows;
         let rig = WhatToBuildRig {
             page,
             cx: Shared {
@@ -1023,6 +1030,83 @@ mod tests {
             !crate::ui::shown(&harness, "D"),
             "the toggle hides its rows again"
         );
+    }
+
+    /// One row of the fit fixture: a ranked product with `type_id` named `name`.
+    fn fit_row(type_id: u32, name: &str) -> RankRow {
+        RankRow {
+            type_id,
+            ..dead_row(name, Blueprint::Owned { me: 10 }, "100.00", None)
+        }
+    }
+
+    /// Ticks the tick box on the row labelled `name`.
+    fn tick_row(harness: &mut Harness<'_, WhatToBuildRig>, name: &str) {
+        let y = crate::ui::find(harness, name)
+            .unwrap_or_else(|| panic!("no row showing {name:?}"))
+            .rect()
+            .center()
+            .y;
+        harness
+            .get_all_by_role(Role::CheckBox)
+            .find(|node| (node.rect().center().y - y).abs() < 4.0)
+            .unwrap_or_else(|| panic!("no tick on the row {name:?}"))
+            .click();
+        harness.run();
+    }
+
+    #[test]
+    fn the_fit_line_sits_under_the_table_for_the_ticked_rows() {
+        let mut page = WhatToBuildPage::default();
+        page.rows = vec![
+            fit_row(1, "Fit one"),
+            fit_row(2, "Fit two"),
+            fit_row(3, "Fit three"),
+        ];
+        page.slots = vec![
+            CharacterSlots {
+                id: 1,
+                free_manufacturing: 10,
+            },
+            CharacterSlots {
+                id: 2,
+                free_manufacturing: 10,
+            },
+        ];
+        page.job_days = BTreeMap::from([(1, 3), (2, 2), (3, 4)]);
+        let mut harness = what_to_build_page_harness(page);
+        harness.run();
+
+        let line =
+            "These 3 need about 9 job-days; your 2 characters have 20 free manufacturing slots.";
+        assert!(
+            !crate::ui::shown(&harness, line),
+            "no tick means no fit line"
+        );
+
+        for name in ["Fit one", "Fit two", "Fit three"] {
+            tick_row(&mut harness, name);
+        }
+        assert!(crate::ui::shown(&harness, line), "the fit line is shown");
+        let bottom = ["Fit one", "Fit two", "Fit three"]
+            .iter()
+            .map(|name| {
+                crate::ui::find(&harness, name)
+                    .unwrap_or_else(|| panic!("no row showing {name:?}"))
+                    .rect()
+                    .bottom()
+            })
+            .fold(f32::MIN, f32::max);
+        let line_rect = crate::ui::find(&harness, line)
+            .expect("the fit line")
+            .rect();
+        assert!(
+            line_rect.min.y > bottom,
+            "the fit line is under the table's rows"
+        );
+
+        harness.set_size(vec2(1280.0, 800.0));
+        crate::ui::snapshot(&mut harness, "what-to-build-fit");
     }
 
     /// The rail's left edge. Every rail entry starts there; panel titles start to its right.

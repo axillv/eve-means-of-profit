@@ -260,6 +260,12 @@ pub struct RankRow {
 #[derive(Debug, Clone)]
 pub struct WhatToBuildPage {
     pub rows: Vec<RankRow>,
+    /// The login characters' free manufacturing slots, for the fit line. The slot feed fills
+    /// this; until it does, the fit line says the slots are not known.
+    pub slots: Vec<CharacterSlots>,
+    /// How many job-days each ticked product needs, for the fit line. The job-time feed fills
+    /// this; until it does, the fit line says the job time is not known.
+    pub job_days: BTreeMap<TypeId, u32>,
     level: Level,
     share_percent: u8,
     ticked: BTreeSet<TypeId>,
@@ -274,6 +280,8 @@ impl Default for WhatToBuildPage {
     fn default() -> Self {
         Self {
             rows: Vec::new(),
+            slots: Vec::new(),
+            job_days: BTreeMap::new(),
             level: Level::Summary,
             share_percent: DEFAULT_SHARE_PERCENT,
             ticked: BTreeSet::new(),
@@ -853,6 +861,12 @@ pub fn show(ui: &mut Ui, page: &mut WhatToBuildPage, cx: &mut Shared) -> Option<
     // a reason adds rows without moving them.
     let counts = dead_counts(&page.rows, &page.filters);
     draw_dead_line(ui, page, &counts);
+    // The ticked rows' fit under the table, above where `Plan these` will sit. No tick leaves
+    // the line out entirely.
+    let ticked = ticked_rows(&page.rows, &page.ticked);
+    if !ticked.is_empty() {
+        ui.label(fit_line(&fit(&ticked, &page.slots, &page.job_days)));
+    }
     if table_rows.is_empty() {
         return empty_state(ui, cx);
     }
@@ -1410,6 +1424,91 @@ mod tests {
         assert_eq!(
             fit_line(&all_unknown),
             "These 3 need about 0 job-days so far; job time is not known for 3 of them."
+        );
+    }
+
+    #[test]
+    fn the_page_shows_the_fit_line_only_for_ticked_rows() {
+        let defaults = WhatToBuildPage::default();
+        assert!(defaults.slots.is_empty(), "the slots start unknown");
+        assert!(defaults.job_days.is_empty(), "the job times start unknown");
+        let draw = |page: WhatToBuildPage| {
+            Harness::builder()
+                .with_size(vec2(1280.0, 800.0))
+                .build_ui_state(
+                    move |ui, rig: &mut Rig| {
+                        rig.cx.style.apply(ui.ctx());
+                        assert!(show(ui, &mut rig.page, &mut rig.cx).is_none());
+                    },
+                    rig(page, money("300.00")),
+                )
+        };
+        let page = |slots: Vec<CharacterSlots>,
+                    times: BTreeMap<TypeId, u32>,
+                    ticked: BTreeSet<TypeId>| WhatToBuildPage {
+            rows: slot_feed(),
+            slots,
+            job_days: times,
+            ticked,
+            ..WhatToBuildPage::default()
+        };
+        let times = job_days(&[(1, 3), (2, 2), (3, 4)]);
+        let all_ticked = BTreeSet::from([1, 2, 3]);
+
+        let mut unticked = draw(page(
+            character_slots(&[10, 10]),
+            times.clone(),
+            BTreeSet::new(),
+        ));
+        unticked.run();
+        assert!(
+            unticked
+                .query_all_by_label("These 3 need about 9 job-days; your 2 characters have 20 free manufacturing slots.")
+                .next()
+                .is_none(),
+            "no tick means no fit line"
+        );
+
+        let mut fitted = draw(page(
+            character_slots(&[10, 10]),
+            times.clone(),
+            all_ticked.clone(),
+        ));
+        fitted.run();
+        assert!(
+            fitted
+                .query_all_by_label("These 3 need about 9 job-days; your 2 characters have 20 free manufacturing slots.")
+                .next()
+                .is_some(),
+            "the fit line shows the slots that cover the job-days"
+        );
+
+        let mut no_slots = draw(page(Vec::new(), times, all_ticked.clone()));
+        no_slots.run();
+        assert!(
+            no_slots
+                .query_all_by_label(
+                    "These 3 need about 9 job-days; free manufacturing slots are not known yet."
+                )
+                .next()
+                .is_some(),
+            "the fit line says the slots are unknown"
+        );
+
+        let mut no_times = draw(page(
+            character_slots(&[10, 10]),
+            BTreeMap::new(),
+            all_ticked,
+        ));
+        no_times.run();
+        assert!(
+            no_times
+                .query_all_by_label(
+                    "These 3 need about 0 job-days so far; job time is not known for 3 of them."
+                )
+                .next()
+                .is_some(),
+            "the fit line says the job time is unknown"
         );
     }
 
