@@ -12,6 +12,7 @@ mod jobs;
 mod layout_actions;
 mod layout_edit;
 mod layout_model;
+mod layout_pins;
 mod names;
 mod net_worth;
 mod offline;

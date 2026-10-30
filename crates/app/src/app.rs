@@ -31,7 +31,7 @@ pub mod today;
 pub mod what_to_build;
 pub mod worker;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::fs;
 use std::ops::ControlFlow;
@@ -63,6 +63,7 @@ use claims::ClaimsState;
 use dock::UserNames;
 use first_run::{Reply, Startup};
 use jobs::{JobsPage, JobsPanel};
+use layout::add_to::AddTo;
 use layout::files::Files;
 use layout::model::{Binding, Layout, PanelRef, Slot};
 use layout::user::UserLayouts;
@@ -393,23 +394,23 @@ fn stockpile_name(store: &mut Store, id: i64) -> Option<String> {
     }
 }
 
-/// The page state a player's layout panel reads, one mutable reference per shipped page.
+/// The page state a player's layout panel reads, one mutable reference per shipped page that a
+/// panel cannot pin. The Build and Stockpiles pages are drawn by their own code, because a pinned
+/// panel reads a page of its own.
 struct PageStates<'a> {
-    build: &'a mut BuildPage,
     assets: &'a mut AssetsPage,
     net_worth: &'a mut NetWorthPage,
     orders: &'a mut OrdersPage,
     jobs: &'a mut JobsPage,
     characters: &'a mut CharactersPage,
-    stockpiles: &'a mut StockpilesPage,
     setup: &'a mut SetupPage,
 }
 
 /// Draws the panel of a player's layout named by `key`. Only a key in the panel list reaches here,
-/// and a key with no shipped panel draws nothing.
+/// and a key with no shipped panel draws nothing. The Build and Stockpiles panels are drawn by the
+/// caller, which picks the page the slot is bound to.
 fn show_panel(key: &str, ui: &mut Ui, pages: &mut PageStates, cx: &mut Shared) {
     match key.split_once('.') {
-        Some(("build", _)) => show_build_panel(key, ui, &mut *pages.build, cx),
         Some(("assets", _)) => show_assets_panel(key, ui, &mut *pages.assets, cx),
         Some(("net_worth", _)) => show_net_worth_panel(key, ui, &mut *pages.net_worth, cx),
         Some(("orders", _)) => {
@@ -424,10 +425,40 @@ fn show_panel(key: &str, ui: &mut Ui, pages: &mut PageStates, cx: &mut Shared) {
         }
         Some(("characters", _)) => show_characters_panel(key, ui, &mut *pages.characters, cx),
         Some(("setup", _)) => show_setup_panel(key, ui, &mut *pages.setup, cx),
-        Some(("stockpiles", _)) => show_stockpiles_panel(key, ui, &mut *pages.stockpiles, cx),
         _ if key == "item" => item_panel::show(ui, cx),
         _ => {}
     }
+}
+
+/// The Build page a slot pinned to plan `id` draws: made and loaded the first time the slot is
+/// shown, then kept for the session.
+fn pinned_plan<'a>(
+    pinned: &'a mut HashMap<i64, BuildPage>,
+    id: i64,
+    cx: &mut Shared,
+) -> &'a mut BuildPage {
+    pinned.entry(id).or_insert_with(|| {
+        let mut page = BuildPage::default();
+        page.load(id, cx);
+        page
+    })
+}
+
+/// The Stockpiles page a slot pinned to stockpile `id` draws: made with `open` the first time the
+/// slot is shown, then kept for the session. `open` selects the stockpile for the page on show, so
+/// the selection it was given is put back.
+fn pinned_stockpile<'a>(
+    pinned: &'a mut HashMap<i64, StockpilesPage>,
+    id: i64,
+    cx: &mut Shared,
+) -> &'a mut StockpilesPage {
+    pinned.entry(id).or_insert_with(|| {
+        let mut page = StockpilesPage::default();
+        let selected = cx.selection.stockpile;
+        page.open(id, cx);
+        cx.selection.stockpile = selected;
+        page
+    })
 }
 
 fn show_build_panel(key: &str, ui: &mut Ui, page: &mut BuildPage, cx: &mut Shared) {
@@ -574,6 +605,12 @@ pub struct App {
     user: UserLayouts,
     /// The layout on show, `None` when a shipped page is.
     layout_shown: Option<usize>,
+    /// The `Add to layout…` window and the layout it last used.
+    add_to: AddTo,
+    /// The plan each pinned plan panel shows, made when the panel is first shown.
+    pinned_plans: HashMap<i64, BuildPage>,
+    /// The stockpile each pinned stockpile panel shows, made when the panel is first shown.
+    pinned_stockpiles: HashMap<i64, StockpilesPage>,
     what_to_build_page: WhatToBuildPage,
     /// The open and save dialogs, and where their layouts come from and go to.
     files: Files,
@@ -697,6 +734,9 @@ impl App {
             page: Page::Today,
             user,
             layout_shown: None,
+            add_to: AddTo::default(),
+            pinned_plans: HashMap::new(),
+            pinned_stockpiles: HashMap::new(),
             what_to_build_page: WhatToBuildPage::default(),
             files: Files::native(),
             build_page: BuildPage::default(),
@@ -721,14 +761,20 @@ impl App {
             industry_loaded: false,
             industry_timing: IndustryTimings::default(),
         };
-        app.spawn_session_load();
-        app.spawn_industry_load();
-        if app.shared.sde.is_none() {
-            app.start_first_run();
-        } else if update_due(settings.last_sde_check, now) {
-            app.spawn_check(false);
-        }
+        app.begin(settings.last_sde_check, now);
         Ok(app)
+    }
+
+    /// Starts the session and industry loads, then the first-run download, or the daily check when
+    /// the game data is due for one.
+    fn begin(&mut self, last_sde_check: Option<i64>, now: i64) {
+        self.spawn_session_load();
+        self.spawn_industry_load();
+        if self.shared.sde.is_none() {
+            self.start_first_run();
+        } else if update_due(last_sde_check, now) {
+            self.spawn_check(false);
+        }
     }
 
     /// The state the pages and windows share, for code that drives the app from outside.
@@ -771,6 +817,7 @@ impl App {
         self.zoom_with_keys(ui);
         self.menu_bar(ui);
         self.paste_window(ui);
+        self.add_to_layout();
         let activity = self.activity();
         let idle = self.idle_text();
         let clicked = status::show(
@@ -884,6 +931,48 @@ impl App {
             ui.ctx().data_mut(|data| data.remove::<String>(id));
         } else {
             ui.ctx().data_mut(|data| data.insert_temp(id, text));
+        }
+    }
+
+    /// Opens the `Add to layout…` window when a panel asked for it, and adds the panel when the
+    /// window answers. The page on show and the rail selection stay as they are.
+    fn add_to_layout(&mut self) {
+        if let Some(name) = dock::take_add_request(&self.ctx) {
+            self.add_to.open(&name, layout::panels::panels());
+        }
+        let selected_plan = self.build_page.selected.and_then(|id| {
+            self.build_page
+                .record
+                .as_ref()
+                .map(|record| (id, record.name.as_str()))
+        });
+        let selected_stockpile = self
+            .shared
+            .selection
+            .stockpile
+            .and_then(|id| stockpile_name(&mut self.shared.store, id).map(|name| (id, name)));
+        let selected_stockpile = selected_stockpile
+            .as_ref()
+            .map(|(id, name)| (*id, name.as_str()));
+        let Some(outcome) = self.add_to.show(
+            &self.ctx,
+            &self.user.layouts,
+            selected_plan,
+            selected_stockpile,
+        ) else {
+            return;
+        };
+        let Some(panel) = layout::panels::panels()
+            .iter()
+            .find(|info| outcome.slot.panel == PanelRef::Known(info.key))
+            .map(|info| info.name)
+        else {
+            return;
+        };
+        let (_, notice) = layout::add_to::add(&mut self.user.layouts, outcome, panel);
+        self.shared.notices.push(notice);
+        if let Some(notice) = self.user.save() {
+            self.shared.notices.push(notice);
         }
     }
 
@@ -1216,8 +1305,9 @@ impl App {
         true
     }
 
-    /// Draws the player's layout at `index`. Every panel shows its shipped page's state; until a
-    /// slot can be pinned to its own plan, a pinned slot follows the same selection.
+    /// Draws the player's layout at `index`. A panel that follows the selection shows its shipped
+    /// page's state; a panel pinned to a plan or stockpile shows a page of its own, kept for the
+    /// session.
     fn user_layout(&mut self, ui: &mut Ui, index: usize, style: &Style) {
         let Some(layout) = self.user.layouts.get(index) else {
             return;
@@ -1262,18 +1352,41 @@ impl App {
             return;
         }
         let mut pages = PageStates {
-            build: &mut self.build_page,
             assets: &mut self.assets_page,
             net_worth: &mut self.net_worth_page,
             orders: &mut self.orders_page,
             jobs: &mut self.jobs_page,
             characters: &mut self.characters_page,
-            stockpiles: &mut self.stockpiles_page,
             setup: &mut self.setup_page,
         };
         let notice = self.user.show(index, ui, style, &user_names, |ui, slot| {
-            if let PanelRef::Known(key) = &slot.panel {
-                show_panel(key, ui, &mut pages, &mut self.shared);
+            let PanelRef::Known(key) = &slot.panel else {
+                return;
+            };
+            let key = *key;
+            match &slot.binding {
+                Binding::PinPlan(id) => {
+                    let page = pinned_plan(&mut self.pinned_plans, *id, &mut self.shared);
+                    show_build_panel(key, ui, page, &mut self.shared);
+                }
+                Binding::PinStockpile(id) => {
+                    let page = pinned_stockpile(&mut self.pinned_stockpiles, *id, &mut self.shared);
+                    // The Contents panel reads the selection, so a pinned page lends it the
+                    // stockpile it shows and the page on show gets the selection back.
+                    let selected = self.shared.selection.stockpile;
+                    self.shared.selection.stockpile = Some(*id);
+                    show_stockpiles_panel(key, ui, page, &mut self.shared);
+                    self.shared.selection.stockpile = selected;
+                }
+                Binding::Follow => match key.split_once('.') {
+                    Some(("build", _)) => {
+                        show_build_panel(key, ui, &mut self.build_page, &mut self.shared);
+                    }
+                    Some(("stockpiles", _)) => {
+                        show_stockpiles_panel(key, ui, &mut self.stockpiles_page, &mut self.shared);
+                    }
+                    _ => show_panel(key, ui, &mut pages, &mut self.shared),
+                },
             }
         });
         if let Some(notice) = notice {
