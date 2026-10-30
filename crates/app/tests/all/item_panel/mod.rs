@@ -1,0 +1,588 @@
+//! Acceptance tests for the Item panel: the owned rows, the running jobs, the Forge prices with the
+//! age of the file, and the saved plans that use the selected item. The game data is the build
+//! 3607705 fixture, imported in the test. The login is a fake, and jEve's profile is a made-up file
+//! in a temp folder. The clock is fixed at 1,000,000.
+#[cfg(test)]
+mod tests {
+
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::fs;
+    use std::io::Write;
+    use std::ops::ControlFlow;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex, PoisonError};
+    use std::thread;
+    use std::time::Duration;
+
+    use egui::{OutputCommand, vec2};
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+    use eve_means_of_profit::build::prices::{Failure, Prices, failure_text};
+    use eve_means_of_profit::claims::ClaimsState;
+    use eve_means_of_profit::item_panel::inspector;
+    use eve_means_of_profit::selection::Selection;
+    use eve_means_of_profit::session::{EveAccess, PendingLogin, Session};
+    use eve_means_of_profit::theme::Style;
+    use eve_means_of_profit::worker::Worker;
+    use eve_means_of_profit::{App, AppConfig, Shared};
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use mop_core::freight::Packing;
+    use mop_core::stock::{Asset, CharacterAssets, Places, StockScope};
+    use mop_esi::character_data::{
+        CharacterData, Fetched, Job, JobStatus, Kind, OwnedAssets, Refreshed,
+    };
+    use mop_esi::characters::{Character, Login};
+    use mop_esi::error::EsiError;
+    use mop_esi::industry::IndustryData;
+    use mop_esi::places::{NamingReport, StructureNames};
+    use mop_esi::saved;
+    use mop_market::book::PriceRule;
+    use mop_market::error::MarketError;
+    use mop_market::fuzzwork::{BytesHttp, BytesResponse};
+    use mop_sde::{Fetch, FetchError, Sde, import};
+    use mop_store::reservations::PlanStock;
+    use mop_store::{Density, PlanRecord, Store};
+    use rusqlite::Connection;
+    use tempfile::TempDir;
+
+    const NOW: i64 = 1_000_000;
+    const FIXTURE: &str = "../sde/tests/fixtures/sde-3607705";
+    const MAIN: u64 = 2_112_000_001;
+    const JITA_4_4: i64 = 60_003_760;
+    const HOME_FORT: i64 = 1_035_466_617_946;
+    const JITA_NAME: &str = "Jita IV - Moon 4 - Caldari Navy Assembly Plant";
+    const PAU: u32 = 11_688;
+    const MORPHITE: u32 = 11_399;
+    const HEADER: &str =
+        "what,weightedaverage,maxval,minval,stddev,median,volume,numorders,fivepercent,orderSet";
+
+    fn fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE)
+    }
+
+    /// The game data is installed by the test, so the app never asks the network for anything.
+    struct NoNetwork;
+
+    impl Fetch for NoNetwork {
+        fn get_text(&self, _url: &str) -> Result<String, FetchError> {
+            Err(FetchError::Http { status: 503 })
+        }
+
+        fn download(
+            &self,
+            _url: &str,
+            _dest: &mut dyn Write,
+            _progress: &mut dyn FnMut(u64, Option<u64>) -> ControlFlow<()>,
+        ) -> Result<u64, FetchError> {
+            Err(FetchError::Http { status: 503 })
+        }
+    }
+
+    /// What the fake Fuzzwork file answers with.
+    #[derive(Clone)]
+    enum Answer {
+        /// The file, with its Last-Modified time in Unix seconds.
+        File { published: i64, rows: String },
+        /// A download that fails.
+        Down,
+    }
+
+    /// The fake Fuzzwork file. Every request is counted. The answer can be changed by a test.
+    struct FakeForge {
+        answer: Arc<Mutex<Answer>>,
+        calls: Arc<Mutex<usize>>,
+    }
+
+    impl BytesHttp for FakeForge {
+        fn get_bytes(
+            &self,
+            _url: &str,
+            _if_none_match: Option<&str>,
+        ) -> Result<BytesResponse, MarketError> {
+            *self.calls.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+            let answer = self.answer.lock().unwrap_or_else(PoisonError::into_inner);
+            match &*answer {
+                Answer::Down => Err(MarketError::Network("the file is down".to_owned())),
+                Answer::File { published, rows } => {
+                    let text = format!("{HEADER}\n{rows}");
+                    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                    encoder
+                        .write_all(text.as_bytes())
+                        .map_err(|error| MarketError::Network(error.to_string()))?;
+                    let body = encoder
+                        .finish()
+                        .map_err(|error| MarketError::Network(error.to_string()))?;
+                    Ok(BytesResponse {
+                        status: 200,
+                        etag: Some("\"1\"".to_owned()),
+                        last_modified: Some(http_date(*published)),
+                        retry_after: None,
+                        body,
+                    })
+                }
+            }
+        }
+    }
+
+    /// An HTTP date (`Sun, 06 Nov 1994 08:49:37 GMT`) for Unix seconds.
+    fn http_date(secs: i64) -> String {
+        let days = secs.div_euclid(86_400);
+        let within = secs.rem_euclid(86_400);
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = yoe + era * 400 + i64::from(month <= 2);
+        let weekday = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"]
+            [usize::try_from(days.rem_euclid(7)).expect("a day of the week")];
+        let months = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        format!(
+            "{weekday}, {day:02} {} {year} {:02}:{:02}:{:02} GMT",
+            months[usize::try_from(month - 1).expect("a month of the year")],
+            within / 3_600,
+            within % 3_600 / 60,
+            within % 60
+        )
+    }
+
+    /// One row of the fake file: a side (`true` is buy) with its prices in ISK.
+    fn row(type_id: u32, buy: bool, price: &str) -> String {
+        format!(
+            "10000002|{type_id}|{buy},{price},{price},{price},0.0,{price},10,2,{price},175414\n"
+        )
+    }
+
+    /// A data folder with the game data imported and the user's store.
+    struct Env {
+        _dir: TempDir,
+        data: PathBuf,
+        cache: PathBuf,
+    }
+
+    fn env() -> Env {
+        let dir = TempDir::new().expect("a temp folder");
+        let data = dir.path().join("data");
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&data).expect("the data folder");
+        import(&fixture(), &data.join("sde.sqlite")).expect("the fixture imports");
+        let mut store = Store::open(&data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
+        let mut settings = store.settings().expect("settings");
+        settings.last_sde_check = Some(NOW);
+        store.save_settings(&settings).expect("settings saved");
+        Env {
+            _dir: dir,
+            data,
+            cache,
+        }
+    }
+
+    fn esi_dir(env: &Env) -> PathBuf {
+        env.data.join("esi")
+    }
+
+    fn sde(env: &Env) -> Sde {
+        Sde::open(&env.data.join("sde.sqlite")).expect("the game data opens")
+    }
+
+    /// The state the inspector reads: the fixture game data and an empty session, with no network.
+    fn shared(env: &Env) -> Shared {
+        Shared {
+            sde: Some(sde(env)),
+            store: Store::open(&env.data.join("user.sqlite"), NOW)
+                .expect("the store opens")
+                .store,
+            worker: Worker::spawn(egui::Context::default(), Box::new(NoNetwork)),
+            market: Arc::new(Prices::new(Box::new(crate::offline::Offline))),
+            // The net worth copy job that would ask for PLEX never runs in these tests, so the
+            // client is never used.
+            plex_http: Arc::new(mop_market::http::UreqHttp::new()),
+            copy_notices: Arc::new(Mutex::new(Vec::new())),
+            style: Style::eve_dense(),
+            density: Density::Normal,
+            rail_icons_only: false,
+            refresh_while_open: false,
+            data_dir: env.data.clone(),
+            notices: Vec::new(),
+            clock: Box::new(|| NOW),
+            session: Session::new(Box::new(FakeEve {
+                characters: Vec::new(),
+                jeve: None,
+            })),
+            selection: Selection::default(),
+            industry: IndustryData::default(),
+            claims: ClaimsState::default(),
+        }
+    }
+
+    /// A harness that draws only the inspector over [`shared`].
+    fn inspector_harness(env: &Env) -> Harness<'static, Shared> {
+        Harness::builder()
+            .with_size(vec2(1280.0, 800.0))
+            .build_ui_state(
+                |ui, cx: &mut Shared| {
+                    cx.style.apply(ui.ctx());
+                    inspector(ui, cx);
+                },
+                shared(env),
+            )
+    }
+
+    /// A login with the characters given, a jEve folder when there is one.
+    #[derive(Clone)]
+    struct FakeEve {
+        characters: Vec<Character>,
+        jeve: Option<PathBuf>,
+    }
+
+    impl EveAccess for FakeEve {
+        fn characters(&self) -> Vec<Character> {
+            self.characters.clone()
+        }
+
+        fn begin_login(&mut self) -> Result<PendingLogin, String> {
+            Err("Logins are not started in these tests.".to_owned())
+        }
+
+        fn finish_login(&mut self, _code: &str) -> Result<Character, EsiError> {
+            Err(EsiError::Cancelled)
+        }
+
+        fn refresh_all(
+            &mut self,
+            _data: &mut CharacterData,
+            _now: i64,
+        ) -> Vec<(Kind, Result<Refreshed, EsiError>)> {
+            Vec::new()
+        }
+
+        fn name_structures(
+            &mut self,
+            _names: &mut StructureNames,
+            _ids: &[i64],
+            _now: i64,
+        ) -> Result<NamingReport, EsiError> {
+            Ok(NamingReport {
+                asked: 0,
+                failed: Vec::new(),
+            })
+        }
+
+        fn save_character(&mut self, _data: &CharacterData) -> Result<(), EsiError> {
+            Ok(())
+        }
+
+        fn remove(&mut self, character_id: u64) -> Result<(), EsiError> {
+            Err(EsiError::UnknownCharacter(character_id))
+        }
+
+        fn keychain_warning(&self) -> Option<String> {
+            None
+        }
+
+        fn jeve_folder(&self) -> Option<PathBuf> {
+            self.jeve.clone()
+        }
+    }
+
+    fn character(id: u64, name: &str) -> Character {
+        Character {
+            id,
+            name: name.to_owned(),
+            scopes: BTreeSet::new(),
+            added_at: NOW,
+            login: Login::Ok,
+        }
+    }
+
+    fn asset(
+        item_id: i64,
+        type_id: u32,
+        location_id: i64,
+        quantity: u64,
+        singleton: bool,
+    ) -> Asset {
+        Asset {
+            item_id,
+            type_id,
+            location_id,
+            flag: Some("Hangar".to_owned()),
+            quantity,
+            singleton,
+        }
+    }
+
+    /// Main's saved data at `fetched`: 40 PAU in Jita 4-4, 120 PAU in Home Fort, and one active
+    /// manufacturing job of 10 runs of PAU in Home Fort that ends at `now` + 7,500.
+    fn main_data(fetched: i64, now: i64) -> CharacterData {
+        let stock = CharacterAssets {
+            character_id: i64::try_from(MAIN).expect("an id that fits"),
+            updated: Some(fetched),
+            assets: vec![
+                asset(1, PAU, JITA_4_4, 40, false),
+                asset(2, PAU, HOME_FORT, 120, false),
+            ],
+        };
+        let job = Job {
+            job_id: 1,
+            activity_id: 1,
+            blueprint_type_id: 1,
+            product_type_id: Some(PAU),
+            runs: 10,
+            status: JobStatus::Active,
+            start: now - 100,
+            end: now + 7_500,
+            facility_id: HOME_FORT,
+            station_id: JITA_4_4,
+            output_location_id: HOME_FORT,
+            installer_id: i64::try_from(MAIN).expect("an id that fits"),
+            cost: None,
+            licensed_runs: None,
+        };
+        CharacterData {
+            character_id: MAIN,
+            assets: Some(Fetched {
+                data: OwnedAssets {
+                    assets: stock,
+                    names: BTreeMap::new(),
+                },
+                fetched_at: fetched,
+                last_modified: None,
+                expires: None,
+            }),
+            orders: None,
+            jobs: Some(Fetched {
+                data: vec![job],
+                fetched_at: fetched,
+                last_modified: None,
+                expires: None,
+            }),
+            wallet: None,
+        }
+    }
+
+    /// A jEve profile folder with `#Default.db` built from `sql`.
+    fn jeve_folder(sql: &str) -> TempDir {
+        let folder = TempDir::new().expect("a temp folder");
+        let connection = Connection::open(folder.path().join("#Default.db")).expect("database");
+        connection.execute_batch(sql).expect("fixture builds");
+        drop(connection);
+        folder
+    }
+
+    /// Alt, jEve only: 60 PAU packaged in Jita 4-4 and 1 PAU as a singleton there.
+    fn jeve_profile() -> TempDir {
+        jeve_folder(
+            "CREATE TABLE owners (accountid TEXT, ownerid INTEGER, name TEXT, corp TEXT, show NUMERIC, \
+             invalid NUMERIC, assetslastupdate INTEGER, assetsnextupdate INTEGER, scopes TEXT, \
+             UNIQUE(accountid));
+             CREATE TABLE assets (accountid TEXT, count INTEGER, flagid INTEGER, flagstring TEXT, \
+             itemid INTEGER, typeid INTEGER, locationid INTEGER, singleton NUMERIC, rawquantity INTEGER, \
+             UNIQUE(accountid, itemid));
+             CREATE TABLE blueprints (accountid TEXT, itemid INTEGER, locationid INTEGER, typeid INTEGER, \
+             flagid INTEGER, flagstring TEXT, quantity INTEGER, timeefficiency INTEGER, \
+             materialefficiency INTEGER, runs NUMERIC, UNIQUE(accountid, itemid));
+             INSERT INTO owners (accountid, ownerid, name, show, invalid, assetslastupdate, scopes) VALUES
+              ('j2', 2112000002, 'Alt', 1, 0, 700000000, 'esi-assets.read_assets.v1');
+             INSERT INTO assets (accountid, itemid, typeid, locationid, flagid, flagstring, count, singleton, rawquantity) VALUES
+              ('j2', 5001, 11688, 60003760, 4, 'Hangar', 60, 0, NULL),
+              ('j2', 5002, 11688, 60003760, 4, 'Hangar', 1, 1, NULL);",
+        )
+    }
+
+    /// The app with the fake login, jEve's profile and the fake Fuzzwork file. Returns the file's
+    /// request count with the app.
+    fn start(
+        env: &Env,
+        eve: FakeEve,
+        answer: Answer,
+    ) -> (Harness<'static, App>, Arc<Mutex<usize>>) {
+        start_with(env, eve, Arc::new(Mutex::new(answer)))
+    }
+
+    /// As `start`, with the Fuzzwork answer in `answer` so the test can change it.
+    fn start_with(
+        env: &Env,
+        eve: FakeEve,
+        answer: Arc<Mutex<Answer>>,
+    ) -> (Harness<'static, App>, Arc<Mutex<usize>>) {
+        let config = AppConfig {
+            data_dir: env.data.clone(),
+            cache_dir: env.cache.clone(),
+            fetch: Box::new(NoNetwork),
+            clock: Box::new(|| NOW),
+            eve: Box::new(eve),
+            market: Box::new(crate::offline::Offline),
+        };
+        let mut harness = Harness::builder()
+            .with_size(vec2(1280.0, 800.0))
+            .with_max_steps(crate::SETTLE_STEPS)
+            .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
+        crate::ui::no_images(&mut harness);
+        let calls = Arc::new(Mutex::new(0));
+        let forge = FakeForge {
+            answer,
+            calls: Arc::clone(&calls),
+        };
+        harness.state_mut().shared_mut().market = Arc::new(Prices::new(Box::new(forge)));
+        harness
+            .state_mut()
+            .show_page(eve_means_of_profit::rail::Page::Build);
+        (harness, calls)
+    }
+
+    fn shown<S>(harness: &Harness<'_, S>, text: &str) -> bool {
+        harness.query_all_by_label(text).next().is_some()
+    }
+
+    /// The text the last drawn frame put on the clipboard, if any.
+    fn copied_text(harness: &Harness<'_, App>) -> Option<String> {
+        harness
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|command| {
+                if let OutputCommand::CopyText(text) = command {
+                    Some(text.clone())
+                } else {
+                    None
+                }
+            })
+    }
+
+    /// Runs frames until `done` holds, letting the worker finish between them.
+    fn until(harness: &mut Harness<'_, App>, what: &str, done: impl Fn(&Harness<'_, App>) -> bool) {
+        for _ in 0..500 {
+            harness.run();
+            if done(harness) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("{what} did not show");
+    }
+
+    /// Waits until the start-up read has arrived: the Item panel stops saying it is loading.
+    fn loaded(harness: &mut Harness<'_, App>) {
+        until(harness, "the saved data", |h| {
+            !shown(h, "Loading character data…")
+        });
+    }
+
+    /// Selects `type_id` in the picked item and runs a frame.
+    fn select(harness: &mut Harness<'_, App>, type_id: u32) {
+        harness.state_mut().shared_mut().selection.item = Some(type_id);
+        harness.run();
+    }
+
+    /// Asks the market for the file and waits until it is held.
+    fn fetch_market(harness: &mut Harness<'_, App>) {
+        {
+            let shared = harness.state_mut().shared_mut();
+            let market = Arc::clone(&shared.market);
+            market.refresh(&shared.worker, NOW, true);
+        }
+        for _ in 0..500 {
+            harness.run();
+            let shared = harness.state_mut().shared_mut();
+            if shared.market.held().published_at.is_some() || shared.market.stopped() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the market file did not arrive");
+    }
+
+    /// Two plans: `Hobgoblin 10` (Hobgoblin II × 10, Particle Accelerator Units bought) and
+    /// `Rifter 31` (Rifter × 31), and one whose product is not in the game data.
+    fn save_plans(env: &Env) {
+        let game = sde(env);
+        let hobgoblin = game
+            .find_exact("Hobgoblin II")
+            .expect("the name searches")
+            .expect("Hobgoblin II is in the fixture");
+        let rifter = game
+            .find_exact("Rifter")
+            .expect("the name searches")
+            .expect("Rifter is in the fixture");
+        let mut store = Store::open(&env.data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
+        for (name, product, quantity) in [
+            ("Hobgoblin 10", hobgoblin, 10),
+            ("Rifter 31", rifter, 31),
+            ("Missing", 9_999_999, 1),
+        ] {
+            store
+                .create_plan(
+                    &PlanRecord {
+                        id: 0,
+                        name: name.to_owned(),
+                        product,
+                        quantity,
+                        build: BTreeSet::new(),
+                        me: BTreeMap::new(),
+                        manufacturing: None,
+                        reactions: None,
+                        price_rule: PriceRule::HighestBuy,
+                        route: None,
+                        service: None,
+                        packing: Packing::TopUp,
+                        pasted_stock: String::new(),
+                        created_at: NOW,
+                        updated_at: NOW,
+                    },
+                    NOW,
+                )
+                .expect("the plan is saved");
+        }
+    }
+
+    /// The fixture's Particle Accelerator Unit and Hobgoblin II, found by name.
+    fn hobgoblin_id(env: &Env) -> u32 {
+        sde(env)
+            .find_exact("Hobgoblin II")
+            .expect("the name searches")
+            .expect("Hobgoblin II is in the fixture")
+    }
+
+    /// The fixture's place names: Home Fort is typed, Jita comes from the game data.
+    fn name_home_fort(env: &Env) {
+        let mut store = Store::open(&env.data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
+        store
+            .set_structure_name(HOME_FORT, "Home Fort", NOW)
+            .expect("the typed name is saved");
+    }
+
+    /// Main's saved data, saved before the app starts; Alt comes from jEve.
+    fn with_main(env: &Env) {
+        saved::save_character(&esi_dir(env), &main_data(990_000, NOW)).expect("Main's data saved");
+    }
+
+    fn fresh_market(published: i64) -> Answer {
+        Answer::File {
+            published,
+            rows: format!(
+                "{}{}",
+                row(PAU, false, "61200.00"),
+                row(PAU, true, "55010.00")
+            ),
+        }
+    }
+
+    mod open;
+    mod owned;
+    mod plans;
+    mod prices;
+}
