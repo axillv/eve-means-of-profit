@@ -2,39 +2,21 @@
 //! attempts to buy. Every T2 plan reads both.
 
 use std::collections::BTreeMap;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::{Arc, Mutex, PoisonError};
 
-use egui::{Button, ComboBox, Context, Id, RichText, Ui};
+use egui::{ComboBox, Id, RichText, Ui};
 use mop_core::industry::TypeId;
 use mop_core::invention::AttemptRule;
 use mop_core::money::Rate;
-use mop_esi::error::EsiError;
-use mop_esi::skills::{CharacterSkills, NpcStanding};
+use mop_esi::skills::CharacterSkills;
 use mop_sde::invention::InventionSkill;
 
 use crate::Shared;
-use crate::session::lock_eve;
 use crate::status::Notice;
 use crate::theme::Style;
 
 const MUTE_LINE: &str = "Skills of the character who invents. A skill not set is assumed 0.";
 const NO_DATA: &str = "Load the game data to set invention skills.";
-const NO_CHARACTER: &str = "No character logged in";
-const READING: &str = "Reading…";
 const RULE_HOVER: &str = "Expected buys enough attempts for the copies on average. \"90% sure\" buys enough that 9 times in 10 you get every copy.";
-
-/// What one read answers: the character's skills and standings, or why they could not be read.
-type ReadResult = Result<(CharacterSkills, Vec<NpcStanding>), EsiError>;
-/// The channel a read's answer comes back on.
-type ReadChannel = Arc<Mutex<Receiver<ReadResult>>>;
-
-/// The read the panel waits for: the character's name and the channel the worker answers on.
-#[derive(Debug, Clone)]
-struct Reading {
-    name: String,
-    result: ReadChannel,
-}
 
 /// What the panel keeps between frames: the store was read once, and the choices it holds.
 #[derive(Debug, Clone)]
@@ -47,7 +29,7 @@ struct Panel {
     /// The character the read dropdown shows.
     character: Option<u64>,
     /// The read in flight, if one is.
-    reading: Option<Reading>,
+    reading: Option<super::Reading>,
 }
 
 impl Default for Panel {
@@ -70,129 +52,16 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Shared) {
     if !panel.tried {
         load(&mut panel, cx);
     }
-    take_read(&mut panel, cx);
+    if let Some(answer) = super::take_read(&mut panel.reading, cx)
+        && save_read(&mut panel, cx, &answer.skills)
+    {
+        cx.notices.push(Notice::info(format!(
+            "Read invention skills from {}.",
+            answer.name
+        )));
+    }
     draw(&mut panel, ui, cx);
     ui.data_mut(|data| data.insert_temp(id, panel));
-}
-
-/// The panel's first row: pick a logged-in character and read its invention skills.
-fn read_row(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
-    let characters: Vec<(u64, String)> = cx
-        .session
-        .characters()
-        .iter()
-        .map(|character| (character.id, character.name.clone()))
-        .collect();
-    let known = panel
-        .character
-        .is_some_and(|id| characters.iter().any(|(held, _)| *held == id));
-    if !known {
-        panel.character = characters.first().map(|(id, _)| *id);
-    }
-    ui.horizontal(|ui| {
-        ui.label("Read from character");
-        if characters.is_empty() {
-            ui.add_enabled_ui(false, |ui| {
-                ComboBox::from_id_salt("invention read character")
-                    .selected_text(NO_CHARACTER)
-                    .show_ui(ui, |_ui| {});
-            });
-            ui.add_enabled(false, Button::new("Read"));
-        } else {
-            let selected = panel
-                .character
-                .and_then(|id| characters.iter().find(|(held, _)| *held == id))
-                .map_or_else(|| NO_CHARACTER.to_owned(), |(_, name)| name.clone());
-            ComboBox::from_id_salt("invention read character")
-                .selected_text(selected)
-                .show_ui(ui, |ui| {
-                    for (id, name) in &characters {
-                        ui.selectable_value(&mut panel.character, Some(*id), name);
-                    }
-                });
-            let busy = panel.reading.is_some();
-            let button = ui.add_enabled(!busy, Button::new(if busy { READING } else { "Read" }));
-            if button.clicked() {
-                start_read(panel, cx, ui.ctx());
-            }
-        }
-    });
-}
-
-/// Asks the worker for one character's skills and standings. The answer comes back on a channel
-/// the panel keeps, and is taken in by [`take_read`].
-fn start_read(panel: &mut Panel, cx: &mut Shared, ctx: &Context) {
-    let Some(id) = panel.character else {
-        return;
-    };
-    let Some(name) = cx
-        .session
-        .characters()
-        .iter()
-        .find(|character| character.id == id)
-        .map(|character| character.name.clone())
-    else {
-        return;
-    };
-    let eve = cx.session.eve();
-    let now = (cx.clock)();
-    let (tx, rx) = mpsc::channel();
-    panel.reading = Some(Reading {
-        name,
-        result: Arc::new(Mutex::new(rx)),
-    });
-    let ctx = ctx.clone();
-    let job = move || {
-        let result = lock_eve(&eve).read_skills_and_standings(id, now);
-        drop(tx.send(result));
-        ctx.request_repaint();
-    };
-    if !cx.worker.run(Box::new(job)) {
-        panel.reading = None;
-        cx.notices.push(Notice::error(
-            "The background worker has stopped. Restart the app.",
-        ));
-    }
-}
-
-/// Takes in the answer of the read, when it has come back. A good answer sets every listed skill
-/// and saves it; a failure leaves the rows as they were.
-fn take_read(panel: &mut Panel, cx: &mut Shared) {
-    let Some(reading) = &panel.reading else {
-        return;
-    };
-    let received = reading
-        .result
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .try_recv();
-    match received {
-        Ok(result) => {
-            let name = reading.name.clone();
-            panel.reading = None;
-            match result {
-                Ok((skills, _standings)) => {
-                    // The standings are not used: only the invention skills are set.
-                    if save_read(panel, cx, &skills) {
-                        cx.notices
-                            .push(Notice::info(format!("Read invention skills from {name}.")));
-                    }
-                }
-                Err(error) => {
-                    cx.notices
-                        .push(Notice::error(super::fees::read_error(&name, &error)));
-                }
-            }
-        }
-        Err(TryRecvError::Empty) => {}
-        Err(TryRecvError::Disconnected) => {
-            let name = reading.name.clone();
-            panel.reading = None;
-            cx.notices.push(Notice::error(format!(
-                "Could not read {name}: the read stopped unexpectedly."
-            )));
-        }
-    }
 }
 
 /// Sets every invention skill the panel lists to the character's level, 0 when it was not sent,
@@ -265,7 +134,13 @@ fn draw(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
         }
     };
 
-    read_row(panel, ui, cx);
+    super::read_row(
+        &mut panel.character,
+        &mut panel.reading,
+        ui,
+        cx,
+        "invention read character",
+    );
     ui.label(RichText::new(MUTE_LINE).color(style.mute));
     rule_field(ui, &style, panel, cx);
 
