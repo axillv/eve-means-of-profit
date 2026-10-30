@@ -1239,4 +1239,33 @@ mod tests {
         assert_eq!(store.day_history(34).expect("days").len(), 1);
         assert_eq!(calls.borrow().len(), 3);
     }
+
+    #[test]
+    fn a_zero_day_amount_reads_but_a_negative_one_is_bad_data() {
+        let (_dir, _path, mut store) = open_temp();
+        store
+            .save_day_history(34, &[history_day(20_484, 0, 30)])
+            .expect("save");
+
+        let days = store.day_history(34).expect("zero reads");
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].average, Money::ZERO);
+
+        store
+            .save_day_history(34, &[history_day(20_484, 100_000, 30)])
+            .expect("save");
+        store
+            .conn
+            .execute_batch(
+                "PRAGMA ignore_check_constraints = ON; \
+                 UPDATE market_history SET average = -1;",
+            )
+            .expect("raw update");
+
+        let err = store.day_history(34).expect_err("bad data");
+        let StoreError::BadData(what) = err else {
+            panic!("expected BadData, got {err:?}");
+        };
+        assert!(what.contains("average"), "{what}");
+    }
 }
