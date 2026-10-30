@@ -216,3 +216,29 @@ fn security_millionths(text: &str) -> Option<i32> {
     }
     i32::try_from(signed).ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::security_millionths;
+
+    #[test]
+    fn rejects_an_empty_whole_part() {
+        assert_eq!(security_millionths(".5"), None);
+    }
+
+    #[test]
+    fn rejects_a_sign_inside_the_mantissa() {
+        assert_eq!(security_millionths("+0"), None);
+    }
+
+    #[test]
+    fn divides_only_when_the_value_is_an_exact_multiple() {
+        assert_eq!(security_millionths("100000e-10"), Some(10));
+    }
+
+    #[test]
+    fn reads_plain_and_exponent_values() {
+        assert_eq!(security_millionths("0.945913"), Some(945_913));
+        assert_eq!(security_millionths("-9e-05"), Some(-90));
+    }
+}
