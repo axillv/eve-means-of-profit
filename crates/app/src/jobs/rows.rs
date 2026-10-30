@@ -12,6 +12,7 @@ use mop_store::reservations::PlanStock;
 use crate::Shared;
 use crate::build::prices::age_text;
 use crate::build::state::{refresh_claims, report, type_name};
+use crate::claims::refresh_plan_reads;
 use crate::orders::rows::{grouped, utc_text};
 
 /// What the Plan cell of a job holds: no plan can take it, the plan it is assigned to, or the plans
@@ -165,17 +166,17 @@ fn plan_list(cx: &mut Shared) -> Option<Vec<(PlanForJobs, String)>> {
     }
 }
 
-/// The saved plans in list order, each read once as a job suggestion and its name.
+/// The saved plans in list order, read once per change as job suggestions, each with its name.
 fn read_plans(cx: &mut Shared) -> mop_store::Result<Vec<(PlanForJobs, String)>> {
     let listed = cx.store.plans()?;
+    refresh_plan_reads(cx, &listed)?;
+    let reads = cx.claims.plan_reads();
     let mut plans = Vec::with_capacity(listed.len());
     for summary in listed {
-        let Some(record) = cx.store.plan(summary.id)? else {
+        let Some(read) = reads.iter().find(|read| read.record.id == summary.id) else {
             continue;
         };
-        let stock = cx.store.plan_stock(summary.id)?;
-        let products = cx.store.plan_products(summary.id)?;
-        let plan = for_jobs(summary.id, &products, &record.build, &stock);
+        let plan = for_jobs(summary.id, &read.products, &read.record.build, &read.stock);
         plans.push((plan, summary.name));
     }
     Ok(plans)
