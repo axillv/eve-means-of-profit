@@ -557,3 +557,22 @@ fn io_error(path: &Path, source: io::Error) -> StoreError {
         source,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_metadata_error_that_is_not_not_found_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("plain");
+        std::fs::write(&plain, b"hello").unwrap();
+        let path = plain.join("eve.db");
+        match exists_with_content(&path) {
+            Err(StoreError::Io { source, .. }) => {
+                assert_ne!(source.kind(), io::ErrorKind::NotFound);
+            }
+            other => panic!("expected an I/O error, got {other:?}"),
+        }
+    }
+}
