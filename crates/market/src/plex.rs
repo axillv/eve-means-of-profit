@@ -372,4 +372,23 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn one_hundred_pages_is_accepted() {
+        let answers = (1..=100)
+            .map(|page_number| {
+                let header = if page_number == 1 { Some(100) } else { None };
+                (page_url(page_number), page(200, header, "[]"))
+            })
+            .collect();
+        let fake = Fake::new(answers);
+        let got = fetch_plex(&fake).expect("fetch");
+        assert!(got.is_empty());
+        assert_eq!(fake.asked.borrow().len(), 100);
+    }
+
+    #[test]
+    fn a_negative_average_rounds_away_from_zero() {
+        assert_eq!(average(-3, 2), Ok(Money::from_ten_thousandths(-2)));
+    }
 }
