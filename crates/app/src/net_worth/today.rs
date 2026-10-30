@@ -4,7 +4,9 @@
 
 use std::collections::BTreeSet;
 
-use egui::{Id, RichText, Ui};
+use egui::{
+    Align, Button, Id, Label, Layout, RichText, TextWrapMode, Ui, WidgetInfo, WidgetType, vec2,
+};
 use mop_core::money::Money;
 use mop_core::net_worth::Part;
 use mop_core::price_history::day_of;
@@ -18,14 +20,25 @@ use crate::net_worth::data::load::{Loaded, load};
 use crate::net_worth::summary::{Since, Summary, SummaryError, summarise};
 use crate::net_worth::view::basis_text;
 use crate::orders::rows::utc_text;
+use crate::rail::Page;
 use crate::status::Notice;
 
 /// The key of the block's cached lines in the frame memory.
 const CACHE_KEY: &str = "today.net_worth";
+/// The block's title, which every state starts with.
+const TITLE: &str = "Net worth";
+/// What the block says when there are no points or characters.
+const STARTS_WITH_CHARACTER: &str = "Starts with your first character.";
+/// The button that adds the first character.
+const ADD_CHARACTER: &str = "Add character";
 /// What the block says when there are no points at all.
 const NOTHING: &str = "No net worth points yet. Refresh your characters to record the first one.";
 /// What the block says when the points could not be read.
 const FAILED: &str = "Could not read net worth.";
+/// The space between two parts of one row.
+const PART_GAP: f32 = 8.0;
+/// The height of one block's row.
+const ROW_HEIGHT: f32 = 38.0;
 /// What the split line counts, on hover.
 const SPLIT_HOVER: &str = "Price moves: the same items repriced at both points. Everything else: quantity changes, items that appeared or left, the wallet and PLEX.";
 
@@ -77,8 +90,9 @@ enum Sign {
     None,
 }
 
-/// Draws the block's body. One load builds every line; later frames read the cache.
-pub fn body(ui: &mut Ui, cx: &mut Shared) {
+/// Draws the whole block. One load builds every line; later frames read the cache. Returns the page
+/// its empty row asks for, when it was clicked.
+pub fn body(ui: &mut Ui, cx: &mut Shared) -> Option<Page> {
     let frame = ui.ctx().cumulative_frame_nr();
     let revisions = login_revisions(cx);
     let cached = ui.ctx().data(|data| data.get_temp::<Cached>(cache_id()));
@@ -100,7 +114,7 @@ pub fn body(ui: &mut Ui, cx: &mut Shared) {
     };
     ui.ctx()
         .data_mut(|data| data.insert_temp(cache_id(), cached.clone()));
-    show(ui, cx, &cached.body);
+    show(ui, cx, &cached.body)
 }
 
 /// The name of the block's cache entry.
@@ -275,8 +289,60 @@ fn sign(amount: Money) -> Sign {
     }
 }
 
-/// Draws one body.
-fn show(ui: &mut Ui, cx: &Shared, body: &Body) {
+/// Whether the block draws its empty row with the Add character button: only when it has no
+/// points and the login has no characters.
+fn add_character(body: &Body, no_characters: bool) -> bool {
+    matches!(body, Body::Nothing) && no_characters
+}
+
+/// Draws the block's title as one row, so every state starts at the same height.
+fn title(ui: &mut Ui) {
+    let width = ui.available_width();
+    ui.allocate_ui_with_layout(
+        vec2(width, ROW_HEIGHT),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.label(RichText::new(TITLE).strong());
+        },
+    );
+}
+
+/// Draws the empty row: the title, the copy and the Add character button on one line. Returns
+/// `Page::Characters` when the button was clicked.
+fn empty_row(ui: &mut Ui, cx: &Shared) -> Option<Page> {
+    let width = ui.available_width();
+    let mut target = None;
+    ui.allocate_ui_with_layout(
+        vec2(width, ROW_HEIGHT),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.label(RichText::new(TITLE).strong());
+            ui.add_space(PART_GAP);
+            ui.add(
+                Label::new(RichText::new(STARTS_WITH_CHARACTER).color(cx.style.mute))
+                    .wrap_mode(TextWrapMode::Extend),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let response = ui.add(Button::new(ADD_CHARACTER));
+                let name = format!("{TITLE}: {ADD_CHARACTER}");
+                response.widget_info(|| {
+                    WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), name.clone())
+                });
+                if response.clicked() {
+                    target = Some(Page::Characters);
+                }
+            });
+        },
+    );
+    target
+}
+
+/// Draws one body: the title, then its content or empty copy.
+fn show(ui: &mut Ui, cx: &Shared, body: &Body) -> Option<Page> {
+    if add_character(body, cx.session.characters().is_empty()) {
+        return empty_row(ui, cx);
+    }
+    title(ui);
     match body {
         Body::Nothing => {
             ui.colored_label(cx.style.mute, NOTHING);
@@ -316,6 +382,7 @@ fn show(ui: &mut Ui, cx: &Shared, body: &Body) {
             }
         }
     }
+    None
 }
 
 /// The day text after "since": `yesterday` when the earlier point is the last one's day before,
@@ -372,8 +439,8 @@ mod tests {
     use mop_market::book::PriceRule;
 
     use super::{
-        Body, Lines, SPLIT_HOVER, Sign, change_hover_text, date_text, hover_texts, sign,
-        since_phrase,
+        Body, Lines, SPLIT_HOVER, Sign, add_character, change_hover_text, date_text, hover_texts,
+        sign, since_phrase,
     };
     use crate::net_worth::summary::{Change, Since};
 
@@ -392,6 +459,22 @@ mod tests {
             price_moves: isk(price_moves),
             everything_else: isk(everything_else),
         }
+    }
+
+    #[test]
+    fn the_add_character_row_appears_exactly_without_points_and_characters() {
+        assert!(
+            add_character(&Body::Nothing, true),
+            "no characters and no points asks for a character"
+        );
+        assert!(
+            !add_character(&Body::Nothing, false),
+            "a character without points asks for a refresh, not a character"
+        );
+        assert!(
+            !add_character(&Body::Failed, true),
+            "a failed read keeps its error, not the Add character row"
+        );
     }
 
     #[test]

@@ -1914,6 +1914,123 @@ mod tests {
             &harness,
             "No net worth points yet. Refresh your characters to record the first one."
         ));
+        assert!(
+            !shown(&harness, "Net worth: Add character"),
+            "a character without points offers no Add character"
+        );
+    }
+
+    #[test]
+    fn stored_points_show_without_a_login() {
+        let env = nw_env();
+        {
+            let mut store = nw_store(&env);
+            nw_add_first(&mut store);
+            nw_add_latest(&mut store);
+            nw_history(&mut store);
+            store
+                .save_point_prices(&nw_copy(NW_NOW, "61,200.00"))
+                .expect("the copy is saved");
+        }
+        let mut harness = start(&env, FakeEve::new(Vec::new(), None), NW_NOW);
+        loaded(&mut harness);
+
+        assert!(shown(&harness, "18.31 M ISK"));
+        assert!(shown(&harness, "+7.71 M"), "the change shows");
+        assert!(shown(&harness, "since 2 Sep"), "the earlier day shows");
+        assert!(
+            shown(&harness, "Price moves +192 K, everything else +7.52 M"),
+            "the change splits into price moves and everything else"
+        );
+        assert_eq!(
+            crate::ui::hover(&mut harness, "+7.71 M"),
+            vec!["7,708,667.89 ISK at Forge sell, 5% price, since 2001-09-02 01:46".to_owned()],
+            "the change's hover names its amount, basis and earlier point"
+        );
+        assert_eq!(
+            crate::ui::hover(&mut harness, "Price moves +192 K, everything else +7.52 M"),
+            vec!["Price moves: the same items repriced at both points. Everything else: quantity changes, items that appeared or left, the wallet and PLEX.".to_owned()],
+            "the split's hover says what each part counts"
+        );
+        assert!(
+            !shown(&harness, "Starts with your first character."),
+            "stored points replace the empty copy"
+        );
+        assert_eq!(
+            harness
+                .query_all_by_label("Net worth: Add character")
+                .count(),
+            0,
+            "stored points need no character"
+        );
+        crate::ui::snapshot(&mut harness, "today-money-no-login");
+    }
+
+    #[test]
+    fn no_characters_and_no_points_offers_add_character() {
+        let env = nw_env();
+        let mut harness = start(&env, FakeEve::new(Vec::new(), None), NW_NOW);
+        loaded(&mut harness);
+
+        assert!(shown(&harness, "Net worth"));
+        assert!(shown(&harness, "Starts with your first character."));
+        assert_eq!(
+            harness
+                .query_all_by_label("Net worth: Add character")
+                .count(),
+            1,
+            "the empty block offers one Add character"
+        );
+        assert!(
+            !shown(
+                &harness,
+                "No net worth points yet. Refresh your characters to record the first one."
+            ),
+            "the no-character copy replaces the refresh copy"
+        );
+
+        crate::ui::click(&mut harness, "Net worth: Add character");
+        assert!(
+            shown(&harness, "jEve data"),
+            "the Add character row shows the Characters page"
+        );
+    }
+
+    #[test]
+    fn a_missing_net_worth_settings_table_with_no_characters_shows_the_points() {
+        let env = nw_env();
+        {
+            let mut store = nw_store(&env);
+            nw_add_first(&mut store);
+            nw_add_latest(&mut store);
+            nw_history(&mut store);
+            store
+                .save_point_prices(&nw_copy(NW_NOW, "61,200.00"))
+                .expect("the copy is saved");
+        }
+        Connection::open(env.data.join("user.sqlite"))
+            .expect("the database opens")
+            .execute_batch("PRAGMA foreign_keys = OFF; DROP TABLE net_worth_settings;")
+            .expect("the settings table drops");
+
+        let mut harness = start(&env, FakeEve::new(Vec::new(), None), NW_NOW);
+        loaded(&mut harness);
+        assert!(
+            shown(&harness, "18.31 M ISK"),
+            "the defaults still value the points"
+        );
+        let texts = notices(&mut harness);
+        assert!(
+            texts.iter().any(|text| {
+                text.starts_with("Could not read the net worth settings: ")
+                    && text.contains("no such table: net_worth_settings")
+            }),
+            "{texts:?}"
+        );
+        assert!(
+            !shown(&harness, "Net worth: Add character"),
+            "a failed settings read with points draws no Add character row"
+        );
     }
 
     #[test]
