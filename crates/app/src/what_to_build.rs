@@ -1,6 +1,7 @@
 //! The What could I build? page: feed products ranked by the profit a day they could make, with
 //! the columns of the Summary, Standard and Technical levels. Four named views set the question
-//! and the sort; a Blueprint filter and a skills toggle narrow the rows.
+//! and the sort; a Blueprint filter and a skills toggle narrow the rows. The dead ends are left
+//! out of the ranking and counted on a line under the table, each reason a toggle showing its rows.
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -188,12 +189,44 @@ impl BlueprintFilter {
     }
 }
 
+/// Why the feed left a row out of the ranking. The counts of these reasons show on a line under
+/// the table, and each reason on that line is a toggle that shows its rows again.
+#[expect(
+    clippy::enum_variant_names,
+    reason = "each label starts with \"no\", so the variant names share their prefix"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DeadEnd {
+    /// The product has not sold in 30 days.
+    NoSales,
+    /// None of the player's facilities can build it.
+    NoFacility,
+    /// No blueprint for it is for sale.
+    NoBlueprint,
+}
+
+impl DeadEnd {
+    /// The reasons, in the order the counts and the line under the table show them.
+    pub const ALL: [DeadEnd; 3] = [DeadEnd::NoSales, DeadEnd::NoFacility, DeadEnd::NoBlueprint];
+
+    /// The reason's words on the line, after its count.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NoSales => "no sales in 30 days",
+            Self::NoFacility => "no facility can build it",
+            Self::NoBlueprint => "no blueprint for sale",
+        }
+    }
+}
+
 /// What the page filters the feed with, beside the view. Nothing here is remembered between
-/// runs: a fresh start is every blueprint and every row.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// runs: a fresh start is every blueprint and every row, with every dead end left out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RankFilters {
     pub blueprint: BlueprintFilter,
     pub only_my_skills: bool,
+    /// The dead-end reasons whose rows the table shows; empty keeps every dead end out.
+    pub shown_dead: BTreeSet<DeadEnd>,
 }
 
 /// One product of the feed: what it is, how it is built, and every number the table can show.
@@ -202,6 +235,8 @@ pub struct RankRow {
     pub type_id: TypeId,
     pub name: String,
     pub blueprint: Blueprint,
+    /// Why the ranking leaves the row out, `None` when the row ranks.
+    pub dead: Option<DeadEnd>,
     pub warnings: Vec<String>,
     pub profit_each: Option<Money>,
     pub sell_price: Option<Money>,
@@ -290,10 +325,17 @@ fn divide_round_half_away(numerator: i128, denominator: i128) -> Option<i128> {
     quotient.checked_add(step)
 }
 
+/// Whether the Blueprint filter and the skills toggle keep the row: the two filters both the
+/// table and the dead-end counts apply, before the shown reasons and the view.
+fn keeps(filters: &RankFilters, row: &RankRow) -> bool {
+    filters.blueprint.keeps(row) && (!filters.only_my_skills || row.needs_skills.is_none())
+}
+
 /// The rows the page shows: those the `filters` and the `view` keep, in the view's order. The
-/// blueprint filter and the skills toggle narrow first, then the view takes its rows and sorts
-/// them: profit a day for `BestPerDay` and `WithMyBlueprints`, margin for `BestMargin`, capital
-/// within `wallet` for `CheapToStart`. Missing values sort last and ties keep the feed order.
+/// blueprint filter and the skills toggle narrow first, then every row whose dead-end reason is
+/// not shown stays out, then the view takes its rows and sorts them: profit a day for
+/// `BestPerDay` and `WithMyBlueprints`, margin for `BestMargin`, capital within `wallet` for
+/// `CheapToStart`. Missing values sort last and ties keep the feed order.
 pub fn visible<'a>(
     rows: &'a [RankRow],
     filters: &RankFilters,
@@ -303,13 +345,46 @@ pub fn visible<'a>(
 ) -> Vec<&'a RankRow> {
     let mut shown: Vec<&RankRow> = rows
         .iter()
-        .filter(|row| filters.blueprint.keeps(row))
-        .filter(|row| !filters.only_my_skills || row.needs_skills.is_none())
+        .filter(|row| keeps(filters, row))
+        .filter(|row| {
+            row.dead
+                .is_none_or(|dead| filters.shown_dead.contains(&dead))
+        })
         .filter(|row| view.keeps(row, wallet))
         .collect();
     // A slice sorts stably, so rows the sort ties keep the order the feed gave them.
     shown.sort_by(|left, right| view.compare(left, right, share_percent));
     shown
+}
+
+/// How many rows each dead-end reason left out of the ranking, in [`DeadEnd::ALL`] order: after
+/// the blueprint filter and the skills toggle, before the shown reasons and the view. These are
+/// the counts the line under the table shows.
+pub fn dead_counts(rows: &[RankRow], filters: &RankFilters) -> [usize; 3] {
+    let count = |reason: DeadEnd| {
+        rows.iter()
+            .filter(|row| keeps(filters, row))
+            .filter(|row| row.dead == Some(reason))
+            .count()
+    };
+    DeadEnd::ALL.map(count)
+}
+
+/// One part of the dead line: `<count> <label>`.
+fn dead_part(reason: DeadEnd, count: usize) -> String {
+    format!("{count} {}", reason.label())
+}
+
+/// The counts as the line under the table shows them: every non-zero one as its [`dead_part`] in
+/// [`DeadEnd::ALL`] order, joined by ` · `. All zero counts give an empty line.
+pub fn dead_line(counts: &[usize; 3]) -> String {
+    DeadEnd::ALL
+        .into_iter()
+        .zip(*counts)
+        .filter(|&(_, count)| count > 0)
+        .map(|(reason, count)| dead_part(reason, count))
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// The login characters' wallets added up, `None` when any character's wallet has not been read
@@ -512,6 +587,38 @@ fn draw_filters(ui: &mut Ui, page: &mut WhatToBuildPage) {
     });
 }
 
+/// Draws the dead-end line under the table: one toggle per non-zero count, in `DeadEnd::ALL`
+/// order and joined by ` · `. A reason switched on adds its rows to the table; the counts on the
+/// line never move, and nothing is remembered between runs.
+fn draw_dead_line(ui: &mut Ui, page: &mut WhatToBuildPage, counts: &[usize; 3]) {
+    if counts.iter().all(|&count| count == 0) {
+        return;
+    }
+    ui.horizontal(|ui| {
+        let mut drawn = false;
+        for (reason, &count) in DeadEnd::ALL.iter().zip(counts) {
+            if count == 0 {
+                continue;
+            }
+            if drawn {
+                ui.label("·");
+            }
+            drawn = true;
+            let shown = page.filters.shown_dead.contains(reason);
+            if ui
+                .selectable_label(shown, dead_part(*reason, count))
+                .clicked()
+            {
+                if shown {
+                    page.filters.shown_dead.remove(reason);
+                } else {
+                    page.filters.shown_dead.insert(*reason);
+                }
+            }
+        }
+    });
+}
+
 /// Draws the page. Returns the page a button asks for, when one was clicked.
 pub fn show(ui: &mut Ui, page: &mut WhatToBuildPage, cx: &mut Shared) -> Option<Page> {
     ui.heading("What could I build?");
@@ -585,6 +692,10 @@ pub fn show(ui: &mut Ui, page: &mut WhatToBuildPage, cx: &mut Shared) -> Option<
     {
         cx.selection.item = Some(type_id);
     }
+    // The counts come from the whole feed through the blueprint and skills filters, so showing
+    // a reason adds rows without moving them.
+    let counts = dead_counts(&page.rows, &page.filters);
+    draw_dead_line(ui, page, &counts);
     if table_rows.is_empty() {
         return empty_state(ui, cx);
     }
@@ -643,6 +754,7 @@ mod tests {
             type_id: 2_456,
             name: name.to_owned(),
             blueprint: Blueprint::Owned { me: 10 },
+            dead: None,
             warnings: Vec::new(),
             profit_each: None,
             sell_price: None,
@@ -777,6 +889,7 @@ mod tests {
         let defaults = RankFilters::default();
         assert_eq!(defaults.blueprint, BlueprintFilter::All);
         assert!(!defaults.only_my_skills);
+        assert!(defaults.shown_dead.is_empty(), "every dead end starts out");
         assert_eq!(View::default(), View::BestPerDay, "the default view");
         assert_eq!(
             BlueprintFilter::ALL.map(BlueprintFilter::label),
@@ -847,6 +960,135 @@ mod tests {
 
         let shown = visible(&rows, &RankFilters::default(), View::BestPerDay, None, 5);
         assert_eq!(shown.len(), 4, "the toggle is off, so F stays");
+    }
+
+    /// The rows the dead-end tests rank: A is live; D and H are bought blueprints with no sales;
+    /// E has no facility that can build it; G can only come from a contract. At share 5 they
+    /// make 300.00, 200.00, 100.00, 50.00 and 10.00 a day, so `Best per day` ranks them A, D,
+    /// H, E, G.
+    fn dead_feed() -> Vec<RankRow> {
+        let dead = |name: &str, blueprint: Blueprint, profit_each: &str, dead: DeadEnd| RankRow {
+            profit_each: Some(money(profit_each)),
+            sell_price: Some(money("1,000.00")),
+            sells_day: Some(20),
+            capacity_day: Some(20),
+            blueprint,
+            dead: Some(dead),
+            ..row(name)
+        };
+        vec![
+            RankRow {
+                profit_each: Some(money("300.00")),
+                sell_price: Some(money("1,000.00")),
+                sells_day: Some(20),
+                capacity_day: Some(20),
+                ..row("A")
+            },
+            dead(
+                "D",
+                Blueprint::Buy {
+                    price: money("499,639.39"),
+                },
+                "200.00",
+                DeadEnd::NoSales,
+            ),
+            dead(
+                "H",
+                Blueprint::Buy {
+                    price: money("499,639.39"),
+                },
+                "100.00",
+                DeadEnd::NoSales,
+            ),
+            dead(
+                "E",
+                Blueprint::Owned { me: 10 },
+                "50.00",
+                DeadEnd::NoFacility,
+            ),
+            dead("G", Blueprint::ContractsOnly, "10.00", DeadEnd::NoBlueprint),
+        ]
+    }
+
+    #[test]
+    fn dead_ends_are_counted_by_reason_and_shown_again_by_their_toggle() {
+        let rows = dead_feed();
+        assert_eq!(
+            DeadEnd::ALL.map(DeadEnd::label),
+            [
+                "no sales in 30 days",
+                "no facility can build it",
+                "no blueprint for sale"
+            ]
+        );
+
+        let counts = dead_counts(&rows, &RankFilters::default());
+        assert_eq!(counts, [2, 1, 1], "D and H, then E, then G");
+        assert_eq!(
+            dead_line(&counts),
+            "2 no sales in 30 days · 1 no facility can build it · 1 no blueprint for sale"
+        );
+        assert_eq!(dead_line(&[0, 0, 0]), "", "no dead rows give an empty line");
+        assert_eq!(
+            dead_line(&[1, 0, 2]),
+            "1 no sales in 30 days · 2 no blueprint for sale",
+            "the zero count is left out"
+        );
+
+        let names = |filters: &RankFilters| {
+            visible(&rows, filters, View::BestPerDay, None, 5)
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(&RankFilters::default()),
+            ["A"],
+            "every dead end stays out"
+        );
+
+        let mut shown = RankFilters::default();
+        shown.shown_dead.insert(DeadEnd::NoSales);
+        assert_eq!(
+            names(&shown),
+            ["A", "D", "H"],
+            "their reason adds them after the live row"
+        );
+        assert_eq!(
+            dead_counts(&rows, &shown),
+            [2, 1, 1],
+            "showing a reason changes no count"
+        );
+    }
+
+    #[test]
+    fn the_dead_counts_follow_the_blueprint_and_skills_filters() {
+        let mut rows = dead_feed();
+        let mine = RankFilters {
+            blueprint: BlueprintFilter::Mine,
+            ..RankFilters::default()
+        };
+        assert_eq!(
+            dead_counts(&rows, &mine),
+            [0, 1, 0],
+            "D and H are bought, G comes from a contract"
+        );
+        assert_eq!(
+            dead_line(&dead_counts(&rows, &mine)),
+            "1 no facility can build it"
+        );
+
+        // H is the second dead row of the feed.
+        rows[2].needs_skills = Some("Drones V (you: III)".to_owned());
+        let skilled = RankFilters {
+            only_my_skills: true,
+            ..RankFilters::default()
+        };
+        assert_eq!(
+            dead_counts(&rows, &skilled),
+            [1, 1, 1],
+            "H needs a skill the toggle hides"
+        );
     }
 
     #[test]

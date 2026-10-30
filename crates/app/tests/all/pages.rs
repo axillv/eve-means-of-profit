@@ -19,11 +19,15 @@ mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
     use eve_means_of_profit::build::prices::Prices;
+    use eve_means_of_profit::claims::ClaimsState;
     use eve_means_of_profit::empty::{self, Fill};
     use eve_means_of_profit::rail::{self, Page};
-    use eve_means_of_profit::session::{EveAccess, PendingLogin};
+    use eve_means_of_profit::selection::Selection;
+    use eve_means_of_profit::session::{EveAccess, NoEve, PendingLogin, Session};
     use eve_means_of_profit::theme::Style;
-    use eve_means_of_profit::{App, AppConfig};
+    use eve_means_of_profit::what_to_build::{self, Blueprint, DeadEnd, RankRow, WhatToBuildPage};
+    use eve_means_of_profit::worker::Worker;
+    use eve_means_of_profit::{App, AppConfig, Shared};
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use mop_core::freight::Packing;
@@ -35,14 +39,16 @@ mod tests {
     };
     use mop_esi::characters::{Character, Login};
     use mop_esi::error::EsiError;
+    use mop_esi::industry::IndustryData;
     use mop_esi::places::{NamingReport, StructureNames};
     use mop_esi::saved;
     use mop_market::book::PriceRule;
+    use mop_market::cache::{Http, HttpResponse};
     use mop_market::error::MarketError;
     use mop_market::fuzzwork::{BytesHttp, BytesResponse, FORGE, Side, SummaryRow};
     use mop_sde::{Fetch, FetchError, import};
     use mop_store::price_history::{MarketKind, PointPrices};
-    use mop_store::{PlanRecord, Store};
+    use mop_store::{Density, PlanRecord, Store};
     use rusqlite::Connection;
     use tempfile::TempDir;
 
@@ -832,6 +838,191 @@ mod tests {
             .map(|node| node.rect().center().y)
             .collect();
         !rows.is_empty() && find(&harness.root(), value, &rows)
+    }
+
+    /// The PLEX market client that never answers: this page reads no PLEX.
+    struct NoPlex;
+
+    impl Http for NoPlex {
+        fn get(
+            &self,
+            _url: &str,
+            _if_none_match: Option<&str>,
+        ) -> Result<HttpResponse, MarketError> {
+            Err(MarketError::Network("not in this test".to_owned()))
+        }
+    }
+
+    /// The What to build page, the app state it draws with, and the folder its store lives in,
+    /// kept for as long as the harness.
+    struct WhatToBuildRig {
+        page: WhatToBuildPage,
+        cx: Shared,
+        _dir: TempDir,
+    }
+
+    /// The page drawn on its own with `rows` in it: the app's feed makes no rows yet, so the
+    /// dead-end test gives the page rows and a shared state of its own.
+    fn what_to_build_harness(rows: Vec<RankRow>) -> Harness<'static, WhatToBuildRig> {
+        let dir = TempDir::new().expect("a temp folder");
+        let store = Store::open(&dir.path().join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store;
+        let mut page = WhatToBuildPage::default();
+        page.rows = rows;
+        let rig = WhatToBuildRig {
+            page,
+            cx: Shared {
+                sde: None,
+                store,
+                worker: Worker::spawn(egui::Context::default(), Box::new(NoNetwork)),
+                market: Arc::new(Prices::new(Box::new(EmptyForge))),
+                plex_http: Arc::new(NoPlex),
+                copy_notices: Arc::new(Mutex::new(Vec::new())),
+                style: Style::eve_dense(),
+                density: Density::Normal,
+                rail_icons_only: false,
+                data_dir: dir.path().to_path_buf(),
+                notices: Vec::new(),
+                clock: Box::new(|| NOW),
+                session: Session::new(Box::new(NoEve)),
+                selection: Selection::default(),
+                industry: IndustryData::default(),
+                claims: ClaimsState::default(),
+            },
+            _dir: dir,
+        };
+        Harness::builder()
+            .with_size(vec2(1280.0, 800.0))
+            .build_ui_state(
+                move |ui, rig: &mut WhatToBuildRig| {
+                    rig.cx.style.apply(ui.ctx());
+                    let mut rail_page = Page::WhatToBuild;
+                    rail::show_with(ui, &rig.cx.style, &mut rail_page, rig.cx.rail_icons_only);
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        let opened = what_to_build::show(ui, &mut rig.page, &mut rig.cx);
+                        assert!(opened.is_none(), "the test clicks no page button");
+                    });
+                },
+                rig,
+            )
+    }
+
+    /// One row of the dead-ends fixture: 20 sales a day, so share 5 sells one unit, `profit_each`
+    /// a day for that unit, and `dead` saying why the ranking leaves the row out.
+    fn dead_row(
+        name: &str,
+        blueprint: Blueprint,
+        profit_each: &str,
+        dead: Option<DeadEnd>,
+    ) -> RankRow {
+        RankRow {
+            type_id: DRONE,
+            name: name.to_owned(),
+            blueprint,
+            dead,
+            warnings: Vec::new(),
+            profit_each: Some(Money::parse_isk(profit_each).expect("an amount")),
+            sell_price: Some(Money::parse_isk("1,000.00").expect("an amount")),
+            build_cost: None,
+            capital: None,
+            material_cost: None,
+            job_cost: None,
+            invention_cost: None,
+            fees: None,
+            middle: None,
+            spread: None,
+            sells_day: Some(20),
+            capacity_day: Some(20),
+            job_seconds: None,
+            sell_orders: None,
+            needs_skills: None,
+        }
+    }
+
+    /// The five rows the dead-end test counts: A is ranked; D and H are bought blueprints with
+    /// no sales; E has no facility that can build it; G can only come from a contract.
+    fn dead_rows() -> Vec<RankRow> {
+        let price = || Money::parse_isk("499,639.39").expect("an amount");
+        vec![
+            dead_row("A", Blueprint::Owned { me: 10 }, "300.00", None),
+            dead_row(
+                "D",
+                Blueprint::Buy { price: price() },
+                "200.00",
+                Some(DeadEnd::NoSales),
+            ),
+            dead_row(
+                "H",
+                Blueprint::Buy { price: price() },
+                "100.00",
+                Some(DeadEnd::NoSales),
+            ),
+            dead_row(
+                "E",
+                Blueprint::Owned { me: 10 },
+                "50.00",
+                Some(DeadEnd::NoFacility),
+            ),
+            dead_row(
+                "G",
+                Blueprint::ContractsOnly,
+                "10.00",
+                Some(DeadEnd::NoBlueprint),
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_dead_line_counts_the_rows_left_out_and_toggles_each_reason() {
+        let mut harness = what_to_build_harness(dead_rows());
+        harness.run();
+
+        let parts = [
+            "2 no sales in 30 days",
+            "1 no facility can build it",
+            "1 no blueprint for sale",
+        ];
+        for part in parts {
+            assert!(crate::ui::shown(&harness, part), "{part} is shown");
+        }
+        assert!(crate::ui::shown(&harness, "A"), "the live row is ranked");
+        assert!(!crate::ui::shown(&harness, "D"), "a dead row stays out");
+        let live = crate::ui::find(&harness, "A").expect("the live row").rect();
+        for part in parts {
+            let shown = crate::ui::find(&harness, part)
+                .unwrap_or_else(|| panic!("no node showing {part:?}"))
+                .rect();
+            assert!(
+                shown.min.y > live.bottom(),
+                "{part} is under the table's rows"
+            );
+        }
+
+        harness.set_size(vec2(1280.0, 800.0));
+        crate::ui::snapshot(&mut harness, "what-to-build-dead-ends");
+
+        crate::ui::click(&mut harness, "2 no sales in 30 days");
+        let live = crate::ui::find(&harness, "A").expect("the live row").rect();
+        let dead = crate::ui::find(&harness, "D")
+            .expect("its first row")
+            .rect();
+        assert!(crate::ui::shown(&harness, "H"), "both no-sales rows show");
+        assert!(live.min.y < dead.min.y, "they come after the live row");
+        assert!(
+            crate::ui::shown(&harness, "1 no facility can build it"),
+            "showing a reason changes no count"
+        );
+        assert!(
+            !crate::ui::shown(&harness, "E"),
+            "the other reasons stay out"
+        );
+
+        crate::ui::click(&mut harness, "2 no sales in 30 days");
+        assert!(
+            !crate::ui::shown(&harness, "D"),
+            "the toggle hides its rows again"
+        );
     }
 
     /// The rail's left edge. Every rail entry starts there; panel titles start to its right.
