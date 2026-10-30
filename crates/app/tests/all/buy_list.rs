@@ -1,5 +1,5 @@
 //! Acceptance tests for the Buy list panel: the rows and totals, the freight services, thin and
-//! missing prices, the typed prices, the refresh timer, the multibuy copy, and the screenshots. The
+//! missing prices, the typed prices, the refresh button, the multibuy copy, and the screenshots. The
 //! game data is the build 3607705 fixture. Prices come from a fake of Fuzzwork's summary file of
 //! The Forge, and the clock is a value the tests move.
 #[cfg(test)]
@@ -18,7 +18,6 @@ mod tests {
     use egui::{Event, Id, Key, Modifiers, MouseWheelUnit, OutputCommand, TouchPhase, Vec2, vec2};
     use egui_kittest::kittest::{NodeT, Queryable, by};
     use egui_kittest::{Harness, Node, SnapshotResults};
-    use eve_means_of_profit::build::prices::Prices;
     use eve_means_of_profit::rail::Page;
     use eve_means_of_profit::session::NoEve;
     use eve_means_of_profit::table::{copy_request, has_table};
@@ -447,17 +446,15 @@ mod tests {
             fetch: Box::new(NoNetwork),
             clock: Box::new(move || clock.load(Ordering::SeqCst)),
             eve: Box::new(NoEve),
-            market: Box::new(crate::offline::Offline),
+            market: Box::new(FakeForge {
+                state: Arc::clone(&world.forge),
+            }),
         };
-        let market = Arc::new(Prices::new(Box::new(FakeForge {
-            state: Arc::clone(&world.forge),
-        })));
         let mut harness = Harness::builder()
             .with_size(size)
             .with_max_steps(crate::SETTLE_STEPS)
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
         crate::ui::no_images(&mut harness);
-        harness.state_mut().shared_mut().market = market;
         harness.state_mut().show_page(Page::Build);
         harness
     }
@@ -995,7 +992,8 @@ mod tests {
         assert!(shown(&harness, " · collateral 1.40 M · delivered 1.51 M"));
         assert!(!shown(&harness, " incomplete"));
         assert!(shown(&harness, "Oldest: 4m"));
-        assert!(shown(&harness, "Next refresh in 15m"));
+        assert!(!shown(&harness, "Refresh automatically"));
+        assert!(!shown(&harness, "Next refresh in 15m"));
         assert!(has_value(&harness, "Cheapest (Alliance)"));
         assert!(shown(&harness, "1 contract"));
         let footer: Vec<String> = line_cells(&harness, harness.get_by_label("Total"))
@@ -1894,14 +1892,14 @@ mod tests {
     }
 
     #[test]
-    fn the_timer_asks_for_the_file_when_the_refresh_is_due_and_takes_a_new_one() {
+    fn the_start_download_is_the_only_automatic_one() {
         let world = World::new();
         let mut harness = complete_list(&world, &standard_services());
         assert_eq!(world.requests(), 1);
         world.at(NOW + 899);
         harness.run();
         assert_eq!(world.requests(), 1);
-        assert!(shown(&harness, "Next refresh in 1s"));
+        assert!(!shown(&harness, "Refresh automatically"));
         lock(&world.forge).publish(
             {
                 let mut lines = standard_lines();
@@ -1914,7 +1912,17 @@ mod tests {
             },
             NOW + 600,
         );
-        world.at(NOW + 900);
+        for at in [NOW + 900, NOW + 1_800] {
+            world.at(at);
+            for _ in 0..10 {
+                harness.run();
+            }
+            assert_eq!(world.requests(), 1, "no timer asks for the file");
+            assert!(shown(&harness, "27,500.00"));
+        }
+
+        // The player's refresh gets the new file.
+        click(&mut harness, "Refresh now");
         settle(&mut harness, "27,600.00");
         assert_eq!(world.requests(), 2);
         assert_eq!(
@@ -1924,11 +1932,9 @@ mod tests {
     }
 
     #[test]
-    fn with_the_timer_off_nothing_is_asked_until_the_player_asks() {
+    fn nothing_is_asked_after_the_start_download_until_the_player_asks() {
         let world = World::new();
         let mut harness = complete_list(&world, &standard_services());
-        click(&mut harness, "Refresh automatically");
-        assert!(shown(&harness, "Automatic refresh is off"));
         world.at(NOW + 5_000);
         harness.run();
         assert_eq!(world.requests(), 1);
@@ -1943,14 +1949,80 @@ mod tests {
     }
 
     #[test]
-    fn opening_the_list_with_no_prices_asks_once_even_with_the_timer_off() {
+    fn opening_the_list_with_no_prices_asks_once() {
         let world = World::new();
         let env = make_env(&standard_services());
         let mut harness = start(&env, &world);
         harness.run();
         buy_list_for(&mut harness);
-        click(&mut harness, "Refresh automatically");
         settle(&mut harness, "Oldest: 4m");
+        for _ in 0..20 {
+            harness.run();
+        }
+        assert_eq!(world.requests(), 1);
+    }
+
+    #[test]
+    fn a_saved_auto_refresh_setting_does_not_add_a_price_request() {
+        for auto in [true, false] {
+            let world = World::new();
+            let env = make_env(&standard_services());
+            let mut store = Store::open(&env.data.join("user.sqlite"), NOW)
+                .expect("the store opens")
+                .store;
+            let mut settings = store.history_settings().expect("history settings");
+            settings.auto_refresh = auto;
+            store
+                .save_history_settings(&settings)
+                .expect("history settings saved");
+
+            let mut harness = start(&env, &world);
+            let mut marks = Vec::new();
+            for _ in 0..500 {
+                harness.step();
+                marks.extend(
+                    harness
+                        .state_mut()
+                        .shared_mut()
+                        .market
+                        .take_outcomes()
+                        .into_iter()
+                        .map(|outcome| outcome.explicit),
+                );
+                if !marks.is_empty() && !harness.state_mut().shared_mut().market.running() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(marks, vec![false], "auto_refresh {auto}");
+            buy_list_for(&mut harness);
+            settle(&mut harness, "Oldest: 4m");
+            for _ in 0..20 {
+                harness.run();
+            }
+            assert_eq!(world.requests(), 1, "auto_refresh {auto}");
+        }
+    }
+
+    #[test]
+    fn refresh_all_at_the_rate_limit_shows_one_notice_and_keeps_the_rows() {
+        let world = World::new();
+        // The file is one second old when the start download holds it, so at +899 s it is 15m old.
+        lock(&world.forge).published = NOW - 1;
+        let env = make_env(&standard_services());
+        let mut harness = start(&env, &world);
+        harness.run();
+        buy_list_for(&mut harness);
+        settle(&mut harness, "Oldest: 1s");
+        assert_eq!(world.requests(), 1);
+
+        world.at(NOW + 899);
+        click(&mut harness, "Refresh all");
+        let notice = "Prices are 15m old; next refresh in 1s";
+        settle(&mut harness, notice);
+        assert_eq!(harness.query_all_by_label(notice).count(), 1);
+        assert_row(&harness, "Robotics", &["39,990.00"]);
+        // Too soon makes no request.
         assert_eq!(world.requests(), 1);
     }
 
@@ -2033,9 +2105,8 @@ mod tests {
         let mut harness = complete_list(&world, &standard_services());
         world.at(NOW + 900);
         lock(&world.forge).hold = true;
-        // The timer asks for the file; the request waits on the fake.
-        harness.run();
-        harness.run();
+        // The player asks for the file; the request waits on the fake.
+        click(&mut harness, "Refresh now");
         assert!(shown(&harness, "Refreshing…"));
         assert!(
             harness
@@ -2045,8 +2116,19 @@ mod tests {
         );
         assert_eq!(world.requests(), 1);
         lock(&world.forge).hold = false;
-        settle(&mut harness, "Next refresh in 15m");
+        for _ in 0..500 {
+            harness.run();
+            if !shown(&harness, "Refreshing…") {
+                break;
+            }
+        }
         assert_eq!(world.requests(), 2);
+        assert!(
+            !harness
+                .get_by_label("Refresh now")
+                .accesskit_node()
+                .is_disabled()
+        );
     }
 
     #[test]
@@ -2057,20 +2139,26 @@ mod tests {
         let mut harness = start(&env, &world);
         harness.run();
         buy_list_for(&mut harness);
-        click(&mut harness, "Refresh automatically");
         settle(&mut harness, "ERROR");
+        world.at(NOW + 900);
         for _ in 0..50 {
             harness.run();
         }
         assert_eq!(world.requests(), 1);
+        // The next request is the player's, not a timer's.
+        lock(&world.forge).fault = Fault::None;
+        click(&mut harness, "Refresh now");
+        settle(&mut harness, "27,500.00");
+        assert_eq!(world.requests(), 2);
     }
 
     #[test]
-    fn a_crashed_download_is_reported_and_the_timer_tries_again_later() {
+    fn a_crashed_download_is_reported_and_only_the_player_asks_again() {
         let world = World::new();
         let mut harness = complete_list(&world, &standard_services());
         lock(&world.forge).fault = Fault::Crash;
         world.at(NOW + 900);
+        click(&mut harness, "Refresh now");
         settle(
             &mut harness,
             "Could not get market prices: the download stopped unexpectedly.",
@@ -2088,10 +2176,20 @@ mod tests {
             harness.run();
         }
         assert_eq!(world.requests(), asked);
-        // Once the download works again, the timer asks at the time the failed one held back to.
+        // Once the download works again, only the player's refresh asks.
         lock(&world.forge).fault = Fault::None;
         world.at(NOW + 1_800);
-        settle(&mut harness, "Next refresh in 15m");
+        for _ in 0..10 {
+            harness.run();
+        }
+        assert_eq!(world.requests(), asked);
+        click(&mut harness, "Refresh now");
+        for _ in 0..500 {
+            harness.run();
+            if !shown(&harness, "Refreshing…") {
+                break;
+            }
+        }
         assert_eq!(world.requests(), asked + 1);
     }
 
@@ -2106,6 +2204,7 @@ mod tests {
             .worker
             .run(Box::new(|| panic!("a job crashed")));
         world.at(NOW + 900);
+        click(&mut harness, "Refresh now");
         settle(
             &mut harness,
             "Prices cannot refresh until the app restarts.",
@@ -2120,7 +2219,7 @@ mod tests {
     }
 
     #[test]
-    fn with_another_page_open_the_timer_request_still_runs() {
+    fn with_another_page_open_no_timer_request_runs() {
         let world = World::new();
         let mut harness = complete_list(&world, &standard_services());
         click(&mut harness, Page::Setup.label());
@@ -2128,12 +2227,12 @@ mod tests {
         for _ in 0..5 {
             harness.run();
         }
-        // The background refresh asks whatever page is open, so the timer's request runs on Setup.
-        assert_eq!(world.requests(), 2);
-        // Back on the Build page the list is drawn again, with the next refresh already set.
+        // Only the start download asked, whatever page is open.
+        assert_eq!(world.requests(), 1);
         click(&mut harness, "Build");
-        settle(&mut harness, "Next refresh in 15m");
-        assert_eq!(world.requests(), 2);
+        harness.run();
+        assert_eq!(world.requests(), 1);
+        assert!(!shown(&harness, "Next refresh in 15m"));
     }
 
     #[test]

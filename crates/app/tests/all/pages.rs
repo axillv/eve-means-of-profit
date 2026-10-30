@@ -1112,6 +1112,23 @@ mod tests {
     }
 
     #[test]
+    fn the_start_refresh_happens_once_and_never_repeats_on_its_own() {
+        let env = env();
+        saved::save_character(&esi_dir(&env), &main_data()).expect("Main's data saved");
+        let eve = FakeEve::new(vec![character(MAIN, "Main")], None);
+        let refreshes = eve.refreshes();
+        let mut harness = start(&env, eve, NOW);
+        loaded(&mut harness);
+        settle_start(&mut harness, &refreshes);
+        assert_eq!(*refreshes.lock().unwrap_or_else(PoisonError::into_inner), 1);
+
+        for _ in 0..20 {
+            harness.run();
+        }
+        assert_eq!(*refreshes.lock().unwrap_or_else(PoisonError::into_inner), 1);
+    }
+
+    #[test]
     fn data_of_a_day_or_less_gives_no_notice() {
         let env = env();
         saved::save_character(&esi_dir(&env), &main_data()).expect("Main's data saved");

@@ -1,7 +1,7 @@
-//! The price history while the app is open: the background refresh of the Forge prices, and the
-//! saving of one reading a day. The download runs on the worker thread, and the reading is saved
-//! from there through a second connection to the same file, so the screen's connection is never
-//! held up while a download is written.
+//! The price history while the app is open: saving one reading a day. The download runs on the
+//! worker thread, and the reading is saved from there through a second connection to the same
+//! file, so the screen's connection is never held up while a download is written. Nothing here
+//! starts a download: the start refresh and the player's buttons are the only requests.
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -12,12 +12,7 @@ use mop_market::fuzzwork::{FORGE, Side, SummaryRow};
 use mop_store::price_history::MarketKind;
 use mop_store::{Result, Store};
 
-use crate::Shared;
 use crate::build::prices::Held;
-use crate::status::Notice;
-
-/// The background check runs at most this often, in seconds.
-const CHECK_SECS: i64 = 60;
 
 /// Saves the readings of the Forge through its own connection to the history file.
 pub struct Recorder {
@@ -70,33 +65,6 @@ impl Recorder {
     /// The failures of the saves since the last call.
     pub fn take_errors(&self) -> Vec<String> {
         std::mem::take(&mut *lock(&self.errors))
-    }
-}
-
-/// Asks the worker for the Forge prices in the background when the setting is on: once at start,
-/// then when the market says the next refresh is due. Checked at most once a minute, whatever page
-/// is open. `last_check` holds the time of the last check.
-pub fn background_refresh(cx: &mut Shared, last_check: &mut Option<i64>) {
-    let now = (cx.clock)();
-    let due_check =
-        last_check.is_none_or(|at| now.checked_sub(at).is_none_or(|age| age >= CHECK_SECS));
-    if !due_check {
-        return;
-    }
-    *last_check = Some(now);
-    match cx.store.history_settings() {
-        Ok(settings) if settings.auto_refresh => {
-            let held = cx.market.held();
-            let first = held.published_at.is_none() && cx.market.ask_first();
-            let timer = held.next_refresh_at.is_some_and(|at| now >= at);
-            if first || timer {
-                cx.market.refresh(&cx.worker, now, false);
-            }
-        }
-        Ok(_) => {}
-        Err(error) => cx.notices.push(Notice::error(format!(
-            "Could not read the price history settings: {error}"
-        ))),
     }
 }
 

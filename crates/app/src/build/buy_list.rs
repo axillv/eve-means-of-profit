@@ -1,10 +1,11 @@
 //! The Buy list panel: what to buy for the plan on screen, what each line costs and how old its
 //! price is, the freight each service charges, and the delivered total. The list copies to EVE's
-//! multibuy window.
+//! multibuy window. Prices change only on the app's start request or the player's `Refresh now`
+//! button; nothing on this panel asks for them on a timer.
 
 use std::collections::BTreeMap;
 
-use egui::{Button, Checkbox, Id, RichText, TextEdit, Ui};
+use egui::{Button, Id, RichText, TextEdit, Ui};
 use mop_core::buylist::{BuyInput, BuyList, BuyRow, Delivered, LinePrice, buy_list};
 use mop_core::format::group_thousands;
 use mop_core::freight::{CargoLine, Contract, FreightQuote, Packing, RateCard};
@@ -152,8 +153,6 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Option<Edit> {
         show_outcome(cx, outcome, now);
     }
     let held = cx.market.held();
-    let mut auto = auto_refresh(cx);
-    ask_when_due(cx, &held, auto, now);
 
     load_typed(ui, cx, page.selected);
     let invention = match invention_lines(ui, page, record, plan, cx, &held) {
@@ -210,12 +209,6 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Option<Edit> {
             crate::table::resort_all(ui.ctx());
             cx.market.refresh(&cx.worker, now, true);
         }
-        if ui
-            .add(Checkbox::new(&mut auto, "Refresh automatically"))
-            .changed()
-        {
-            save_auto_refresh(cx, auto);
-        }
         copy_button(ui, &buy, cx);
         if column_menu(ui, &mut hidden) {
             // An id for a column the table no longer has is dropped when the list is saved.
@@ -237,10 +230,9 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Option<Edit> {
         delivered: &delivered,
         offers: &offers,
         record,
-        held: &held,
         views: &views,
     };
-    footer_line(ui, cx, &totals, auto, now);
+    footer_line(ui, cx, &totals);
     edit
 }
 
@@ -289,44 +281,6 @@ fn save_typed(cx: &mut Shared, saved: Option<i64>, typed: &[(TypeId, Option<Manu
         if let Err(error) = result {
             report(cx, format!("Could not save the price: {error}"));
         }
-    }
-}
-
-/// Whether the prices refresh in the background, as the setting is saved.
-fn auto_refresh(cx: &mut Shared) -> bool {
-    match cx.store.history_settings() {
-        Ok(settings) => settings.auto_refresh,
-        Err(error) => {
-            report(
-                cx,
-                format!("Could not read the price history settings: {error}"),
-            );
-            false
-        }
-    }
-}
-
-/// Saves whether the prices refresh in the background; the setting is shared with the Setup panel.
-fn save_auto_refresh(cx: &mut Shared, auto: bool) {
-    let saved = cx.store.history_settings().and_then(|mut settings| {
-        settings.auto_refresh = auto;
-        cx.store.save_history_settings(&settings)
-    });
-    if let Err(error) = saved {
-        report(
-            cx,
-            format!("Could not save the price history settings: {error}"),
-        );
-    }
-}
-
-/// Asks the worker for the file when it is due: the first download, once, even with the timer off;
-/// after that the timer asks when the market says the next refresh is due.
-fn ask_when_due(cx: &Shared, held: &Held, auto: bool, now: i64) {
-    let due = (held.published_at.is_none() && cx.market.ask_first())
-        || (auto && held.next_refresh_at.is_some_and(|at| now >= at));
-    if due {
-        cx.market.refresh(&cx.worker, now, false);
     }
 }
 
@@ -890,19 +844,18 @@ struct Totals<'a> {
     delivered: &'a Delivered,
     offers: &'a [Offer],
     record: &'a PlanRecord,
-    held: &'a Held,
     views: &'a BTreeMap<u64, View>,
 }
 
-/// The footer line, then the age of the oldest live price among the lines to buy, and the timer.
-/// The freight amount lists every service on hover, and an incomplete total says why on hover.
-fn footer_line(ui: &mut Ui, cx: &Shared, totals: &Totals, auto: bool, now: i64) {
+/// The footer line, then the age of the oldest live price among the lines to buy, and the state of
+/// a refresh that runs or has stopped. The freight amount lists every service on hover, and an
+/// incomplete total says why on hover.
+fn footer_line(ui: &mut Ui, cx: &Shared, totals: &Totals) {
     let &Totals {
         buy,
         delivered,
         offers,
         record,
-        held,
         views,
     } = totals;
     ui.horizontal_wrapped(|ui| {
@@ -973,20 +926,14 @@ fn footer_line(ui: &mut Ui, cx: &Shared, totals: &Totals, auto: bool, now: i64) 
             } else {
                 ui.label(text);
             }
-            ui.label(" · ");
+            if cx.market.running() || cx.market.stopped() {
+                ui.label(" · ");
+            }
         }
         if cx.market.running() {
             ui.label("Refreshing…");
         } else if cx.market.stopped() {
             ui.label("Prices cannot refresh until the app restarts.");
-        } else if !auto {
-            ui.label("Automatic refresh is off");
-        } else if let Some(at) = held.next_refresh_at {
-            ui.label(format!(
-                "Next refresh in {}",
-                // A floor at 0 is meant here: a refresh time already past shows as zero seconds left.
-                age_text(at.saturating_sub(now))
-            ));
         }
     });
 }

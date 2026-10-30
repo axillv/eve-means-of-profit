@@ -101,7 +101,6 @@ mod tests {
     }
 
     fn start_at(folders: &Folders, size: egui::Vec2) -> Harness<'static, App> {
-        history_off(&folders.data.join("user.sqlite"));
         let config = AppConfig {
             data_dir: folders.data.clone(),
             cache_dir: folders.cache.clone(),
@@ -306,16 +305,6 @@ mod tests {
     fn new_facility(harness: &mut Harness<'_, App>, name: &str) {
         click_nth(harness, "New", 0);
         type_into(harness, "Name", name);
-    }
-
-    /// The background price refresh stays off here: the test asks for each download itself.
-    fn history_off(db: &Path) {
-        let mut store = Store::open(db, NOW).expect("the store opens").store;
-        let mut settings = store.history_settings().expect("history settings");
-        settings.auto_refresh = false;
-        store
-            .save_history_settings(&settings)
-            .expect("history settings saved");
     }
 
     #[test]
@@ -870,6 +859,18 @@ mod tests {
             .expect("the store opens")
             .store;
         assert_eq!(store.point_prices_size().expect("the size"), (2, 3));
+    }
+
+    #[test]
+    fn the_price_history_panel_has_no_background_refresh_control() {
+        let folders = Folders::new();
+        let harness = start_at(&folders, vec2(1280.0, 1400.0));
+        assert!(!shown(&harness, "Refresh prices in the background"));
+        assert!(shown(&harness, "Keep at most"));
+        assert!(shown(
+            &harness,
+            "Kept for good: these prices cannot be fetched again, so no rule or limit above thins them."
+        ));
     }
 
     #[test]

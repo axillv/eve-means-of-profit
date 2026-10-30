@@ -17,7 +17,6 @@ mod tests {
     use egui::vec2;
     use egui_kittest::kittest::{Queryable, by};
     use egui_kittest::{Harness, SnapshotResults};
-    use eve_means_of_profit::build::prices::Prices;
     use eve_means_of_profit::session::eve::save_fetched;
     use eve_means_of_profit::session::{EveAccess, NoEve, PendingLogin};
     use eve_means_of_profit::{App, AppConfig};
@@ -385,14 +384,13 @@ mod tests {
             fetch: Box::new(NoNetwork),
             clock: Box::new(|| NOW),
             eve,
-            market: Box::new(crate::offline::Offline),
+            market: Box::new(FakeForge),
         };
         let mut harness = Harness::builder()
             .with_size(size)
             .with_max_steps(crate::SETTLE_STEPS)
             .build_eframe(move |cc| App::new(&cc.egui_ctx, config).expect("the app starts"));
         crate::ui::no_images(&mut harness);
-        harness.state_mut().shared_mut().market = Arc::new(Prices::new(Box::new(FakeForge)));
         harness
             .state_mut()
             .show_page(eve_means_of_profit::rail::Page::Build);

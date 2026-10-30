@@ -2,7 +2,7 @@
 //! room they take, with the settings that change them. The sizes are estimates; the footer shows
 //! the file's real size.
 
-use egui::{Button, Checkbox, ComboBox, Id, ScrollArea, TextEdit, Ui};
+use egui::{Button, ComboBox, Id, ScrollArea, TextEdit, Ui};
 use mop_core::price_history::{Retention, RetentionError, estimated_bytes, readings_kept};
 use mop_market::fuzzwork::FORGE;
 use mop_store::StoreError;
@@ -56,7 +56,6 @@ impl Unit {
 struct Snapshot {
     markets: Vec<HistoryMarket>,
     usage: Vec<MarketUsage>,
-    auto_refresh: bool,
     database: u64,
     /// The saved net worth price copies: how many, and how many price rows they hold.
     copies: (u64, u64),
@@ -166,13 +165,6 @@ fn draw(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
 
     ui.add_space(8.0);
     limit_form(panel, ui, cx);
-    let mut auto = snapshot.auto_refresh;
-    if ui
-        .add(Checkbox::new(&mut auto, "Refresh prices in the background"))
-        .changed()
-    {
-        change_settings(panel, cx, |settings| settings.auto_refresh = auto);
-    }
 
     let total = snapshot
         .usage
@@ -224,7 +216,6 @@ fn load(panel: &mut Panel, cx: &mut Shared, now: i64) -> Result<(), StoreError> 
     panel.snapshot = Some(Snapshot {
         markets,
         usage,
-        auto_refresh: settings.auto_refresh,
         database,
         copies,
         at: now,

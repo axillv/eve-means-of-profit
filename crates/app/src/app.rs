@@ -540,8 +540,6 @@ pub struct App {
     update: Option<(u64, Option<u64>)>,
     /// Saves the readings of the downloads; the Setup panel reads the history through the shared store.
     recorder: Arc<history::Recorder>,
-    /// When the background refresh last checked, in seconds.
-    history_checked: Option<i64>,
     events: Receiver<Event>,
     events_tx: Sender<Event>,
     page: Page,
@@ -601,10 +599,6 @@ impl IndustryTimings {
 impl App {
     /// Opens the databases and starts the first-run download, or the daily check when the game
     /// data is due for one. Fails only when a database cannot be opened or read.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "start-up opens every database and wires every page and worker"
-    )]
     pub fn new(ctx: &Context, config: AppConfig) -> Result<Self, Box<dyn Error + Send + Sync>> {
         fs::create_dir_all(&config.data_dir)?;
         fs::create_dir_all(&config.cache_dir)?;
@@ -670,7 +664,6 @@ impl App {
             installed,
             update: None,
             recorder,
-            history_checked: None,
             events,
             events_tx,
             page: Page::Today,
@@ -729,7 +722,6 @@ impl App {
     pub fn show(&mut self, ui: &mut Ui) {
         self.drain_events();
         characters::tick(&mut self.shared, &self.ctx);
-        history::background_refresh(&mut self.shared, &mut self.history_checked);
         self.refresh_industry_when_due();
         net_worth::record::tick(
             &mut self.shared,
@@ -1240,6 +1232,8 @@ impl App {
             ))),
         }
         self.shared.session.mark_loaded();
+        // The one automatic refresh: characters and prices are asked once, when the saved session
+        // has loaded. After this only a player's button or a finished login asks again.
         characters::refresh_all(&mut self.shared, &self.ctx, false);
     }
 
