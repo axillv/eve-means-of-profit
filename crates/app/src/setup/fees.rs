@@ -1,10 +1,7 @@
 //! The Fees and skills panel: the skills and standings of the character who sells, which set the
 //! sales tax and the broker fee paid at Jita 4-4, and a broker fee typed by hand.
 
-use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::{Arc, Mutex, PoisonError};
-
-use egui::{Button, ComboBox, Context, Id, RichText, Ui};
+use egui::{ComboBox, Id, RichText, Ui};
 use mop_core::fees::{Standing, npc_broker_rate, sales_tax_rate};
 use mop_core::industry::TypeId;
 use mop_core::money::Rate;
@@ -14,7 +11,6 @@ use mop_store::FeeSettings;
 
 use super::fields::{percent, text_field};
 use crate::Shared;
-use crate::session::lock_eve;
 use crate::status::Notice;
 use crate::theme::Style;
 
@@ -29,21 +25,7 @@ const BROKER_RELATIONS: TypeId = 3_446;
 /// The Caldari State faction and the Caldari Navy corporation.
 const CALDARI_STATE: u32 = 500_001;
 const CALDARI_NAVY: u32 = 1_000_035;
-const NO_CHARACTER: &str = "No character logged in";
-const READING: &str = "Reading…";
 const REFUSED: &str = "EVE refused. Log in again and allow skills and standings.";
-
-/// What one read answers: the character's skills and standings, or why they could not be read.
-type ReadResult = Result<(CharacterSkills, Vec<NpcStanding>), EsiError>;
-/// The channel a read's answer comes back on.
-type ReadChannel = Arc<Mutex<Receiver<ReadResult>>>;
-
-/// The read the panel waits for: the character's name and the channel the worker answers on.
-#[derive(Debug, Clone)]
-struct Reading {
-    name: String,
-    result: ReadChannel,
-}
 
 /// What the panel keeps between frames: the text of each field, and what the store holds.
 #[derive(Debug, Clone, Default)]
@@ -63,7 +45,7 @@ struct Panel {
     /// The character the read dropdown shows.
     character: Option<u64>,
     /// The read in flight, if one is.
-    reading: Option<Reading>,
+    reading: Option<super::Reading>,
 }
 
 impl Panel {
@@ -95,9 +77,29 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Shared) {
     if !panel.tried {
         load(&mut panel, cx);
     }
-    take_read(&mut panel, cx);
+    if let Some(answer) = super::take_read(&mut panel.reading, cx) {
+        apply_read(&mut panel, cx, answer);
+    }
     draw(&mut panel, ui, cx);
     ui.data_mut(|data| data.insert_temp(id, panel));
+}
+
+/// The fields take a good read's skills and standings, and the settings are saved. A save that
+/// fails leaves the typed fields as they were.
+fn apply_read(panel: &mut Panel, cx: &mut Shared, answer: super::ReadAnswer) {
+    let super::ReadAnswer {
+        name,
+        skills,
+        standings,
+    } = answer;
+    let settings = fees_from(&skills, &standings, panel.saved);
+    put_fields(panel, settings);
+    save(panel, cx, settings);
+    if panel.failed.is_none() {
+        cx.notices.push(Notice::info(format!(
+            "Read skills and standings from {name}."
+        )));
+    }
 }
 
 /// Reads the store once. A read that fails shows a notice once, and the fields stay unsaved.
@@ -108,126 +110,6 @@ fn load(panel: &mut Panel, cx: &mut Shared) {
         Err(error) => cx
             .notices
             .push(Notice::error(format!("Could not load the fees: {error}"))),
-    }
-}
-
-/// The panel's first row: pick a logged-in character and read its skills and standings.
-fn read_row(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
-    let characters: Vec<(u64, String)> = cx
-        .session
-        .characters()
-        .iter()
-        .map(|character| (character.id, character.name.clone()))
-        .collect();
-    let known = panel
-        .character
-        .is_some_and(|id| characters.iter().any(|(held, _)| *held == id));
-    if !known {
-        panel.character = characters.first().map(|(id, _)| *id);
-    }
-    ui.horizontal(|ui| {
-        ui.label("Read from character");
-        if characters.is_empty() {
-            ui.add_enabled_ui(false, |ui| {
-                ComboBox::from_id_salt("fee read character")
-                    .selected_text(NO_CHARACTER)
-                    .show_ui(ui, |_ui| {});
-            });
-            ui.add_enabled(false, Button::new("Read"));
-        } else {
-            let selected = panel
-                .character
-                .and_then(|id| characters.iter().find(|(held, _)| *held == id))
-                .map_or_else(|| NO_CHARACTER.to_owned(), |(_, name)| name.clone());
-            ComboBox::from_id_salt("fee read character")
-                .selected_text(selected)
-                .show_ui(ui, |ui| {
-                    for (id, name) in &characters {
-                        ui.selectable_value(&mut panel.character, Some(*id), name);
-                    }
-                });
-            let busy = panel.reading.is_some();
-            let button = ui.add_enabled(!busy, Button::new(if busy { READING } else { "Read" }));
-            if button.clicked() {
-                start_read(panel, cx, ui.ctx());
-            }
-        }
-    });
-}
-
-/// Asks the worker for one character's skills and standings. The answer comes back on a channel
-/// the panel keeps, and is taken in by [`take_read`].
-fn start_read(panel: &mut Panel, cx: &mut Shared, ctx: &Context) {
-    let Some(id) = panel.character else {
-        return;
-    };
-    let Some(name) = cx
-        .session
-        .characters()
-        .iter()
-        .find(|character| character.id == id)
-        .map(|character| character.name.clone())
-    else {
-        return;
-    };
-    let eve = cx.session.eve();
-    let now = (cx.clock)();
-    let (tx, rx) = mpsc::channel();
-    panel.reading = Some(Reading {
-        name,
-        result: Arc::new(Mutex::new(rx)),
-    });
-    let ctx = ctx.clone();
-    let job = move || {
-        let result = lock_eve(&eve).read_skills_and_standings(id, now);
-        drop(tx.send(result));
-        ctx.request_repaint();
-    };
-    if !cx.worker.run(Box::new(job)) {
-        panel.reading = None;
-        cx.notices.push(Notice::error(
-            "The background worker has stopped. Restart the app.",
-        ));
-    }
-}
-
-/// Takes in the answer of the read, when it has come back. A good answer replaces the fields and
-/// saves them; a failure leaves the fields as they were.
-fn take_read(panel: &mut Panel, cx: &mut Shared) {
-    let Some(reading) = &panel.reading else {
-        return;
-    };
-    let received = reading
-        .result
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .try_recv();
-    match received {
-        Ok(result) => {
-            let name = reading.name.clone();
-            panel.reading = None;
-            match result {
-                Ok((skills, standings)) => {
-                    let settings = fees_from(&skills, &standings, panel.saved);
-                    put_fields(panel, settings);
-                    save(panel, cx, settings);
-                    if panel.failed.is_none() {
-                        cx.notices.push(Notice::info(format!(
-                            "Read skills and standings from {name}."
-                        )));
-                    }
-                }
-                Err(error) => cx.notices.push(Notice::error(read_error(&name, &error))),
-            }
-        }
-        Err(TryRecvError::Empty) => {}
-        Err(TryRecvError::Disconnected) => {
-            let name = reading.name.clone();
-            panel.reading = None;
-            cx.notices.push(Notice::error(format!(
-                "Could not read {name}: the read stopped unexpectedly."
-            )));
-        }
     }
 }
 
@@ -287,7 +169,13 @@ pub(super) fn read_error(name: &str, error: &EsiError) -> String {
 
 fn draw(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
     let style = cx.style;
-    read_row(panel, ui, cx);
+    super::read_row(
+        &mut panel.character,
+        &mut panel.reading,
+        ui,
+        cx,
+        "fee read character",
+    );
     ui.label(RichText::new(MUTE_LINE).color(style.mute));
     skill_field(ui, "Accounting", &mut panel.accounting);
     skill_field(ui, "Broker Relations", &mut panel.broker_relations);
