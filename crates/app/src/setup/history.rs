@@ -111,6 +111,19 @@ pub fn format_bytes(bytes: u64) -> String {
     format!("{}.{} {label}", tenths / 10, tenths % 10)
 }
 
+/// The footer's total line. The database file size is left out when a picture is being taken, so
+/// that adding a table or rows does not change the picture.
+fn footer_text(total: &str, database: u64, hidden: bool) -> String {
+    if hidden {
+        format!("Total {total} estimated")
+    } else {
+        format!(
+            "Total {total} estimated · database file {}",
+            format_bytes(database)
+        )
+    }
+}
+
 fn draw(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
     ui.colored_label(cx.style.mute, MUTE);
     let now = (cx.clock)();
@@ -172,14 +185,7 @@ fn draw(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
         .try_fold(0u64, |sum, usage| sum.checked_add(usage.estimated_bytes));
     let total = total.map_or(NO_VALUE.to_owned(), format_bytes);
     let hidden = ui.data(|data| data.get_temp::<HideDatabaseSize>(Id::NULL).is_some());
-    if hidden {
-        ui.label(format!("Total {total} estimated"));
-    } else {
-        ui.label(format!(
-            "Total {total} estimated · database file {}",
-            format_bytes(snapshot.database)
-        ));
-    }
+    ui.label(footer_text(&total, snapshot.database, hidden));
     ui.label(net_worth_prices_text(snapshot.copies.0, snapshot.copies.1));
     ui.colored_label(cx.style.mute, KEPT_FOR_GOOD);
 }
@@ -495,7 +501,19 @@ fn remove_market(panel: &mut Panel, cx: &mut Shared, market: i64, name: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::net_worth_prices_text;
+    use super::{footer_text, net_worth_prices_text};
+
+    #[test]
+    fn the_footer_line_leaves_the_database_size_out_when_a_picture_is_taken() {
+        assert_eq!(
+            footer_text("39.0 kB", 204_800, true),
+            "Total 39.0 kB estimated"
+        );
+        assert_eq!(
+            footer_text("39.0 kB", 204_800, false),
+            "Total 39.0 kB estimated · database file 204.8 kB"
+        );
+    }
 
     #[test]
     fn the_net_worth_line_counts_the_copies_and_their_rows() {

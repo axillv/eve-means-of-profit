@@ -188,16 +188,22 @@ pub(crate) fn coloured<S>(harness: &mut Harness<'_, S>, area: egui::Rect) -> boo
     })
 }
 
-/// Takes a picture named `name` of the harness as it is, with the database file size left out of
-/// the price history footer: the size changes with every table and row, so it must never be in a
-/// picture. Every picture goes through here.
-pub(crate) fn picture<S>(harness: &mut Harness<'_, S>, name: &str) {
+/// Leaves the database file size out of the price history footer, so a picture does not change
+/// with the number of tables and rows.
+pub(crate) fn hide_database_size<S>(harness: &Harness<'_, S>) {
     harness.ctx.data_mut(|data| {
         data.insert_temp(
             egui::Id::NULL,
             eve_means_of_profit::setup::history::HideDatabaseSize,
         );
     });
+}
+
+/// Takes a picture named `name` of the harness as it is, with the database file size left out of
+/// the price history footer: the size changes with every table and row, so it must never be in a
+/// picture. Every picture goes through here.
+pub(crate) fn picture<S>(harness: &mut Harness<'_, S>, name: &str) {
+    hide_database_size(harness);
     harness.run_steps(1);
     harness.snapshot(name);
 }

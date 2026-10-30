@@ -878,6 +878,7 @@ mod tests {
         let folders = Folders::new();
         seed_forge_history(&folders);
         let mut harness = start_at(&folders, vec2(1280.0, 800.0));
+        crate::ui::hide_database_size(&harness);
         harness.run_steps(2);
         click_nth(&mut harness, "The Forge", 0);
         harness.run_steps(3);
@@ -885,6 +886,10 @@ mod tests {
             &harness,
             "Forecast for The Forge: about 39.0 kB after 1 year"
         ));
+        assert!(
+            !shown(&harness, "database file"),
+            "the picture leaves the database file size out"
+        );
         crate::ui::picture(&mut harness, "history-panel");
     }
 
@@ -892,6 +897,7 @@ mod tests {
     fn the_setup_pictures_for_the_owner_are_taken() {
         let folders = Folders::new();
         let mut harness = start_at(&folders, vec2(1280.0, 800.0));
+        crate::ui::hide_database_size(&harness);
         new_facility(&mut harness, "Raitaru null");
         click_combo(&mut harness, "NPC station", 0);
         click_nth(&mut harness, "Raitaru", 0);

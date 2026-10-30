@@ -388,6 +388,7 @@ mod tests {
     fn the_invention_picture_is_taken_for_the_owner() {
         let folders = Folders::fixed();
         let mut harness = start_at(&folders, vec2(1280.0, 1400.0));
+        crate::ui::hide_database_size(&harness);
         open_invention(&mut harness);
         click_combo(&mut harness, "assumed 0", 0);
         click_nth(&mut harness, "4", 0);
