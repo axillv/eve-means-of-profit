@@ -4,7 +4,7 @@
 //! out of the ranking and counted on a line under the table, each reason a toggle showing its rows.
 
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use egui::{ComboBox, Id, RichText, Ui};
 
@@ -385,6 +385,163 @@ pub fn dead_line(counts: &[usize; 3]) -> String {
         .map(|(reason, count)| dead_part(reason, count))
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+/// One character's free manufacturing slots: the slots a plan for the ticked rows could use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CharacterSlots {
+    pub id: u64,
+    pub free_manufacturing: u32,
+}
+
+/// The rows whose product is ticked, in feed order.
+pub fn ticked_rows<'a>(rows: &'a [RankRow], ticked: &BTreeSet<TypeId>) -> Vec<&'a RankRow> {
+    rows.iter()
+        .filter(|row| ticked.contains(&row.type_id))
+        .collect()
+}
+
+/// Whether the ticked rows' job-days fit the characters' free manufacturing slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fit {
+    /// Nothing is ticked, so there is nothing to fit.
+    Empty,
+    /// Some ticked rows have no job time; `days` is the known time so far and `missing` counts
+    /// the rows without a time.
+    UnknownJobTime {
+        products: usize,
+        days: u64,
+        missing: usize,
+    },
+    /// Every job time is known, but no character's free slots are.
+    UnknownSlots { products: usize, days: u64 },
+    /// The free slots cover the job-days.
+    Fits {
+        products: usize,
+        days: u64,
+        characters: usize,
+        slots: u64,
+    },
+    /// The free slots do not cover the job-days.
+    TooMany {
+        products: usize,
+        days: u64,
+        characters: usize,
+        slots: u64,
+    },
+}
+
+/// Fits the ticked `rows` against the characters' `slots`, with each product's job time in
+/// `job_days`. The days add up in feed order. A row without a job time gives
+/// [`Fit::UnknownJobTime`]; once every time is known, no slots gives [`Fit::UnknownSlots`].
+pub fn fit(rows: &[&RankRow], slots: &[CharacterSlots], job_days: &BTreeMap<TypeId, u32>) -> Fit {
+    if rows.is_empty() {
+        return Fit::Empty;
+    }
+    let products = rows.len();
+    let mut days = 0_u64;
+    let mut missing = 0_usize;
+    for row in rows {
+        match job_days.get(&row.type_id) {
+            Some(&known) => days += u64::from(known),
+            None => missing += 1,
+        }
+    }
+    if missing > 0 {
+        return Fit::UnknownJobTime {
+            products,
+            days,
+            missing,
+        };
+    }
+    let characters = slots.len();
+    let total: u64 = slots
+        .iter()
+        .map(|character| u64::from(character.free_manufacturing))
+        .sum();
+    if slots.is_empty() {
+        return Fit::UnknownSlots { products, days };
+    }
+    if days <= total {
+        Fit::Fits {
+            products,
+            days,
+            characters,
+            slots: total,
+        }
+    } else {
+        Fit::TooMany {
+            products,
+            days,
+            characters,
+            slots: total,
+        }
+    }
+}
+
+/// The words of the fit: what the ticked rows need and whether the slots cover it. Empty for
+/// [`Fit::Empty`].
+pub fn fit_line(fit: &Fit) -> String {
+    match *fit {
+        Fit::Empty => String::new(),
+        Fit::UnknownJobTime {
+            products,
+            days,
+            missing,
+        } => format!(
+            "{} about {days} job-days so far; job time is not known for {missing} of them.",
+            need(products)
+        ),
+        Fit::UnknownSlots { products, days } => format!(
+            "{} about {days} job-days; free manufacturing slots are not known yet.",
+            need(products)
+        ),
+        Fit::Fits {
+            products,
+            days,
+            characters,
+            slots,
+        } => format!(
+            "{} about {days} job-days; {} {slots} free manufacturing {}.",
+            need(products),
+            have(characters),
+            slot_word(slots)
+        ),
+        Fit::TooMany {
+            products,
+            days,
+            characters,
+            slots,
+        } => format!(
+            "{} about {days} job-days; {} only {slots} free manufacturing {}.",
+            need(products),
+            have(characters),
+            slot_word(slots)
+        ),
+    }
+}
+
+/// `These 3 need`, or `This product needs` for one.
+fn need(products: usize) -> String {
+    if products == 1 {
+        "This product needs".to_owned()
+    } else {
+        format!("These {products} need")
+    }
+}
+
+/// `your 2 characters have`, or `your 1 character has`.
+fn have(characters: usize) -> String {
+    if characters == 1 {
+        "your 1 character has".to_owned()
+    } else {
+        format!("your {characters} characters have")
+    }
+}
+
+/// `slots`, or `slot` for one.
+fn slot_word(slots: u64) -> &'static str {
+    if slots == 1 { "slot" } else { "slots" }
 }
 
 /// The login characters' wallets added up, `None` when any character's wallet has not been read
@@ -1088,6 +1245,171 @@ mod tests {
             dead_counts(&rows, &skilled),
             [1, 1, 1],
             "H needs a skill the toggle hides"
+        );
+    }
+
+    /// Three rows with ids 1, 2 and 3, named after their ids.
+    fn slot_feed() -> Vec<RankRow> {
+        (1..=3)
+            .map(|id| RankRow {
+                type_id: id,
+                ..row(&id.to_string())
+            })
+            .collect()
+    }
+
+    /// The job times of the given `(type_id, days)` pairs.
+    fn job_days(entries: &[(TypeId, u32)]) -> BTreeMap<TypeId, u32> {
+        entries.iter().copied().collect()
+    }
+
+    /// One character per amount of free manufacturing slots.
+    fn character_slots(amounts: &[u32]) -> Vec<CharacterSlots> {
+        amounts
+            .iter()
+            .enumerate()
+            .map(|(index, &free_manufacturing)| CharacterSlots {
+                id: u64::try_from(index + 1).expect("a small id"),
+                free_manufacturing,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_ticked_rows_keep_the_feed_order_and_leave_the_others_out() {
+        let rows = slot_feed();
+        let ticked = BTreeSet::from([3, 1]);
+        let shown = ticked_rows(&rows, &ticked);
+        assert_eq!(
+            shown.iter().map(|row| row.type_id).collect::<Vec<_>>(),
+            [1, 3],
+            "feed order, only the ticked ids"
+        );
+        assert!(ticked_rows(&rows, &BTreeSet::new()).is_empty());
+    }
+
+    #[test]
+    fn three_products_with_nine_job_days_fit_twenty_free_slots() {
+        let rows = slot_feed();
+        let ticked: Vec<&RankRow> = rows.iter().collect();
+        let times = job_days(&[(1, 3), (2, 2), (3, 4)]);
+        let fit = fit(&ticked, &character_slots(&[10, 10]), &times);
+        assert_eq!(
+            fit,
+            Fit::Fits {
+                products: 3,
+                days: 9,
+                characters: 2,
+                slots: 20,
+            }
+        );
+        assert_eq!(
+            fit_line(&fit),
+            "These 3 need about 9 job-days; your 2 characters have 20 free manufacturing slots."
+        );
+    }
+
+    #[test]
+    fn nine_job_days_do_not_fit_six_free_slots() {
+        let rows = slot_feed();
+        let ticked: Vec<&RankRow> = rows.iter().collect();
+        let times = job_days(&[(1, 3), (2, 2), (3, 4)]);
+        let too_many = fit(&ticked, &character_slots(&[4, 2]), &times);
+        assert_eq!(
+            too_many,
+            Fit::TooMany {
+                products: 3,
+                days: 9,
+                characters: 2,
+                slots: 6,
+            }
+        );
+        assert_eq!(
+            fit_line(&too_many),
+            "These 3 need about 9 job-days; your 2 characters have only 6 free manufacturing slots."
+        );
+
+        let exact = fit(&ticked, &character_slots(&[5, 4]), &times);
+        assert!(
+            matches!(exact, Fit::Fits { slots: 9, .. }),
+            "exactly enough slots still fit: {exact:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_job_time_gives_the_days_known_so_far() {
+        let rows = slot_feed();
+        let ticked: Vec<&RankRow> = rows.iter().collect();
+        let times = job_days(&[(1, 3), (2, 4)]);
+        let unknown = fit(&ticked, &character_slots(&[10, 10]), &times);
+        assert_eq!(
+            unknown,
+            Fit::UnknownJobTime {
+                products: 3,
+                days: 7,
+                missing: 1,
+            }
+        );
+        assert_eq!(
+            fit_line(&unknown),
+            "These 3 need about 7 job-days so far; job time is not known for 1 of them."
+        );
+
+        let none = fit(&ticked, &[], &times);
+        assert!(
+            matches!(none, Fit::UnknownJobTime { missing: 1, .. }),
+            "an unknown job time comes before unknown slots: {none:?}"
+        );
+    }
+
+    #[test]
+    fn known_job_times_with_no_slots_leave_the_slots_unknown() {
+        let rows = slot_feed();
+        let ticked: Vec<&RankRow> = rows.iter().collect();
+        let times = job_days(&[(1, 3), (2, 2), (3, 4)]);
+        let fit = fit(&ticked, &[], &times);
+        assert_eq!(
+            fit,
+            Fit::UnknownSlots {
+                products: 3,
+                days: 9,
+            }
+        );
+        assert_eq!(
+            fit_line(&fit),
+            "These 3 need about 9 job-days; free manufacturing slots are not known yet."
+        );
+    }
+
+    #[test]
+    fn no_ticked_rows_is_an_empty_fit_and_an_empty_line() {
+        let fit = fit(&[], &[], &BTreeMap::new());
+        assert_eq!(fit, Fit::Empty);
+        assert_eq!(fit_line(&fit), "");
+    }
+
+    #[test]
+    fn one_product_one_character_and_one_slot_take_the_singular_words() {
+        let rows = slot_feed();
+        let ticked = [&rows[0]];
+        let times = job_days(&[(1, 1)]);
+        let fitted = fit(&ticked, &character_slots(&[1]), &times);
+        assert_eq!(
+            fit_line(&fitted),
+            "This product needs about 1 job-days; your 1 character has 1 free manufacturing slot."
+        );
+
+        let unknown_time = fit(&ticked, &[], &job_days(&[]));
+        assert_eq!(
+            fit_line(&unknown_time),
+            "This product needs about 0 job-days so far; job time is not known for 1 of them."
+        );
+
+        let all = rows.iter().collect::<Vec<_>>();
+        let all_unknown = fit(&all, &character_slots(&[20]), &job_days(&[]));
+        assert_eq!(
+            fit_line(&all_unknown),
+            "These 3 need about 0 job-days so far; job time is not known for 3 of them."
         );
     }
 
