@@ -1377,7 +1377,7 @@ mod tests {
         }
     }
 
-    /// M1-163's sample: Main's 40, 120, 3, the Rifter with 10 inside it; Alt's 60 and Hauler's 5.
+    /// The sample: Main's 40, 120, 3, the Rifter with 10 inside it; Alt's 60 and Hauler's 5.
     fn sample() -> Vec<ResolvedAsset> {
         vec![
             asset(MAIN, 1, RAM, JITA, JITA, 40, false, "Hangar"),
