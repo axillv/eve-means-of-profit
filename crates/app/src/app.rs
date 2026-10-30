@@ -28,6 +28,7 @@ pub mod stockpiles;
 pub mod table;
 pub mod theme;
 pub mod today;
+pub mod what_to_build;
 pub mod worker;
 
 use std::collections::BTreeMap;
@@ -73,6 +74,7 @@ use setup::{SetupPage, SetupPanel};
 use status::{Action, Notice};
 use stockpiles::{StockpilesPage, StockpilesPanel};
 use theme::Style;
+use what_to_build::WhatToBuildPage;
 use worker::{Job, Worker, lock};
 
 const USER_DB: &str = "user.sqlite";
@@ -469,6 +471,7 @@ fn show_stockpiles_panel(key: &str, ui: &mut Ui, page: &mut StockpilesPage, cx: 
 fn page_icon(page: Page) -> &'static str {
     match page {
         Page::Today => regular::SUN,
+        Page::WhatToBuild => regular::COMPASS,
         Page::Build => regular::HAMMER,
         Page::Stockpiles => regular::STACK,
         Page::Assets => regular::PACKAGE,
@@ -482,7 +485,7 @@ fn page_icon(page: Page) -> &'static str {
 
 /// Whether a page entry starts a group, and so has a line above it.
 fn page_starts_group(page: Page) -> bool {
-    matches!(page, Page::Build | Page::Assets | Page::Characters)
+    matches!(page, Page::WhatToBuild | Page::Assets | Page::Characters)
 }
 
 /// Draws the line between groups of rail entries, with space above and below.
@@ -505,6 +508,7 @@ fn icon_entry(
     content_width: f32,
     icon: &str,
     label: &str,
+    hover: &str,
     selected: bool,
 ) -> egui::Response {
     let (fill, text) = if selected {
@@ -519,7 +523,7 @@ fn icon_entry(
         .min_size(vec2(content_width, 40.0));
     let response = ui.add(button);
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
-    response.on_hover_text(label)
+    response.on_hover_text(hover)
 }
 
 pub struct App {
@@ -545,6 +549,7 @@ pub struct App {
     user: UserLayouts,
     /// The layout on show, `None` when a shipped page is.
     layout_shown: Option<usize>,
+    what_to_build_page: WhatToBuildPage,
     build_page: BuildPage,
     build_dock: DockState<BuildPanel>,
     assets_page: AssetsPage,
@@ -596,6 +601,10 @@ impl IndustryTimings {
 impl App {
     /// Opens the databases and starts the first-run download, or the daily check when the game
     /// data is due for one. Fails only when a database cannot be opened or read.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "start-up opens every database and wires every page and worker"
+    )]
     pub fn new(ctx: &Context, config: AppConfig) -> Result<Self, Box<dyn Error + Send + Sync>> {
         fs::create_dir_all(&config.data_dir)?;
         fs::create_dir_all(&config.cache_dir)?;
@@ -667,6 +676,7 @@ impl App {
             page: Page::Today,
             user,
             layout_shown: None,
+            what_to_build_page: WhatToBuildPage::default(),
             build_page: BuildPage::default(),
             build_dock: docks.build,
             assets_page: AssetsPage,
@@ -857,6 +867,7 @@ impl App {
                             content_width,
                             page_icon(entry),
                             entry.label(),
+                            entry.title(),
                             shown == Shown::Page(entry),
                         );
                         if response.clicked() {
@@ -878,6 +889,7 @@ impl App {
                             style,
                             content_width,
                             regular::FOLDER,
+                            name,
                             name,
                             shown == Shown::Layout(index),
                         );
@@ -905,6 +917,7 @@ impl App {
                     self.go_to(page);
                 }
             }
+            Page::WhatToBuild => self.show_what_to_build(ui),
             Page::Build => {
                 let text = dock::show_page(
                     ui,
@@ -991,6 +1004,14 @@ impl App {
         // The inspector floats over the page, so it is drawn after the panels that fill it.
         if matches!(self.page, Page::Build | Page::Assets | Page::Stockpiles) {
             item_panel::inspector(ui, &mut self.shared);
+        }
+    }
+
+    /// Draws the What could I build? page and follows a page its buttons ask for.
+    fn show_what_to_build(&mut self, ui: &mut Ui) {
+        if let Some(page) = what_to_build::show(ui, &mut self.what_to_build_page, &mut self.shared)
+        {
+            self.go_to(page);
         }
     }
 

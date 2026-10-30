@@ -17,6 +17,7 @@ const GROUP_SPACE: f32 = 8.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Today,
+    WhatToBuild,
     Build,
     Stockpiles,
     Assets,
@@ -28,8 +29,9 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 9] = [
+    pub const ALL: [Page; 10] = [
         Page::Today,
+        Page::WhatToBuild,
         Page::Build,
         Page::Stockpiles,
         Page::Jobs,
@@ -43,6 +45,7 @@ impl Page {
     pub fn label(self) -> &'static str {
         match self {
             Self::Today => "Today",
+            Self::WhatToBuild => "What to build",
             Self::Build => "Build",
             Self::Stockpiles => "Stockpiles",
             Self::Assets => "Assets",
@@ -54,10 +57,27 @@ impl Page {
         }
     }
 
+    /// The full page title, shown on hover when it differs from the label.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::WhatToBuild => "What could I build?",
+            Self::Today
+            | Self::Build
+            | Self::Stockpiles
+            | Self::Assets
+            | Self::NetWorth
+            | Self::Orders
+            | Self::Jobs
+            | Self::Characters
+            | Self::Setup => self.label(),
+        }
+    }
+
     /// The icon that sits before the label.
     fn icon(self) -> &'static str {
         match self {
             Self::Today => regular::SUN,
+            Self::WhatToBuild => regular::COMPASS,
             Self::Build => regular::HAMMER,
             Self::Stockpiles => regular::STACK,
             Self::Assets => regular::PACKAGE,
@@ -71,7 +91,7 @@ impl Page {
 
     /// Whether an entry starts a group, and so has a line above it.
     fn starts_group(self) -> bool {
-        matches!(self, Self::Build | Self::Assets | Self::Characters)
+        matches!(self, Self::WhatToBuild | Self::Assets | Self::Characters)
     }
 }
 
@@ -282,6 +302,7 @@ fn entry_button(
     metrics: Metrics,
     icon: &str,
     label: &str,
+    hover: &str,
     selected: bool,
 ) -> egui::Response {
     let (fill, text) = if selected {
@@ -305,8 +326,8 @@ fn entry_button(
         .min_size(vec2(metrics.content_width, 40.0));
     let response = ui.add(button);
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
-    if metrics.icons_only {
-        response.on_hover_text(label)
+    if metrics.icons_only || hover != label {
+        response.on_hover_text(hover)
     } else {
         response
     }
@@ -332,6 +353,7 @@ fn entries(
             metrics,
             entry.icon(),
             entry.label(),
+            entry.title(),
             *shown == Shown::Page(entry),
         );
         if response.clicked() {
@@ -355,6 +377,7 @@ fn entries(
             style,
             metrics,
             regular::FOLDER,
+            name,
             name,
             *shown == Shown::Layout(index),
         );

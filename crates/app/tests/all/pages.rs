@@ -678,8 +678,9 @@ mod tests {
         let env = env();
         let mut harness = start(&env, FakeEve::new(Vec::new(), None), NOW);
         loaded(&mut harness);
-        let pages: [(&str, &[&str]); 9] = [
+        let pages: [(&str, &[&str]); 10] = [
             ("Today", &["Today"]),
+            ("What to build", &["What could I build?"]),
             ("Build", &["Plans", "Plan", "Steps", "Buy list"]),
             ("Stockpiles", &["Stockpiles", "Contents"]),
             ("Industry jobs", &["Industry jobs"]),
@@ -744,6 +745,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn what_to_build_is_the_second_page_and_offers_a_character_when_empty() {
+        let env = env();
+        let mut harness = start(&env, FakeEve::new(Vec::new(), None), NOW);
+        loaded(&mut harness);
+
+        // The decider settled the spec's "nine pages" slip: the original nine plus What to
+        // build make ten, with What to build second and Build third.
+        assert_eq!(Page::ALL.len(), 10);
+        assert_eq!(Page::ALL.get(1), Some(&Page::WhatToBuild));
+        assert_eq!(Page::ALL.get(2), Some(&Page::Build));
+
+        rail(&mut harness, "What to build");
+        harness.run();
+        assert!(shown(&harness, "What could I build?"));
+        assert!(shown(&harness, "Profit a day"));
+        assert!(shown(
+            &harness,
+            "Add a character to use your skills, blueprints and slots."
+        ));
+        assert!(!shown(&harness, "No products to rank yet."));
+
+        harness.get_by_label("Add a character").click();
+        harness.run();
+        assert!(shown(&harness, "jEve data"), "the button opens Characters");
+
+        rail(&mut harness, "What to build");
+        harness.set_size(vec2(1280.0, 800.0));
+        harness.run();
+        harness.snapshot("what-to-build-empty");
+    }
+
     /// The rail's left edge. Every rail entry starts there; panel titles start to its right.
     fn rail_left(harness: &Harness<'_, App>) -> f32 {
         harness.get_by_label("Build").rect().min.x
@@ -767,6 +800,7 @@ mod tests {
 
         let labels = [
             "Today",
+            "What to build",
             "Build",
             "Stockpiles",
             "Industry jobs",
@@ -801,7 +835,7 @@ mod tests {
         // Every entry is the same width; the rail adds the panel's padding around them.
         let widest = entries.iter().map(|rect| rect.width()).fold(0.0, f32::max);
         assert!(widest + 16.0 < 140.0, "the rail is under 140 px wide");
-        assert_eq!(entries[2].width(), widest, "Industry jobs fits its label");
+        assert_eq!(entries[4].width(), widest, "Industry jobs fits its label");
 
         let gap = |above: Rect, below: Rect| below.top() - above.bottom();
         let ordinary = gap(
@@ -853,6 +887,7 @@ mod tests {
         let icons = rail_only(true);
         let expected = [
             "Today",
+            "What to build",
             "Build",
             "Stockpiles",
             "Industry jobs",
@@ -885,6 +920,12 @@ mod tests {
         assert!(
             tip.iter().any(|text| text == "Orders"),
             "Orders is its hover text: {tip:?}"
+        );
+
+        let tip = crate::ui::hover(&mut harness, "What to build");
+        assert!(
+            tip.iter().any(|text| text == "What could I build?"),
+            "What to build shows its full title: {tip:?}"
         );
     }
 
