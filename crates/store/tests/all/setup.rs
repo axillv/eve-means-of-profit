@@ -27,11 +27,31 @@ mod tests {
             settings,
             Settings {
                 default_price_rule: PriceRule::SellFivePercent,
-                density: Density::Normal,
+                density: Density::Sparse,
                 interface_size: InterfaceSize::P100,
                 rail_icons_only: false,
                 last_sde_check: None,
             }
+        );
+    }
+
+    #[test]
+    fn a_saved_density_wins_over_the_new_default_after_reopening() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eve.db");
+        let saved = Settings {
+            density: Density::Normal,
+            ..default_settings()
+        };
+        let mut store = open_store(&path, 1_000);
+        store.save_settings(&saved).expect("save");
+        drop(store);
+
+        let mut reopened = open_store(&path, 2_000);
+
+        assert_eq!(
+            reopened.settings().expect("settings").density,
+            Density::Normal
         );
     }
 

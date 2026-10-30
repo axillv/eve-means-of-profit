@@ -336,7 +336,8 @@ impl Store {
         clear_setting_in(&self.conn, key)
     }
 
-    /// The saved settings, or the defaults when none were ever saved.
+    /// The saved settings, or the defaults when none were ever saved. The default density is
+    /// [`Density::Sparse`] (Roomy); a saved density, even [`Density::Normal`], wins over it.
     pub fn settings(&mut self) -> Result<Settings> {
         let tx = self.conn.transaction()?;
         let default_price_rule = match read_setting(&tx, KEY_PRICE_RULE)? {
@@ -347,7 +348,7 @@ impl Store {
             }
         };
         let density = match read_setting(&tx, KEY_DENSITY)? {
-            None => Density::Normal,
+            None => Density::Sparse,
             Some(text) => {
                 let code = stored_number(KEY_DENSITY, &text)?;
                 density_from_code(code).ok_or_else(|| bad_value(KEY_DENSITY, &text))?
