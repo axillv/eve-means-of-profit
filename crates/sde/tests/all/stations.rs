@@ -294,6 +294,31 @@ mod tests {
     }
 
     #[test]
+    fn an_exact_station_name_finds_that_station_before_a_longer_containing_one() {
+        let dir = TempDir::new().unwrap();
+        let source = stations_source(&dir);
+        edit_record(&source.join("npcCorporations.jsonl"), 1000438, |value| {
+            value["name"]["en"] = json!("Jita IV - Moon 4 - Caldari Navy Assembly Plant");
+        });
+        let sde = import_and_open(&source, &dir);
+        assert_eq!(
+            sde.search_stations("jita iv - moon 4 - caldari navy assembly plant", 10)
+                .unwrap(),
+            vec![
+                (
+                    60003760,
+                    "Jita IV - Moon 4 - Caldari Navy Assembly Plant".to_owned()
+                ),
+                (
+                    60015187,
+                    "Zarzakh - Jita IV - Moon 4 - Caldari Navy Assembly Plant - The Fulcrum"
+                        .to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn an_exact_station_name_outranks_a_longer_containing_one() {
         let dir = TempDir::new().unwrap();
         let source = stations_source(&dir);
