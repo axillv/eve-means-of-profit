@@ -12,6 +12,7 @@ use super::grouped;
 use crate::Shared;
 use crate::build::prices::age_text;
 use crate::build::state::report;
+use crate::characters::short_names;
 use crate::session::Source;
 use crate::table::model::{Cell, Column, ColumnKind, Row};
 use crate::table::{Table, hidden_from_text};
@@ -114,9 +115,21 @@ fn owned(ui: &mut Ui, cx: &mut Shared, type_id: TypeId) {
     if counted_shown {
         footer.push(Cell::int(i128::from(counted), grouped(counted)));
     }
+    // The Character cell's short name takes `&mut Shared`, so the table draws with its own style.
+    let style = cx.style;
+    let density = cx.density;
+    let mut draw = |ui: &mut Ui, key: u64, column: &'static str| -> bool {
+        if column != "owner" {
+            return false;
+        }
+        let Some(holding) = usize::try_from(key).ok().and_then(|key| holdings.get(key)) else {
+            return false;
+        };
+        short_names::label(ui, cx, holding.owner.as_str())
+    };
     Table::new(Id::new("item panel owned"), &columns)
         .panel(Id::new(PANEL))
-        .show(ui, &cx.style, cx.density, &rows, Some(&footer));
+        .show_with(ui, &style, density, &rows, Some(&footer), &mut draw);
 }
 
 /// The units and the counted units over every holding, or `None` when the sum does not fit.
@@ -208,9 +221,21 @@ fn jobs(ui: &mut Ui, cx: &mut Shared, type_id: TypeId) {
             ],
         })
         .collect();
+    // The Character cell's short name takes `&mut Shared`, so the table draws with its own style.
+    let style = cx.style;
+    let density = cx.density;
+    let mut draw = |ui: &mut Ui, key: u64, column: &'static str| -> bool {
+        if column != "owner" {
+            return false;
+        }
+        let Some(job) = usize::try_from(key).ok().and_then(|key| jobs.get(key)) else {
+            return false;
+        };
+        short_names::label(ui, cx, job.owner.as_str())
+    };
     Table::new(Id::new("item panel jobs"), &columns)
         .panel(Id::new(PANEL))
-        .show(ui, &cx.style, cx.density, &rows, None);
+        .show_with(ui, &style, density, &rows, None, &mut draw);
 }
 
 /// When a job ends: `in <age>`, or `ready` once the end time has passed.

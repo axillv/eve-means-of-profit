@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use egui::{ComboBox, Context, Id, RichText, Ui};
 use mop_jeve::{ReadOptions, list_profiles, read_profile};
 
-use super::{Inner, Msg, queue, send};
+use super::{Inner, Msg, queue, send, short_names};
 use crate::Shared;
 use crate::build::prices::age_text;
 use crate::session::{JEVE_PROFILE, Source, lock_eve};
@@ -210,11 +210,12 @@ fn controls(ui: &mut Ui, cx: &Shared, listing: &Listing) -> (Option<String>, boo
     (picked, again)
 }
 
-fn table(ui: &mut Ui, cx: &Shared) {
+fn table(ui: &mut Ui, cx: &mut Shared) {
     let Some(jeve) = cx.session.jeve() else {
         return;
     };
     let style = cx.style;
+    let density = cx.density;
     let now = (cx.clock)();
     let columns = [
         column("character", "Character", 200.0),
@@ -253,10 +254,25 @@ fn table(ui: &mut Ui, cx: &Shared) {
             }
         })
         .collect();
+    // The rows end the borrow of the session, so the draw closure can take `&mut Shared`.
+    let names: Vec<String> = jeve
+        .characters
+        .iter()
+        .map(|held| held.name.clone())
+        .collect();
+    let left_out = jeve.skipped_corporations;
+    let mut draw = |ui: &mut Ui, key: u64, column: &'static str| -> bool {
+        if column != "character" {
+            return false;
+        }
+        let Some(name) = usize::try_from(key).ok().and_then(|key| names.get(key)) else {
+            return false;
+        };
+        short_names::label(ui, cx, name.as_str())
+    };
     Table::new(Id::new(super::CharactersPanel::JeveData.title()), &columns)
         .fit_rows(20)
-        .show(ui, &style, cx.density, &rows, None);
-    let left_out = jeve.skipped_corporations;
+        .show_with(ui, &style, density, &rows, None, &mut draw);
     if left_out > 0 {
         let word = if left_out == 1 {
             "corporation"

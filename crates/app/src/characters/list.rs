@@ -1,13 +1,14 @@
 //! The Characters panel: the login characters, the account each one belongs to, how old each kind
 //! of their data is, and the buttons that fetch, log in again and remove.
 
-use egui::{Button, Color32, ComboBox, Id, Label, RichText, TextEdit, Ui};
+use egui::{Button, Color32, ComboBox, Id, Key, Label, RichText, TextEdit, Ui};
 use mop_esi::character_data::{CharacterData, Fetched, Kind};
 use mop_esi::characters::Login;
 use mop_store::net_worth::Account;
 use mop_store::{Density, StoreError};
 
 use super::Inner;
+use super::short_names;
 use crate::Shared;
 use crate::build::prices::age_text;
 use crate::images::{self, Picture};
@@ -175,6 +176,7 @@ fn columns() -> Vec<Column> {
     };
     vec![
         column("character", "Character", 180.0),
+        column("short", "Short name", 120.0),
         column("login", "Login", 210.0),
         column("account", "Account", 150.0),
         column("assets", "Assets", 80.0),
@@ -613,6 +615,7 @@ fn table(
         .map(|line| {
             let mut cells = vec![
                 Cell::text(line.name.as_str()),
+                Cell::text(""),
                 Cell::text(login_view(line.expired, &style).0),
                 Cell::text(account_text(accounts, line.id)),
             ];
@@ -626,6 +629,8 @@ fn table(
         })
         .collect();
     let columns = columns();
+    // What the player typed in a Short name field, queued to be saved once the table is drawn.
+    let mut pending: Vec<(u64, String)> = Vec::new();
     let mut draw = |ui: &mut Ui, key: u64, column: &'static str| -> bool {
         let Some(line) = lines.iter().find(|line| line.id == key) else {
             return false;
@@ -634,7 +639,11 @@ fn table(
             "character" => {
                 images::show(ui, Picture::Character(key), portrait);
                 ui.add_space(4.0);
-                ui.add(Label::new(line.name.as_str()).selectable(false));
+                short_names::label(ui, cx, line.name.as_str());
+                true
+            }
+            "short" => {
+                short_cell(ui, cx, key, line.name.as_str(), &mut pending);
                 true
             }
             "login" => {
@@ -680,12 +689,63 @@ fn table(
         &columns,
     )
     .show_with(ui, &style, density, &rows, None, &mut draw);
+    // The Short name fields the table queued: a save that lands drops the typed text (the field
+    // starts again from the saved name), one that is refused keeps it for the player to fix.
+    for (character, text) in pending {
+        if short_names::set(ui.ctx(), cx, character, &text) {
+            ui.data_mut(|data| data.remove::<String>(short_key(character)));
+        } else {
+            ui.data_mut(|data| data.insert_temp(short_key(character), text));
+        }
+    }
     for (character, account) in picks {
         if let Err(error) = cx.store.set_account(character, account) {
             cx.notices.push(Notice::error(pick_error(&error)));
         }
     }
     click
+}
+
+/// Draws the Short name cell of one character: the text starts at [`short_names::current`] and
+/// lives in the frame memory under the character's id while the player types. The text is queued
+/// to be saved once when the field loses the focus, the Enter key included, and not again on the
+/// frames that follow the loss.
+fn short_cell(
+    ui: &mut Ui,
+    cx: &mut Shared,
+    key: u64,
+    full: &str,
+    pending: &mut Vec<(u64, String)>,
+) {
+    let held = short_key(key);
+    let mut text = ui
+        .data(|data| data.get_temp::<String>(held))
+        .unwrap_or_else(|| short_names::current(ui.ctx(), cx, key, full));
+    // Whether the field ended the last frame with the focus, kept here because the widget's own
+    // `lost_focus` stays true for the frame after the loss, which would queue a second time.
+    let focused = ui
+        .data(|data| data.get_temp::<bool>(short_focus(key)))
+        .unwrap_or(false);
+    let response = ui.add(TextEdit::singleline(&mut text).desired_width(100.0));
+    // `has_focus` is read before the frame memory is written: reading it inside that write would
+    // take the context's lock twice.
+    let has_focus = response.has_focus();
+    let enter = has_focus && ui.input(|input| input.key_pressed(Key::Enter));
+    if (focused && !has_focus) || enter {
+        pending.push((key, text.clone()));
+    }
+    ui.data_mut(|data| {
+        data.insert_temp(held, text);
+        data.insert_temp(short_focus(key), has_focus);
+    });
+}
+
+fn short_key(key: u64) -> Id {
+    Id::new(("characters short name", key))
+}
+
+fn short_focus(key: u64) -> Id {
+    Id::new(("characters short name focus", key))
 }
 
 /// Draws the Account cell of one character: a dropdown of `(none)` and every account, with the

@@ -8,6 +8,7 @@ use egui::{Id, RichText, Ui};
 use crate::Shared;
 use crate::build::prices::OLD_HOVER;
 use crate::build::state::report;
+use crate::characters::short_names;
 use crate::empty::{self, Fill};
 use crate::rail::Page;
 use crate::table::model::{Cell, Column, ColumnKind, Row};
@@ -134,18 +135,22 @@ pub fn show(_page: &mut OrdersPage, panel: OrdersPanel, ui: &mut Ui, cx: &mut Sh
             cells: cells(entry),
         })
         .collect();
+    // The Character cell's short name takes `&mut Shared`, so the closure owns what it draws with.
+    let style = cx.style;
+    let density = cx.density;
     let mut draw = |ui: &mut Ui, key: u64, column: &'static str| -> bool {
         let Some(entry) = usize::try_from(key).ok().and_then(|key| shown.get(key)) else {
             return false;
         };
         match (column, entry.beaten_by, entry.forge_best) {
+            ("character", _, _) => short_names::label(ui, cx, entry.character.as_str()),
             ("location", _, _) => {
                 ui.label(rows::short(&entry.location, LOCATION_CHARS))
                     .on_hover_text(&entry.location);
                 true
             }
             ("forge", Some(gap), Some(best)) => {
-                ui.colored_label(cx.style.stale, best.format_isk())
+                ui.colored_label(style.stale, best.format_isk())
                     .on_hover_text(format!("Beaten by {}", gap.format_isk()));
                 true
             }
@@ -171,7 +176,7 @@ pub fn show(_page: &mut OrdersPage, panel: OrdersPanel, ui: &mut Ui, cx: &mut Sh
                 .and_then(|index| shown.get(index))
                 .map(|entry| entry.type_id)
         })
-        .show_with(ui, &cx.style, cx.density, &table_rows, None, &mut draw);
+        .show_with(ui, &style, density, &table_rows, None, &mut draw);
     if let Some(key) = response.clicked {
         let picked = usize::try_from(key)
             .ok()

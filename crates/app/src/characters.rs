@@ -9,6 +9,7 @@
 mod jeve;
 pub mod list;
 mod refresh;
+pub mod short_names;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::process::{Command, ExitStatus};

@@ -7,6 +7,7 @@ use egui::{Button, ComboBox, Id, RichText, Ui};
 
 use crate::Shared;
 use crate::build::state::report;
+use crate::characters::short_names;
 use crate::empty::{self, Fill};
 use crate::orders::rows::grouped;
 use crate::rail::Page;
@@ -120,13 +121,16 @@ pub fn show(_page: &mut JobsPage, panel: JobsPanel, ui: &mut Ui, cx: &mut Shared
     let style = cx.style;
     let density = cx.density;
     let mut draw = |ui: &mut Ui, key: u64, column: &'static str| -> bool {
-        if column != "plan" {
+        if column != "plan" && column != "character" {
             return false;
         }
         let Some(entry) = usize::try_from(key).ok().and_then(|key| shown.get(key)) else {
             return false;
         };
-        draw_plan(ui, entry, cx)
+        match column {
+            "character" => short_names::label(ui, cx, entry.character.as_str()),
+            _ => draw_plan(ui, entry, cx),
+        }
     };
     let response = Table::new(Id::new(panel.title()), &columns)
         .icons("product", &|key| {

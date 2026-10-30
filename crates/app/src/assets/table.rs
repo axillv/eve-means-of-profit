@@ -22,6 +22,7 @@ use super::value::stack_value;
 use super::worth::Worth;
 use crate::Shared;
 use crate::build::prices::age_text;
+use crate::characters::short_names;
 use crate::dock;
 use crate::status::Notice;
 use crate::table::Table;
@@ -1017,10 +1018,23 @@ fn panel(
     response
 }
 
-fn table(ui: &mut Ui, cx: &Shared, built: &Built) -> crate::table::TableResponse {
+fn table(ui: &mut Ui, cx: &mut Shared, built: &Built) -> crate::table::TableResponse {
     let columns = columns(built.key.prices);
     let data = &built.data;
+    // The Character cell's short name takes `&mut Shared`, so the closure owns its style.
+    let style = cx.style;
+    let density = cx.density;
     let mut draw = |ui: &mut Ui, key: u64, column: &'static str| -> bool {
+        if column == "character" {
+            let Some(&position) = data.index.get(&key) else {
+                // A group row's Character cell is empty; its name is the group's own label.
+                return false;
+            };
+            let Some(entry) = data.entries.get(position) else {
+                return false;
+            };
+            return short_names::label(ui, cx, entry.character_name.as_str());
+        }
         if column != "value" {
             return false;
         }
@@ -1044,7 +1058,7 @@ fn table(ui: &mut Ui, cx: &Shared, built: &Built) -> crate::table::TableResponse
         // follows the number.
         ui.with_layout(egui::Layout::left_to_right(Align::Center), |ui| {
             ui.label(group.value_text());
-            let marker = RichText::new(" +").color(cx.style.stale);
+            let marker = RichText::new(" +").color(style.stale);
             ui.add(Label::new(marker).selectable(false))
                 .on_hover_text(hover);
         });
@@ -1058,7 +1072,7 @@ fn table(ui: &mut Ui, cx: &Shared, built: &Built) -> crate::table::TableResponse
     };
     Table::new(Id::new(super::AssetsPanel::Assets.title()), &columns)
         .icons("item", &icons)
-        .show_with(ui, &cx.style, cx.density, &data.rows, None, &mut draw)
+        .show_with(ui, &style, density, &data.rows, None, &mut draw)
 }
 
 /// The age of the oldest data among the picked characters, or `never` when one has no time.
