@@ -19,7 +19,8 @@ mod tests {
         visible,
     };
     use eve_means_of_profit::table::{
-        Table, TableResponse, sort_from_text, sort_mark_points, sort_to_text,
+        Level, Table, TableResponse, level as table_level, sort_from_text, sort_mark_points,
+        sort_to_text,
     };
     use eve_means_of_profit::theme::Style;
     use mop_core::money::Money;
@@ -346,6 +347,188 @@ mod tests {
                     seen.responses.push(response);
                 }
             })
+    }
+
+    /// Whether `label` is drawn anywhere in the last frame.
+    fn shows(harness: &Harness<'_>, label: &str) -> bool {
+        harness.query_all_by_label(label).count() > 0
+    }
+
+    /// Four columns of 80 points, so a narrower panel drops some for a `+N columns` cell.
+    fn level_columns() -> Vec<Column> {
+        [("a", "A"), ("b", "B"), ("c", "C"), ("d", "D")]
+            .into_iter()
+            .map(|(id, label)| Column {
+                id,
+                label: label.to_owned(),
+                kind: ColumnKind::Text,
+                width: 80.0,
+            })
+            .collect()
+    }
+
+    /// A row whose first and last cells say `first` and `last`, for reading its place on screen.
+    fn level_row_with(key: u64, first: &str, last: &str) -> Row {
+        Row {
+            key,
+            depth: 0,
+            cells: vec![
+                Cell::text(first),
+                Cell::text("b1"),
+                Cell::text("c1"),
+                Cell::text(last),
+            ],
+        }
+    }
+
+    /// One row, with the same cells in every level column.
+    fn level_row(key: u64) -> Row {
+        level_row_with(key, "a1", "d1")
+    }
+
+    /// A table of the four level columns at `panel_width`, built with `level` and `start_sort`,
+    /// whose kept level is written to `seen` after each frame. The harness adds 8 points of margin
+    /// on each side.
+    fn level_harness(
+        level: Option<Level>,
+        panel_width: f32,
+        start_sort: Option<(usize, Direction)>,
+        rows: Vec<Row>,
+        seen: &Arc<Mutex<Option<Level>>>,
+    ) -> Harness<'static> {
+        let seen = Arc::clone(seen);
+        let columns = level_columns();
+        let style = Style::eve_dense();
+        Harness::builder()
+            .with_size(vec2(panel_width + 16.0, 400.0))
+            .build_ui(move |ui: &mut Ui| {
+                style.apply(ui.ctx());
+                let id = Id::new("level test");
+                let table = Table::new(id, &columns).start(BTreeSet::new(), start_sort);
+                let table = match level {
+                    Some(level) => table.level(level),
+                    None => table,
+                };
+                table.show(ui, &style, Density::Normal, &rows, None);
+                if let Ok(mut seen) = seen.lock() {
+                    *seen = Some(table_level(ui, id, Level::Summary));
+                }
+            })
+    }
+
+    #[test]
+    fn the_levels_are_summary_standard_technical_in_order() {
+        assert_eq!(
+            Level::ALL.map(Level::label),
+            ["Summary", "Standard", "Technical"]
+        );
+        assert_eq!(Level::Summary.next(), Level::Standard);
+        assert_eq!(Level::Standard.next(), Level::Technical);
+        assert_eq!(Level::Technical.next(), Level::Technical);
+    }
+
+    #[test]
+    fn a_standard_table_shows_the_columns_that_fit_and_a_summary_shows_fewer() {
+        // 250 points hold two 80 point columns and leave the 90 point `+2 columns` cell.
+        let seen = Arc::new(Mutex::new(None));
+        let mut harness = level_harness(
+            Some(Level::Standard),
+            250.0,
+            None,
+            vec![level_row(1)],
+            &seen,
+        );
+        harness.run();
+        assert!(shows(&harness, "A"));
+        assert!(shows(&harness, "B"));
+        assert!(shows(&harness, "+2 columns"));
+        assert!(!shows(&harness, "C"), "C is past the two that fit");
+        assert!(!shows(&harness, "D"), "D is past the two that fit");
+
+        // 100 points hold only the always-drawn first column.
+        let seen = Arc::new(Mutex::new(None));
+        let mut harness =
+            level_harness(Some(Level::Summary), 100.0, None, vec![level_row(1)], &seen);
+        harness.run();
+        assert!(shows(&harness, "A"), "the first column never drops");
+        assert!(shows(&harness, "+3 columns"));
+        assert!(!shows(&harness, "B"));
+    }
+
+    #[test]
+    fn clicking_the_more_columns_cell_raises_the_level_to_technical() {
+        let seen = Arc::new(Mutex::new(None));
+        let mut harness = level_harness(
+            Some(Level::Standard),
+            250.0,
+            None,
+            vec![level_row(1)],
+            &seen,
+        );
+        harness.run();
+        harness.get_by_label("+2 columns").click();
+        harness.run();
+        assert_eq!(*seen.lock().unwrap(), Some(Level::Technical));
+        for label in ["A", "B", "C", "D"] {
+            assert!(shows(&harness, label), "{label} is drawn at Technical");
+        }
+        assert!(!shows(&harness, "+2 columns"), "Technical has no +N cell");
+        assert!(!shows(&harness, "+3 columns"), "Technical has no +N cell");
+    }
+
+    #[test]
+    fn a_table_without_a_level_shows_every_column_and_no_more_cell() {
+        let seen = Arc::new(Mutex::new(None));
+        let mut harness = level_harness(None, 250.0, None, vec![level_row(1)], &seen);
+        harness.run();
+        for label in ["A", "B", "C", "D"] {
+            assert!(shows(&harness, label), "{label} is drawn without a level");
+        }
+        assert!(!shows(&harness, "+2 columns"), "no level has no +N cell");
+        assert!(!shows(&harness, "+3 columns"), "no level has no +N cell");
+    }
+
+    #[test]
+    fn a_sort_on_a_column_the_level_hides_is_dropped() {
+        // By D ascending the rows would be three, one, two; the given order is one, two, three.
+        let rows = vec![
+            level_row_with(1, "row one", "m"),
+            level_row_with(2, "row two", "z"),
+            level_row_with(3, "row three", "a"),
+        ];
+
+        // Standard draws only A and B, so the start sort on D is dropped.
+        let seen = Arc::new(Mutex::new(None));
+        let mut harness = level_harness(
+            Some(Level::Standard),
+            250.0,
+            Some((3, Direction::Ascending)),
+            rows.clone(),
+            &seen,
+        );
+        harness.run();
+        let one = harness.get_by_label("row one").rect().center().y;
+        let two = harness.get_by_label("row two").rect().center().y;
+        let three = harness.get_by_label("row three").rect().center().y;
+        assert!(
+            one < two && two < three,
+            "the hidden D sort leaves the given order"
+        );
+
+        // Technical draws D, so the same start sort applies.
+        let seen = Arc::new(Mutex::new(None));
+        let mut harness = level_harness(
+            Some(Level::Technical),
+            250.0,
+            Some((3, Direction::Ascending)),
+            rows,
+            &seen,
+        );
+        harness.run();
+        let one = harness.get_by_label("row one").rect().center().y;
+        let two = harness.get_by_label("row two").rect().center().y;
+        let three = harness.get_by_label("row three").rect().center().y;
+        assert!(three < one && one < two, "the drawn D sort applies");
     }
 
     #[test]

@@ -74,6 +74,124 @@ pub fn hidden_to_text(hidden: &[String]) -> String {
     hidden.join(",")
 }
 
+/// The level the table with `id` was left at, or `start` before the table has drawn with one.
+pub fn level(ui: &Ui, id: Id, start: Level) -> Level {
+    ui.data(|data| data.get_temp::<State>(id).and_then(|state| state.level))
+        .unwrap_or(start)
+}
+
+/// Sets the level of the table with `id`; the table takes it up the next time it draws.
+pub fn set_level(ui: &mut Ui, id: Id, level: Level) {
+    ui.data_mut(|data| {
+        data.get_temp_mut_or_default::<State>(id).level = Some(level);
+    });
+}
+
+/// The level choices of a Columns menu, with `current` selected. Returns the one clicked.
+pub fn level_choices(ui: &mut Ui, current: Level) -> Option<Level> {
+    let mut picked = None;
+    for level in Level::ALL {
+        if ui
+            .selectable_label(current == level, level.label())
+            .clicked()
+        {
+            picked = Some(level);
+        }
+    }
+    picked
+}
+
+/// How many leading columns show before a `+N columns` cell: all of them when they fit the panel,
+/// else the first and every further one that still leaves room for the `+N` cell.
+fn fit_count(columns: &[Column], panel_width: f32) -> usize {
+    let total: f32 = columns.iter().map(|column| column.width).sum();
+    if total <= panel_width {
+        return columns.len();
+    }
+    let mut used = 0.0;
+    let mut count = 0;
+    for column in columns {
+        if count == 0 || used + column.width <= panel_width - MORE_WIDTH {
+            used += column.width;
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    count
+}
+
+/// The columns to draw, the width to lay them out in, and how many are hidden behind a `+N` cell.
+fn visible_columns(
+    columns: &[Column],
+    level: Level,
+    panel_width: f32,
+) -> (&[Column], f32, Option<usize>) {
+    match level {
+        Level::Technical => {
+            let total: f32 = columns.iter().map(|column| column.width).sum();
+            (columns, panel_width.max(total), None)
+        }
+        Level::Summary | Level::Standard => {
+            let count = fit_count(columns, panel_width);
+            let more = count < columns.len();
+            (
+                columns.get(..count).unwrap_or(columns),
+                panel_width,
+                more.then_some(columns.len() - count),
+            )
+        }
+    }
+}
+
+/// The level this frame draws with: the kept level, else `start`, else Technical. A change clears
+/// the sort, whose index belongs to the columns of the old level.
+fn keep_level(state: &mut State, start: Option<Level>) -> Level {
+    let level = state.level.unwrap_or(start.unwrap_or(Level::Technical));
+    if state.level.is_some_and(|previous| previous != level) {
+        state.sort = None;
+    }
+    state.level = Some(level);
+    level
+}
+
+/// Drops a sort on a column Summary or Standard hides: it would order the rows by a column that is
+/// not drawn and has no header mark. A page hiding a column only rebuilds its own list, so
+/// Technical keeps the sort it was given.
+fn drop_hidden_sort(state: &mut State, level: Level, drawn: usize) {
+    if matches!(level, Level::Summary | Level::Standard)
+        && state.sort.is_some_and(|(position, _)| position >= drawn)
+    {
+        state.sort = None;
+    }
+}
+
+/// Applies a header click and reports whether the sort may be saved.
+fn apply_header_click(
+    state: &mut State,
+    click: Option<HeaderClick>,
+    level: Level,
+    ui: &Ui,
+) -> bool {
+    match click {
+        Some(HeaderClick::Sort) => {
+            // The player picked a sort, so it takes effect now, with no kept order and no mark.
+            state.frozen = None;
+            state.changed.clear();
+            state.resort_pending = false;
+            true
+        }
+        Some(HeaderClick::More) => {
+            // The player asked for the hidden columns: raise the level and redraw at once.
+            state.sort = None;
+            state.level = Some(level.next());
+            ui.ctx().request_repaint();
+            false
+        }
+        None => true,
+    }
+}
+
 /// The text to save `sort` as: the column id and `asc` or `desc`, such as `need:desc`. Empty when
 /// there is no sort, or its column is past the end of the table.
 pub fn sort_to_text(columns: &[Column], sort: Option<(usize, Direction)>) -> String {
@@ -170,6 +288,39 @@ const INDENT: f32 = 14.0;
 const MARK_INSET: f32 = 8.0;
 /// The room left at each side of a cell's text, so a number does not touch the next column's text.
 const CELL_PAD: f32 = 6.0;
+/// The width of the `+N columns` cell that says how many columns are hidden.
+const MORE_WIDTH: f32 = 90.0;
+
+/// How many of a table's columns are shown: the few of Summary, the ones of Standard that fit, or
+/// every one of Technical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Level {
+    Summary,
+    Standard,
+    Technical,
+}
+
+impl Level {
+    /// Every level, from the fewest columns to the most.
+    pub const ALL: [Level; 3] = [Level::Summary, Level::Standard, Level::Technical];
+
+    /// The name shown in the Columns menu.
+    pub fn label(self) -> &'static str {
+        match self {
+            Level::Summary => "Summary",
+            Level::Standard => "Standard",
+            Level::Technical => "Technical",
+        }
+    }
+
+    /// The next level; Technical is the last.
+    pub fn next(self) -> Level {
+        match self {
+            Level::Summary => Level::Standard,
+            Level::Standard | Level::Technical => Level::Technical,
+        }
+    }
+}
 
 /// What the table reports from one frame.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +337,8 @@ struct State {
     sort: Option<(usize, Direction)>,
     /// Whether the sort is the player's or the saved one: until then a table waits for its answer.
     sort_loaded: bool,
+    /// The level the player last chose, once the table has drawn with one.
+    level: Option<Level>,
     /// Whether the start fields have been applied.
     started: bool,
     collapsed: BTreeSet<u64>,
@@ -335,6 +488,7 @@ pub struct Table<'a> {
     start_folded: BTreeSet<u64>,
     start_sort: Option<(usize, Direction)>,
     expanded: bool,
+    level: Option<Level>,
 }
 
 impl<'a> Table<'a> {
@@ -349,7 +503,15 @@ impl<'a> Table<'a> {
             start_folded: BTreeSet::new(),
             start_sort: None,
             expanded: false,
+            level: None,
         }
+    }
+
+    /// The level the table starts at, until the player picks another. Without this every column is
+    /// shown, scrolls sideways and never gets a `+N columns` cell.
+    pub fn level(mut self, level: Level) -> Self {
+        self.level = Some(level);
+        self
     }
 
     /// The folds and the sort the table starts with, until the player changes them. A saved sort
@@ -429,22 +591,37 @@ impl<'a> Table<'a> {
     ) -> TableResponse {
         let panel_width = ui.available_width();
         let panel_height = ui.available_height();
-        // Columns wider than the panel scroll sideways instead of running into each other.
-        ScrollArea::horizontal()
-            .id_salt(self.id.with("sideways"))
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                self.show_inner(
-                    ui,
-                    (panel_width, panel_height),
-                    style,
-                    density,
-                    rows,
-                    footer,
-                    draw,
-                )
-            })
-            .inner
+        // The kept level, else the one the table was built with: Summary and Standard fit the
+        // panel, while Technical and a table with no level scroll sideways instead.
+        let kept = ui.data(|data| {
+            data.get_temp::<State>(self.id)
+                .and_then(|state| state.level)
+        });
+        let scroll = match kept.or(self.level) {
+            Some(Level::Summary | Level::Standard) => false,
+            Some(Level::Technical) | None => true,
+        };
+        let id = self.id;
+        let show = |ui: &mut Ui| {
+            self.show_inner(
+                ui,
+                (panel_width, panel_height),
+                style,
+                density,
+                rows,
+                footer,
+                draw,
+            )
+        };
+        if scroll {
+            ScrollArea::horizontal()
+                .id_salt(id.with("sideways"))
+                .auto_shrink([false, true])
+                .show(ui, show)
+                .inner
+        } else {
+            show(ui)
+        }
     }
 
     #[expect(
@@ -466,23 +643,21 @@ impl<'a> Table<'a> {
         let mut state: State =
             ui.data_mut(|data| data.get_temp_mut_or_default::<State>(self.id).clone());
         self.seed_start(&mut state);
-        let sort_before = state.sort;
         let table = self.id.value();
         load_sort(ui, self.columns, self.id, &mut state);
+        let level = keep_level(&mut state, self.level);
         let height = row_height(density);
-        let columns_width: f32 = self.columns.iter().map(|column| column.width).sum();
-        let width = panel_width.max(columns_width);
         let mut response = TableResponse::default();
 
+        let (columns, width, more) = visible_columns(self.columns, level, panel_width);
+        // A saved or start sort may name a column the level hides.
+        drop_hidden_sort(&mut state, level, columns.len());
+        let sort_before = state.sort;
         notice_changes(ui, self.columns, self.panel, &mut state);
 
         let (header, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
-        if draw_header(ui, self.id, self.columns, header, style, &mut state.sort) {
-            // The player picked a sort, so it takes effect now, with no kept order and no mark.
-            state.frozen = None;
-            state.changed.clear();
-            state.resort_pending = false;
-        }
+        let click = draw_header(ui, self.id, columns, more, header, style, &mut state.sort);
+        let save_sort = apply_header_click(&mut state, click, level, ui);
 
         let (column, direction) = state
             .sort
@@ -503,7 +678,7 @@ impl<'a> Table<'a> {
 
         let look = Look {
             id: self.id,
-            columns: self.columns,
+            columns,
             style,
             height,
             selected: self.selected,
@@ -547,7 +722,7 @@ impl<'a> Table<'a> {
 
         if let Some(cells) = footer {
             let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
-            draw_footer(ui, self.columns, cells, rect, style);
+            draw_footer(ui, columns, cells, rect, style);
         }
 
         // Unfold the row if it was folded, else fold it. An expanded table keeps its folds for
@@ -558,7 +733,7 @@ impl<'a> Table<'a> {
         {
             state.collapsed.insert(key);
         }
-        if state.sort != sort_before {
+        if save_sort && state.sort != sort_before {
             // The saved sort, or the player's click, is the sort from now on; the mailbox saves it.
             state.sort_loaded = true;
             let mut mailbox = mailbox(ui);
@@ -627,23 +802,32 @@ fn layout_for(kind: ColumnKind) -> Layout {
     }
 }
 
-/// Draws the header and reports whether a column was clicked to sort it.
+/// What a header click asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeaderClick {
+    Sort,
+    More,
+}
+
+/// Draws the header: the drawn columns, and a `+N columns` cell when `more` is set. Reports what
+/// was clicked.
 fn draw_header(
     ui: &mut Ui,
     id: Id,
     columns: &[Column],
+    more: Option<usize>,
     rect: Rect,
     style: &Style,
     sort: &mut Option<(usize, Direction)>,
-) -> bool {
+) -> Option<HeaderClick> {
     ui.painter()
         .rect_filled(rect, CornerRadius::ZERO, style.panel);
-    let mut clicked = false;
+    let mut clicked = None;
     for (position, (column, cell)) in columns.iter().zip(cell_rects(columns, rect)).enumerate() {
         let click = ui.interact(cell, id.with(("head", position)), Sense::click());
         if click.clicked() {
             *sort = Some(next_sort(*sort, position, column.kind));
-            clicked = true;
+            clicked = Some(HeaderClick::Sort);
         }
         ui.scope_builder(
             UiBuilder::new()
@@ -659,6 +843,26 @@ fn draw_header(
             }
             Some(_) | None => {}
         }
+    }
+    if let Some(more) = more {
+        let cell = Rect::from_min_size(
+            pos2(rect.max.x - MORE_WIDTH, rect.min.y),
+            vec2(MORE_WIDTH, rect.height()),
+        );
+        if ui
+            .interact(cell, id.with("more columns"), Sense::click())
+            .clicked()
+        {
+            clicked = Some(HeaderClick::More);
+        }
+        ui.scope_builder(
+            UiBuilder::new()
+                .max_rect(cell.shrink2(vec2(CELL_PAD, 0.0)))
+                .layout(Layout::left_to_right(Align::Center)),
+            |ui| {
+                plain_label(ui, &format!("+{more} columns"));
+            },
+        );
     }
     clicked
 }
