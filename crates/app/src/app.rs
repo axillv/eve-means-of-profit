@@ -15,6 +15,7 @@ pub mod history;
 pub mod images;
 pub mod item_panel;
 pub mod jobs;
+pub mod kit;
 pub mod layout;
 pub mod net_worth;
 pub mod orders;
