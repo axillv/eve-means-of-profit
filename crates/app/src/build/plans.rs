@@ -15,6 +15,7 @@ use mop_store::{PlanStock, PlanSummary};
 
 use super::state::{BuildPage, Dialog, Next, refresh_claims, report};
 use crate::Shared;
+use crate::claims::refresh_plan_reads;
 
 /// What the player picked in a dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +44,10 @@ pub fn show(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
             Vec::new()
         }
     };
+    if let Err(error) = refresh_plan_reads(cx, &plans) {
+        ui.label(RichText::new(format!("Could not read the plans: {error}")).color(cx.style.neg));
+        return;
+    }
     advance_stages(&mut plans, page, cx);
     let selected = page.selected.is_some();
     let (mut new, mut duplicate, mut rename, mut delete) = (false, false, false, false);
@@ -212,19 +217,21 @@ fn advance_stages(plans: &mut [PlanSummary], page: &mut BuildPage, cx: &mut Shar
         .iter()
         .map(|character| character.id)
         .collect();
+    let mut advanced: Vec<(i64, PlanStage)> = Vec::new();
     for summary in plans.iter_mut() {
-        let Ok(Some(record)) = cx.store.plan(summary.id) else {
+        let Some(read) = cx
+            .claims
+            .plan_reads()
+            .iter()
+            .find(|read| read.record.id == summary.id)
+        else {
             continue;
         };
-        let Ok(products) = cx.store.plan_products(summary.id) else {
-            continue;
-        };
-        let Ok(stock) = cx.store.plan_stock(summary.id) else {
-            continue;
-        };
-        let counted: BTreeMap<TypeId, u64> = match stock {
+        let record = &read.record;
+        let products = &read.products;
+        let counted: BTreeMap<TypeId, u64> = match &read.stock {
             PlanStock::Characters(scope) => {
-                reserve::available(&scope, &assets, &cx.claims.claims, Some(summary.id))
+                reserve::available(scope, &assets, &cx.claims.claims, Some(summary.id))
                     .unwrap_or_default()
             }
             PlanStock::Pasted => match cx.sde.as_ref() {
@@ -239,9 +246,9 @@ fn advance_stages(plans: &mut [PlanSummary], page: &mut BuildPage, cx: &mut Shar
         };
         // Done needs every product owned; any product's recipe or the plan's build inputs count
         // as materials when they have units.
-        let all_owned = all_owned(&products, &counted);
+        let all_owned = all_owned(products, &counted);
         let mut inputs = record.build.clone();
-        for product in &products {
+        for product in products {
             if let Some(recipe) = page.recipes.get(product.type_id) {
                 inputs.extend(recipe.materials.iter().map(|(type_id, _)| *type_id));
             }
@@ -258,7 +265,7 @@ fn advance_stages(plans: &mut [PlanSummary], page: &mut BuildPage, cx: &mut Shar
             cx.session
                 .character_data(id)
                 .and_then(|data| data.orders.as_ref())
-                .is_some_and(|orders| sells_any(&products, &orders.data, now))
+                .is_some_and(|orders| sells_any(products, &orders.data, now))
         });
         let auto = automatic_stage(&StageFacts {
             all_owned,
@@ -268,10 +275,17 @@ fn advance_stages(plans: &mut [PlanSummary], page: &mut BuildPage, cx: &mut Shar
             reached_done: summary.stage >= PlanStage::Done,
         });
         if auto > summary.stage {
-            match cx.store.advance_plan_stage(summary.id, auto) {
-                Ok(()) => summary.stage = auto,
-                Err(error) => report(cx, format!("Could not save the plan stage: {error}")),
+            advanced.push((summary.id, auto));
+        }
+    }
+    for (id, auto) in advanced {
+        match cx.store.advance_plan_stage(id, auto) {
+            Ok(()) => {
+                if let Some(summary) = plans.iter_mut().find(|summary| summary.id == id) {
+                    summary.stage = auto;
+                }
             }
+            Err(error) => report(cx, format!("Could not save the plan stage: {error}")),
         }
     }
 }

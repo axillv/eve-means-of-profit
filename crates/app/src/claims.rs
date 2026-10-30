@@ -3,10 +3,13 @@
 use std::collections::BTreeMap;
 
 use mop_core::industry::{Recipe, RecipeBook};
+use mop_core::plan::PlanProduct;
 use mop_core::reserve::{Claims, ReserveError, RunningJob};
 use mop_core::stock::{CharacterId, ResolvedAsset};
 use mop_esi::character_data::{CharacterData, Job, JobStatus};
+use mop_store::{PlanRecord, PlanStock, PlanSummary};
 
+use crate::Shared;
 use crate::build::state::push_error;
 use crate::status::Notice;
 
@@ -22,6 +25,17 @@ pub struct ClaimsState {
     pub assignments: BTreeMap<i64, i64>,
     stale: bool,
     key: Vec<[u64; 4]>,
+    plan_reads: Vec<PlanRead>,
+    plans_stale: bool,
+    plans_key: Vec<[i64; 2]>,
+}
+
+/// Everything `advance_stages` needs about one plan, read once per change keys it sees.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanRead {
+    pub record: PlanRecord,
+    pub products: Vec<PlanProduct>,
+    pub stock: PlanStock,
 }
 
 impl Default for ClaimsState {
@@ -32,6 +46,9 @@ impl Default for ClaimsState {
             assignments: BTreeMap::new(),
             stale: true,
             key: Vec::new(),
+            plan_reads: Vec::new(),
+            plans_stale: true,
+            plans_key: Vec::new(),
         }
     }
 }
@@ -40,11 +57,29 @@ impl ClaimsState {
     /// Forces the next refresh, whatever the key.
     pub fn mark_stale(&mut self) {
         self.stale = true;
+        self.plans_stale = true;
     }
 
     /// Whether the state must be recomputed for this key.
     pub fn needs_refresh(&self, key: &[[u64; 4]]) -> bool {
         self.stale || self.key != key
+    }
+
+    /// Whether the plan reads must be recomputed for this key.
+    pub fn needs_plan_reads(&self, key: &[[i64; 2]]) -> bool {
+        self.plans_stale || self.plans_key != key
+    }
+
+    /// Stores the plan reads and the key they were made for.
+    pub fn set_plan_reads(&mut self, key: Vec<[i64; 2]>, reads: Vec<PlanRead>) {
+        self.plans_key = key;
+        self.plan_reads = reads;
+        self.plans_stale = false;
+    }
+
+    /// The cached plan reads, in the order of the summaries they were read for.
+    pub fn plan_reads(&self) -> &[PlanRead] {
+        &self.plan_reads
     }
 
     /// Stores a computed result. An error keeps the last good claims and reports the error once.
@@ -68,6 +103,33 @@ impl ClaimsState {
             ),
         }
     }
+}
+
+/// Reads every listed plan's record, products and stock scope, unless the cache already holds
+/// them for this key. A failed read leaves the cache untouched for the next frame to retry.
+pub fn refresh_plan_reads(cx: &mut Shared, listed: &[PlanSummary]) -> mop_store::Result<()> {
+    let key: Vec<[i64; 2]> = listed
+        .iter()
+        .map(|plan| [plan.id, plan.updated_at])
+        .collect();
+    if !cx.claims.needs_plan_reads(&key) {
+        return Ok(());
+    }
+    let mut reads = Vec::with_capacity(listed.len());
+    for plan in listed {
+        let Some(record) = cx.store.plan(plan.id)? else {
+            continue;
+        };
+        let products = cx.store.plan_products(plan.id)?;
+        let stock = cx.store.plan_stock(plan.id)?;
+        reads.push(PlanRead {
+            record,
+            products,
+            stock,
+        });
+    }
+    cx.claims.set_plan_reads(key, reads);
+    Ok(())
 }
 
 /// The running manufacturing and reaction jobs of the given characters, in the order given.
@@ -323,6 +385,17 @@ mod tests {
         assert!(state.needs_refresh(&[[1, 1, 2, 0]]));
         state.mark_stale();
         assert!(state.needs_refresh(&[[1, 0, 2, 0]]));
+    }
+
+    #[test]
+    fn plan_reads_follow_their_key_and_mark_stale() {
+        let mut state = ClaimsState::default();
+        assert!(state.needs_plan_reads(&[[1, 10]]));
+        state.set_plan_reads(vec![[1, 10]], Vec::new());
+        assert!(!state.needs_plan_reads(&[[1, 10]]));
+        assert!(state.needs_plan_reads(&[[1, 11]]));
+        state.mark_stale();
+        assert!(state.needs_plan_reads(&[[1, 10]]));
     }
 
     #[test]
