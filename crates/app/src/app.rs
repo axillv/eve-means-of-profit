@@ -63,11 +63,12 @@ use claims::ClaimsState;
 use dock::UserNames;
 use first_run::{Reply, Startup};
 use jobs::{JobsPage, JobsPanel};
-use layout::model::{Binding, Layout, PanelRef};
+use layout::files::Files;
+use layout::model::{Binding, Layout, PanelRef, Slot};
 use layout::user::UserLayouts;
 use net_worth::{NetWorthPage, NetWorthPanel};
 use orders::{OrdersPage, OrdersPanel};
-use rail::{Page, Shown};
+use rail::{Page, RailAction, Shown};
 use selection::Selection;
 use session::{EveAccess, Loaded, Session};
 use setup::{SetupPage, SetupPanel};
@@ -295,6 +296,32 @@ fn saved_docks(store: &Store) -> Result<Docks, mop_store::StoreError> {
             SetupPanel::title,
         )?,
     })
+}
+
+/// The egui temp id that holds the text in the `Paste layout` window while it is open.
+fn paste_layout_id() -> egui::Id {
+    egui::Id::new("paste layout window text")
+}
+
+/// The arrangement of a shipped page's dock as a player's layout: every tab by its panel's title,
+/// a panel this version knows by its key, and one it does not by the title as written. Every slot
+/// follows the selection.
+fn page_arrangement<P: Copy>(dock: &DockState<P>, title: fn(P) -> &'static str) -> Layout {
+    let slots = dock.map_tabs(|panel| {
+        let name = title(*panel);
+        let panel = layout::panels::panels()
+            .iter()
+            .find(|info| info.name == name)
+            .map_or_else(
+                || PanelRef::Unknown(name.to_owned()),
+                |info| PanelRef::Known(info.key),
+            );
+        Slot {
+            panel,
+            binding: Binding::Follow,
+        }
+    });
+    layout::dock_convert::from_dock(&slots, "")
 }
 
 /// The names a player's layout needs for its headers: what is selected to follow, and the name of
@@ -548,6 +575,8 @@ pub struct App {
     /// The layout on show, `None` when a shipped page is.
     layout_shown: Option<usize>,
     what_to_build_page: WhatToBuildPage,
+    /// The open and save dialogs, and where their layouts come from and go to.
+    files: Files,
     build_page: BuildPage,
     build_dock: DockState<BuildPanel>,
     assets_page: AssetsPage,
@@ -633,8 +662,7 @@ impl App {
         style.apply(ctx);
         ctx.options_mut(|options| options.zoom_with_keyboard = false);
         ctx.set_zoom_factor(f32::from(settings.interface_size.percent()) / 100.0);
-        let docks = saved_docks(&store)?;
-        let (events_tx, events) = mpsc::channel();
+        let (docks, (events_tx, events)) = (saved_docks(&store)?, mpsc::channel());
         let mut app = Self {
             ctx: ctx.clone(),
             shared: Shared {
@@ -670,6 +698,7 @@ impl App {
             user,
             layout_shown: None,
             what_to_build_page: WhatToBuildPage::default(),
+            files: Files::native(),
             build_page: BuildPage::default(),
             build_dock: docks.build,
             assets_page: AssetsPage,
@@ -712,6 +741,11 @@ impl App {
         self.go_to(page);
     }
 
+    /// Replaces the open and save dialogs, for code that drives the app from outside.
+    pub fn set_files(&mut self, files: Files) {
+        self.files = files;
+    }
+
     /// Makes `page` the page on show, and takes any player's layout off the screen.
     fn go_to(&mut self, page: Page) {
         self.page = page;
@@ -736,6 +770,7 @@ impl App {
         }
         self.zoom_with_keys(ui);
         self.menu_bar(ui);
+        self.paste_window(ui);
         let activity = self.activity();
         let idle = self.idle_text();
         let clicked = status::show(
@@ -792,6 +827,17 @@ impl App {
         egui::Panel::top("menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
+                    if ui.button("Open layout file…").clicked() {
+                        self.open_layout_file();
+                        ui.close();
+                    }
+                    if ui.button("Paste layout").clicked() {
+                        self.ctx.data_mut(|data| {
+                            data.insert_temp(paste_layout_id(), String::new());
+                        });
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui.button("Quit").clicked() {
                         ui.ctx().send_viewport_cmd(ViewportCommand::Close);
                         ui.close();
@@ -807,6 +853,148 @@ impl App {
         });
     }
 
+    /// Draws the `Paste layout` window while it is open. `Add` reads the text and closes the
+    /// window; `Cancel` closes it and reads nothing.
+    fn paste_window(&mut self, ui: &mut Ui) {
+        let id = paste_layout_id();
+        let Some(mut text) = ui.ctx().data(|data| data.get_temp::<String>(id)) else {
+            return;
+        };
+        let mut add = false;
+        let mut cancel = false;
+        egui::Window::new("Paste layout")
+            .id(egui::Id::new("paste layout window"))
+            .collapsible(false)
+            .resizable(true)
+            .show(ui.ctx(), |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut text)
+                        .desired_rows(12)
+                        .desired_width(520.0),
+                );
+                ui.horizontal(|ui| {
+                    add = ui.button("Add").clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
+            });
+        if add {
+            self.add_pasted(&text);
+            ui.ctx().data_mut(|data| data.remove::<String>(id));
+        } else if cancel {
+            ui.ctx().data_mut(|data| data.remove::<String>(id));
+        } else {
+            ui.ctx().data_mut(|data| data.insert_temp(id, text));
+        }
+    }
+
+    /// Reads the file the player picked and adds its layout. A file dialog the player cancelled
+    /// changes nothing.
+    fn open_layout_file(&mut self) {
+        let Some(path) = (self.files.open)() else {
+            return;
+        };
+        let taken = self.taken_names();
+        let taken: Vec<&str> = taken.iter().map(String::as_str).collect();
+        match layout::files::import_file(&path, layout::panels::panels(), &taken) {
+            Ok(imported) => self.add_imported(imported),
+            Err(notice) => build::state::push_error(&mut self.shared.notices, notice.text),
+        }
+    }
+
+    /// Reads a layout pasted into the `Paste layout` window and adds it.
+    fn add_pasted(&mut self, text: &str) {
+        let taken = self.taken_names();
+        let taken: Vec<&str> = taken.iter().map(String::as_str).collect();
+        match layout::files::import_text(text, layout::panels::panels(), &taken) {
+            Ok(imported) => self.add_imported(imported),
+            Err(notice) => build::state::push_error(&mut self.shared.notices, notice.text),
+        }
+    }
+
+    /// Adds an imported layout, shows it, and reports what came in and what was left out.
+    fn add_imported(&mut self, imported: layout::files::Imported) {
+        let (index, saved) = self.user.push(imported.layout);
+        self.layout_shown = Some(index);
+        self.shared.notices.extend(imported.notices);
+        if let Some(notice) = saved {
+            build::state::push_error(&mut self.shared.notices, notice.text);
+        }
+    }
+
+    /// Every name a new layout may not take: every page label and every layout name.
+    fn taken_names(&self) -> Vec<String> {
+        let mut taken: Vec<String> = Page::ALL
+            .iter()
+            .map(|page| page.label().to_owned())
+            .collect();
+        taken.extend(self.user.names());
+        taken
+    }
+
+    /// The arrangement of a shipped page's dock as a player's layout.
+    fn page_layout(&self, page: Page) -> Layout {
+        match page {
+            Page::Today | Page::WhatToBuild => Layout {
+                name: String::new(),
+                root: None,
+            },
+            Page::Build => page_arrangement(&self.build_dock, BuildPanel::title),
+            Page::Assets => page_arrangement(&self.assets_dock, AssetsPanel::title),
+            Page::NetWorth => page_arrangement(&self.net_worth_dock, NetWorthPanel::title),
+            Page::Orders => page_arrangement(&self.orders_dock, OrdersPanel::title),
+            Page::Jobs => page_arrangement(&self.jobs_dock, JobsPanel::title),
+            Page::Characters => page_arrangement(&self.characters_dock, CharactersPanel::title),
+            Page::Stockpiles => page_arrangement(&self.stockpiles_dock, StockpilesPanel::title),
+            Page::Setup => page_arrangement(&self.setup_dock, SetupPanel::title),
+        }
+    }
+
+    /// Does what a right-click on the rail asked for.
+    fn rail_action(&mut self, action: RailAction) {
+        match action {
+            RailAction::SaveCopy(page) => {
+                let arrangement = self.page_layout(page);
+                let (index, notice) = self.user.save_copy(page.label(), arrangement);
+                self.layout_shown = Some(index);
+                if let Some(notice) = notice {
+                    build::state::push_error(&mut self.shared.notices, notice.text);
+                }
+            }
+            RailAction::Copy(index) => {
+                self.ctx.copy_text(self.user.copy_text(index));
+                self.shared.notices.push(Notice::info(
+                    "Layout copied. Paste it in Discord or in the app (File > Paste layout).",
+                ));
+            }
+            RailAction::SaveToFile(index) => {
+                let (name, text) = self.user.file_text(index);
+                if let Some(path) = (self.files.save)(&name) {
+                    let notice = layout::files::write_text(&path, &text);
+                    self.shared.notices.push(notice);
+                }
+            }
+            RailAction::Rename { index, name } => {
+                if let Some(notice) = self.user.rename(index, name) {
+                    build::state::push_error(&mut self.shared.notices, notice.text);
+                }
+            }
+            RailAction::Delete(index) => {
+                let shown = self.layout_shown;
+                if let Some(notice) = self.user.delete(index) {
+                    build::state::push_error(&mut self.shared.notices, notice.text);
+                }
+                self.layout_shown = match shown {
+                    Some(shown) if shown == index => {
+                        self.page = Page::ALL[0];
+                        None
+                    }
+                    Some(shown) if shown > index => Some(shown - 1),
+                    shown => shown,
+                };
+            }
+        }
+    }
+
     /// Draws the rail and takes the entry the player picked, page or layout.
     fn rail(&mut self, ui: &mut Ui, style: &Style) {
         if self.shared.rail_icons_only {
@@ -818,11 +1006,13 @@ impl App {
             Some(index) => Shown::Layout(index),
             None => Shown::Page(self.page),
         };
-        // A right-click on the rail waits for the task that does its actions.
-        let _action = rail::show_with_layouts(ui, style, &mut shown, &names);
+        let action = rail::show_with_layouts(ui, style, &mut shown, &names);
         match shown {
             Shown::Page(page) => self.go_to(page),
             Shown::Layout(index) => self.layout_shown = Some(index),
+        }
+        if let Some(action) = action {
+            self.rail_action(action);
         }
     }
 
@@ -844,6 +1034,7 @@ impl App {
                 .total_margin()
                 .sum()
                 .x;
+        let mut action = None;
         egui::Panel::left("rail")
             .exact_size(width)
             .resizable(false)
@@ -867,6 +1058,7 @@ impl App {
                         }
                         response.context_menu(|menu| {
                             if menu.button("Save a copy").clicked() {
+                                action = Some(RailAction::SaveCopy(entry));
                                 menu.close();
                             }
                         });
@@ -894,6 +1086,9 @@ impl App {
         match shown {
             Shown::Page(page) => self.go_to(page),
             Shown::Layout(index) => self.layout_shown = Some(index),
+        }
+        if let Some(action) = action {
+            self.rail_action(action);
         }
     }
 
