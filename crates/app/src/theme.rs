@@ -8,12 +8,45 @@ use egui::{
     Visuals, vec2,
 };
 
+/// The name of the text style for big numbers.
+pub const BIG: &str = "Big";
+
+/// The sizes the widgets lay pages out with, in points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sizes {
+    /// Page padding at the sides, in points.
+    pub page_margin_x: f32,
+    /// Page padding at the top and bottom, in points.
+    pub page_margin_y: f32,
+    /// Gap between page columns, in points.
+    pub column_gap: f32,
+    /// Gap between cards, in points.
+    pub sheet_gap: f32,
+    /// Height of the page title row, in points.
+    pub page_header: f32,
+    /// Space under the page title row, in points.
+    pub page_header_gap: f32,
+    /// Height of a card title row, in points.
+    pub sheet_header: f32,
+    /// Card side padding, in points.
+    pub sheet_pad: f32,
+    /// Height of a small button, in points.
+    pub small_button: f32,
+    /// Height of the status line, in points.
+    pub status_height: f32,
+    /// Height of a rail entry, in points.
+    pub rail_row: f32,
+    /// Size of a rail icon, in points.
+    pub rail_icon: f32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Style {
     pub bg: Color32,
     pub panel: Color32,
     pub row: Color32,
     pub line: Color32,
+    pub tick: Color32,
     pub sel: Color32,
     pub text: Color32,
     pub mute: Color32,
@@ -30,6 +63,8 @@ pub struct Style {
     pub rail_width: f32,
     /// Width of the rail in icons-only mode, in points.
     pub rail_narrow: f32,
+    /// The sizes shared by the pages and widgets.
+    pub sizes: Sizes,
 }
 
 /// The default fonts plus Phosphor Regular as a fallback for icons.
@@ -55,6 +90,7 @@ impl Style {
             panel: Color32::from_rgb(0x1a, 0x1b, 0x1e),
             row: Color32::from_rgb(0x21, 0x23, 0x27),
             line: Color32::from_rgb(0x2c, 0x2e, 0x33),
+            tick: Color32::from_rgb(0x45, 0x48, 0x50),
             sel: Color32::from_rgb(0x2a, 0x24, 0x18),
             text: Color32::from_rgb(0xd2, 0xd0, 0xcb),
             mute: Color32::from_rgb(0x8d, 0x8d, 0x8a),
@@ -65,8 +101,22 @@ impl Style {
             neg: Color32::from_rgb(0xc4, 0x77, 0x68),
             radius: 12,
             control_radius: 8,
-            rail_width: 80.0,
+            rail_width: 172.0,
             rail_narrow: 48.0,
+            sizes: Sizes {
+                page_margin_x: 16.0,
+                page_margin_y: 12.0,
+                column_gap: 12.0,
+                sheet_gap: 10.0,
+                page_header: 34.0,
+                page_header_gap: 10.0,
+                sheet_header: 38.0,
+                sheet_pad: 14.0,
+                small_button: 24.0,
+                status_height: 28.0,
+                rail_row: 34.0,
+                rail_icon: 18.0,
+            },
         }
     }
 
@@ -111,7 +161,7 @@ impl Style {
         style.text_styles = [
             (
                 TextStyle::Small,
-                FontId::new(11.0, FontFamily::Proportional),
+                FontId::new(12.0, FontFamily::Proportional),
             ),
             (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
             (
@@ -124,12 +174,16 @@ impl Style {
             ),
             (
                 TextStyle::Heading,
-                FontId::new(18.0, FontFamily::Proportional),
+                FontId::new(20.0, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Name(BIG.into()),
+                FontId::new(32.0, FontFamily::Proportional),
             ),
         ]
         .into();
-        style.spacing.interact_size.y = 24.0;
-        style.spacing.button_padding = vec2(8.0, 4.0);
+        style.spacing.interact_size.y = 28.0;
+        style.spacing.button_padding = vec2(12.0, 4.0);
         ctx.set_theme(Theme::Dark);
         ctx.set_global_style(style);
     }
@@ -191,5 +245,37 @@ mod tests {
     #[test]
     fn the_rail_has_an_icons_only_width() {
         assert_eq!(Style::eve_dense().rail_narrow, 48.0);
+    }
+
+    #[test]
+    fn the_big_number_style_is_32_px() {
+        let ctx = Context::default();
+        Style::eve_dense().apply(&ctx);
+        let size = ctx.global_style().text_styles[&TextStyle::Name(BIG.into())].size;
+        assert_eq!(size, 32.0);
+    }
+
+    #[test]
+    fn the_theme_carries_the_layout_sizes() {
+        let style = Style::eve_dense();
+        assert_eq!(
+            style.sizes,
+            Sizes {
+                page_margin_x: 16.0,
+                page_margin_y: 12.0,
+                column_gap: 12.0,
+                sheet_gap: 10.0,
+                page_header: 34.0,
+                page_header_gap: 10.0,
+                sheet_header: 38.0,
+                sheet_pad: 14.0,
+                small_button: 24.0,
+                status_height: 28.0,
+                rail_row: 34.0,
+                rail_icon: 18.0,
+            }
+        );
+        assert_eq!(style.tick, Color32::from_rgb(0x45, 0x48, 0x50));
+        assert_eq!(style.rail_width, 172.0);
     }
 }

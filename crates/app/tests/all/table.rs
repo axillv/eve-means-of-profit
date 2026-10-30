@@ -517,7 +517,8 @@ mod tests {
         );
         harness.run();
         // The checkbox sits in the Need column, on the row of Hobgoblin I: right of its Item text,
-        // left of the Value column, and level with its text.
+        // left of the Value column, and level with its text. The 28 px control is taller than the
+        // 24 px Normal row and sits top-aligned in it, so its centre is 2 px below the text's.
         let pick = harness.get_by_label("Pick").rect();
         let item = harness.get_by_label("Hobgoblin I").rect();
         let value_header = harness.get_by_label("Value").rect();
@@ -529,7 +530,10 @@ mod tests {
             pick.max.x < value_header.min.x,
             "the checkbox is left of the Value cell"
         );
-        assert!((pick.center().y - item.center().y).abs() < 2.0);
+        assert!(
+            (pick.center().y - item.center().y).abs() < 2.5,
+            "the checkbox still overlaps the row's text line: pick {pick:?}, item {item:?}"
+        );
         harness.get_by_label("Pick").click();
         harness.run();
         assert!(
@@ -780,18 +784,18 @@ mod tests {
     }
 
     #[test]
-    fn the_theme_sets_14_px_text_and_24_px_controls() {
+    fn the_theme_sets_14_px_text_and_28_px_controls() {
         let ctx = Context::default();
         Style::eve_dense().apply(&ctx);
         let style = ctx.global_style();
         let size = |text: TextStyle| style.text_styles[&text].size;
         assert_eq!(size(TextStyle::Body), 14.0);
         assert_eq!(size(TextStyle::Button), 14.0);
-        assert_eq!(size(TextStyle::Small), 11.0);
+        assert_eq!(size(TextStyle::Small), 12.0);
         assert_eq!(size(TextStyle::Monospace), 13.0);
-        assert_eq!(size(TextStyle::Heading), 18.0);
-        assert_eq!(style.spacing.interact_size.y, 24.0);
-        assert_eq!(style.spacing.button_padding, vec2(8.0, 4.0));
+        assert_eq!(size(TextStyle::Heading), 20.0);
+        assert_eq!(style.spacing.interact_size.y, 28.0);
+        assert_eq!(style.spacing.button_padding, vec2(12.0, 4.0));
     }
 
     /// A 16 by 16 picture that is red everywhere.
