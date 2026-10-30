@@ -457,3 +457,25 @@ fn fit_groups(id: TypeId, attributes: &Dogma) -> Result<Vec<(TypeId, u32)>, SdeE
     }
     Ok(groups)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::exact_scaled;
+
+    #[test]
+    fn a_number_with_no_whole_part_is_rejected() {
+        assert_eq!(exact_scaled(".5", 1), None);
+    }
+
+    #[test]
+    fn a_plus_sign_is_not_a_sign() {
+        assert_eq!(exact_scaled("+5", 0), None);
+    }
+
+    #[test]
+    fn exact_scaled_reads_digits_and_rejects_dropped_ones() {
+        assert_eq!(exact_scaled("0.97", 2), Some(97));
+        assert_eq!(exact_scaled("-5", 0), Some(-5));
+        assert_eq!(exact_scaled("1.234", 2), None);
+    }
+}
