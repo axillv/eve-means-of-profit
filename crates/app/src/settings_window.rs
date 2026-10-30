@@ -1,5 +1,5 @@
 //! The Settings page's Display panel: the interface size, the market density and the rail's look
-//! (all saved at once), and the data folder.
+//! (all saved at once), whether to keep refreshing while open, and the data folder.
 
 use std::path::Path;
 
@@ -9,7 +9,7 @@ use mop_store::{Density, InterfaceSize};
 use crate::Shared;
 
 /// Draws every Settings control. Choosing an interface size, a density or a rail look saves it at
-/// once.
+/// once; the keep-refreshing choice saves as soon as it is ticked or unticked.
 pub fn show(ui: &mut Ui, shared: &mut Shared, data_dir: &Path) {
     ui.label("Interface size");
     let mut size = zoomed_size(ui.ctx().zoom_factor());
@@ -44,6 +44,16 @@ pub fn show(ui: &mut Ui, shared: &mut Shared, data_dir: &Path) {
         if picked && shared.change_settings(|settings| settings.rail_icons_only = choice) {
             shared.rail_icons_only = choice;
         }
+    }
+    ui.add_space(8.0);
+    ui.label("Refresh");
+    let mut keep = shared.refresh_while_open;
+    if ui
+        .checkbox(&mut keep, "Keep refreshing while open")
+        .changed()
+        && shared.save_refresh_while_open(keep)
+    {
+        shared.refresh_while_open = keep;
     }
     ui.add_space(8.0);
     ui.horizontal(|ui| {

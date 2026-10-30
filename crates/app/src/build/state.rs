@@ -1169,6 +1169,7 @@ mod tests {
             style: Style::eve_dense(),
             density: Density::Normal,
             rail_icons_only: false,
+            refresh_while_open: false,
             data_dir: dir.path().to_path_buf(),
             notices: Vec::new(),
             clock: Box::new(|| NOW),

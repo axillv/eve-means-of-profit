@@ -50,6 +50,7 @@ use mop_esi::character_data::Refreshed;
 use mop_esi::error::EsiError;
 use mop_esi::industry::{self as esi_industry, IndustryData, IndustryKind};
 use mop_market::cache::Http;
+use mop_market::fuzzwork::MIN_GAP_SECS;
 use mop_sde::{
     Fetch, FetchError, ImportReport, Sde, SdeBuild, SdeError, download_and_import, latest_build,
     needs_update, update_due,
@@ -156,6 +157,9 @@ pub struct Shared {
     pub density: Density,
     /// Whether the rail shows icons alone, saved by an earlier run.
     pub rail_icons_only: bool,
+    /// Whether the app keeps asking for the login characters and The Forge prices while it is
+    /// open, no more often than the market's 15-minute minimum. Saved as `refresh_while_open`.
+    pub refresh_while_open: bool,
     /// The data folder, shown on the Settings page.
     pub data_dir: PathBuf,
     pub notices: Vec<Notice>,
@@ -200,6 +204,24 @@ impl Shared {
         } else {
             self.store.set_setting(&key, &text)
         };
+        match saved {
+            Ok(()) => true,
+            Err(error) => {
+                self.notices.push(Notice::error(format!(
+                    "Could not save the settings: {error}"
+                )));
+                false
+            }
+        }
+    }
+
+    /// Saves the `Keep refreshing while open` choice under `refresh_while_open`: `"1"` when the
+    /// app keeps refreshing while it is open, `"0"` when it does not. Returns whether the choice
+    /// was saved; a save that fails becomes an error notice and leaves the saved value alone.
+    pub fn save_refresh_while_open(&mut self, on: bool) -> bool {
+        let saved = self
+            .store
+            .set_setting("refresh_while_open", if on { "1" } else { "0" });
         match saved {
             Ok(()) => true,
             Err(error) => {
@@ -638,6 +660,9 @@ pub struct App {
     industry_loaded: bool,
     /// Per kind of industry data: whether a refresh is running and when it may run again.
     industry_timing: IndustryTimings,
+    /// When the keep-refreshing setting's next automatic refresh falls due, `None` when one is
+    /// due now or nothing is due at all (the setting off leaves it `None`).
+    refresh_at: Option<i64>,
 }
 
 /// When one kind of industry data may be fetched again, and whether a request is running.
@@ -695,10 +720,8 @@ impl App {
             .map(Sde::build)
             .transpose()?
             .map(|build| build.number);
-        let style = Style::eve_dense();
-        style.apply(ctx);
-        ctx.options_mut(|options| options.zoom_with_keyboard = false);
-        ctx.set_zoom_factor(f32::from(settings.interface_size.percent()) / 100.0);
+        let style = start_style(ctx, settings.interface_size.percent());
+        let keep_refreshing = store.setting("refresh_while_open")?.as_deref() == Some("1");
         let (docks, (events_tx, events)) = (saved_docks(&store)?, mpsc::channel());
         let mut app = Self {
             ctx: ctx.clone(),
@@ -714,6 +737,7 @@ impl App {
                 style,
                 density: settings.density,
                 rail_icons_only: settings.rail_icons_only,
+                refresh_while_open: keep_refreshing,
                 data_dir: config.data_dir,
                 notices,
                 clock: config.clock,
@@ -760,6 +784,7 @@ impl App {
             interface_size: settings.interface_size,
             industry_loaded: false,
             industry_timing: IndustryTimings::default(),
+            refresh_at: keep_refreshing.then(|| now.saturating_add(MIN_GAP_SECS)),
         };
         app.begin(settings.last_sde_check, now);
         Ok(app)
@@ -802,6 +827,8 @@ impl App {
     pub fn show(&mut self, ui: &mut Ui) {
         self.drain_events();
         characters::tick(&mut self.shared, &self.ctx);
+        // The keep-refreshing setting's own tick: one quiet refresh each time its gap runs out.
+        self.refresh_when_due();
         self.refresh_industry_when_due();
         net_worth::record::tick(
             &mut self.shared,
@@ -1671,6 +1698,27 @@ impl App {
         self.shared.worker.run(job);
     }
 
+    /// Asks for every login character and The Forge prices again when the keep-refreshing setting
+    /// is on, the session has loaded, and the market's 15-minute gap since the last ask has run
+    /// out. The ask is not the player's, so a price answer that is too soon stays quiet. While the
+    /// choice is off nothing is due and the old time is dropped, so a choice turned back on asks
+    /// on the next frame instead of waiting out the gap it had left.
+    fn refresh_when_due(&mut self) {
+        if !self.shared.refresh_while_open {
+            self.refresh_at = None;
+            return;
+        }
+        if !self.shared.session.loaded() {
+            return;
+        }
+        let now = (self.shared.clock)();
+        if now < self.refresh_at.unwrap_or(now) {
+            return;
+        }
+        self.refresh_at = Some(now.saturating_add(MIN_GAP_SECS));
+        characters::refresh_all(&mut self.shared, &self.ctx, false);
+    }
+
     /// Starts a refresh of the industry kinds that are due, while a plan is shown on the Build
     /// page. One refresh per kind at a time; nothing is requested before the saved data is read.
     fn refresh_industry_when_due(&mut self) {
@@ -1877,6 +1925,16 @@ fn notify(tx: &Sender<Event>, ctx: &Context, event: Event) {
     ctx.request_repaint();
 }
 
+/// The theme the run starts with: applied to the context, along with the zoom the saved interface
+/// size asks for and the keyboard zoom turned off.
+fn start_style(ctx: &Context, percent: u16) -> Style {
+    let style = Style::eve_dense();
+    style.apply(ctx);
+    ctx.options_mut(|options| options.zoom_with_keyboard = false);
+    ctx.set_zoom_factor(f32::from(percent) / 100.0);
+    style
+}
+
 /// The game data, or `None` when none has been imported yet.
 fn open_sde(path: &Path) -> Result<Option<Sde>, SdeError> {
     match Sde::open(path) {
@@ -1960,6 +2018,7 @@ mod tests {
             style: Style::eve_dense(),
             density: Density::Normal,
             rail_icons_only: false,
+            refresh_while_open: false,
             data_dir: dir.path().to_path_buf(),
             notices: Vec::new(),
             clock: Box::new(|| NOW),
@@ -2126,5 +2185,67 @@ mod tests {
             Some(id),
             "the plan on screen waits for the answer"
         );
+    }
+
+    #[test]
+    fn the_keep_refreshing_choice_saves_a_1_and_a_0() {
+        let dir = TempDir::new().expect("a temp folder");
+        let mut cx = shared(&dir);
+        assert!(cx.save_refresh_while_open(true));
+        assert_eq!(
+            cx.store
+                .setting("refresh_while_open")
+                .expect("the setting reads")
+                .as_deref(),
+            Some("1")
+        );
+        assert!(cx.save_refresh_while_open(false));
+        assert_eq!(
+            cx.store
+                .setting("refresh_while_open")
+                .expect("the setting reads")
+                .as_deref(),
+            Some("0")
+        );
+        assert!(cx.notices.is_empty(), "both saves leave no notice");
+    }
+
+    /// Stores the keep-refreshing choice, as an earlier run of the app would have.
+    fn set_refresh_choice(data: &Path, value: &str) {
+        let mut store = Store::open(&data.join(USER_DB), NOW)
+            .expect("the store opens")
+            .store;
+        store
+            .set_setting("refresh_while_open", value)
+            .expect("the choice saves");
+    }
+
+    #[test]
+    fn a_new_app_reads_the_keep_refreshing_choice_into_its_next_refresh() {
+        let dir = TempDir::new().expect("a temp folder");
+        let data = dir.path().join("data");
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&data).expect("the data folder");
+
+        // No key at all: the choice is off and no refresh is due.
+        let app = App::new(&Context::default(), config(data.clone(), cache.clone()))
+            .expect("the app starts");
+        assert!(!app.shared.refresh_while_open);
+        assert_eq!(app.refresh_at, None);
+        drop(app);
+
+        // The saved 1 reads as on, with the first wait the market's own gap.
+        set_refresh_choice(&data, "1");
+        let app = App::new(&Context::default(), config(data.clone(), cache.clone()))
+            .expect("the app starts");
+        assert!(app.shared.refresh_while_open);
+        assert_eq!(app.refresh_at, Some(NOW + MIN_GAP_SECS));
+        drop(app);
+
+        // Any other value reads as off again, with nothing due.
+        set_refresh_choice(&data, "0");
+        let app = App::new(&Context::default(), config(data, cache)).expect("the app starts");
+        assert!(!app.shared.refresh_while_open);
+        assert_eq!(app.refresh_at, None);
     }
 }

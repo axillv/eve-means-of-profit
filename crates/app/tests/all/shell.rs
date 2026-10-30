@@ -6,6 +6,7 @@ mod tests {
     use std::fs;
     use std::io::{Cursor, Write};
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::mpsc::{self, Receiver};
     use std::sync::{Arc, Mutex, PoisonError};
     use std::thread;
@@ -240,14 +241,30 @@ mod tests {
             settings.rail_icons_only = icons_only;
             store.save_settings(&settings).unwrap();
         }
+
+        /// Stores the keep-refreshing choice, as the Display panel's box would have saved it.
+        fn set_refresh_while_open(&self, value: &str) {
+            fs::create_dir_all(&self.data).unwrap();
+            let mut store = Store::open(&self.user_db(), NOW).unwrap().store;
+            store.set_setting("refresh_while_open", value).unwrap();
+        }
     }
 
     fn start(fake: Fake, folders: &Folders) -> Harness<'static, App> {
+        start_with_clock(fake, folders, Arc::new(AtomicI64::new(NOW)))
+    }
+
+    /// The app on `folders`' files, with a clock the test moves instead of a fixed one.
+    fn start_with_clock(
+        fake: Fake,
+        folders: &Folders,
+        clock: Arc<AtomicI64>,
+    ) -> Harness<'static, App> {
         let config = AppConfig {
             data_dir: folders.data.clone(),
             cache_dir: folders.cache.clone(),
             fetch: Box::new(fake),
-            clock: Box::new(|| NOW),
+            clock: Box::new(move || clock.load(Ordering::SeqCst)),
             eve: Box::new(NoEve),
             market: Box::new(Offline),
         };
@@ -289,6 +306,49 @@ mod tests {
         }
     }
 
+    /// The `explicit` marks of the price answers that arrived since the last call.
+    fn take_prices(harness: &mut Harness<'_, App>) -> Vec<bool> {
+        harness
+            .state_mut()
+            .shared_mut()
+            .market
+            .take_outcomes()
+            .into_iter()
+            .map(|outcome| outcome.explicit)
+            .collect()
+    }
+
+    /// Runs frames until `wanted` price answers have arrived, and returns their marks.
+    fn wait_for_prices(harness: &mut Harness<'_, App>, wanted: usize) -> Vec<bool> {
+        let mut all = Vec::new();
+        let started = Instant::now();
+        while all.len() < wanted {
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "only {} price answers arrived, wanted {wanted}",
+                all.len()
+            );
+            harness.run_steps(1);
+            thread::sleep(Duration::from_millis(5));
+            all.extend(take_prices(harness));
+        }
+        all
+    }
+
+    /// Runs frames until no price request is queued or running, so that the next ask cannot be
+    /// dropped as a duplicate of this one.
+    fn prices_settled(harness: &mut Harness<'_, App>) {
+        let started = Instant::now();
+        while harness.state_mut().shared_mut().market.running() {
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "the price request never finished"
+            );
+            harness.run_steps(1);
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// Scrolls the Display panel with the pointer held at `at`, by `delta` points down (negative)
     /// or up (positive). The controls at the bottom of the panel need it.
     fn scroll_display(harness: &mut Harness<'_, App>, at: Pos2, delta: f32) {
@@ -323,6 +383,12 @@ mod tests {
     fn saved_rail_icons_only(folders: &Folders) -> bool {
         let mut store = Store::open(&folders.user_db(), NOW).unwrap().store;
         store.settings().unwrap().rail_icons_only
+    }
+
+    /// The keep-refreshing choice as the test's data folder holds it, `None` when never saved.
+    fn saved_refresh_while_open(folders: &Folders) -> Option<String> {
+        let store = Store::open(&folders.user_db(), NOW).unwrap().store;
+        store.setting("refresh_while_open").unwrap()
     }
 
     /// The text put on the clipboard by the frame just drawn, if any.
@@ -361,6 +427,36 @@ mod tests {
             .accesskit_node()
             .toggled()
             == Some(egui::accesskit::Toggled::True)
+    }
+
+    /// Whether the checkbox labelled `label` is ticked.
+    fn ticked(harness: &Harness<'_, App>, label: &str) -> bool {
+        harness
+            .query_all_by_label(label)
+            .find(|node| node.accesskit_node().role() == egui::accesskit::Role::CheckBox)
+            .unwrap_or_else(|| panic!("no checkbox labelled {label}"))
+            .accesskit_node()
+            .toggled()
+            == Some(egui::accesskit::Toggled::True)
+    }
+
+    /// Ticks or unticks the checkbox labelled `label`, scrolling it into view first. The pick goes
+    /// through accesskit, which reaches the box even where the panel has it below its fold.
+    fn click_checkbox(harness: &mut Harness<'_, App>, label: &str) {
+        {
+            let node = harness
+                .query_all_by_label(label)
+                .find(|node| node.accesskit_node().role() == egui::accesskit::Role::CheckBox)
+                .unwrap_or_else(|| panic!("no checkbox labelled {label}"));
+            node.scroll_to_me();
+        }
+        harness.run_steps(2);
+        harness
+            .query_all_by_label(label)
+            .find(|node| node.accesskit_node().role() == egui::accesskit::Role::CheckBox)
+            .unwrap_or_else(|| panic!("no checkbox labelled {label}"))
+            .click_accesskit();
+        harness.run_steps(3);
     }
 
     #[test]
@@ -975,6 +1071,291 @@ mod tests {
         assert!(
             harness.get_by_label("Build").rect().width() > 48.0,
             "the labelled Build entry is wider again"
+        );
+    }
+
+    #[test]
+    fn the_keep_refreshing_box_saves_a_1_and_a_0_and_a_new_app_reads_them() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(990_000);
+        let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
+        until(&mut harness, "the build pages", build_page_shown);
+        harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
+        until(&mut harness, "the settings page", |h| {
+            shown(h, "Interface size")
+        });
+
+        assert!(shown(&harness, "Refresh"), "the refresh section is listed");
+        assert!(
+            shown(&harness, "Keep refreshing while open"),
+            "the keep-refreshing choice is listed"
+        );
+        assert!(
+            !ticked(&harness, "Keep refreshing while open"),
+            "a fresh start has the choice off"
+        );
+        assert_eq!(saved_refresh_while_open(&folders).as_deref(), None);
+
+        click_checkbox(&mut harness, "Keep refreshing while open");
+        settle(&mut harness);
+        assert!(ticked(&harness, "Keep refreshing while open"));
+        assert!(harness.state_mut().shared_mut().refresh_while_open);
+        assert_eq!(saved_refresh_while_open(&folders).as_deref(), Some("1"));
+
+        // A new app on the same files reads the saved 1 as on.
+        drop(harness);
+        let mut reopened = start(Fake::new(Latest::Status(503)), &folders);
+        until(&mut reopened, "the build pages", build_page_shown);
+        assert!(
+            reopened.state_mut().shared_mut().refresh_while_open,
+            "the saved 1 reads as on"
+        );
+        drop(reopened);
+
+        // The box unticks to a saved 0.
+        let mut harness = start(Fake::new(Latest::Status(503)), &folders);
+        until(&mut harness, "the build pages", build_page_shown);
+        harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
+        until(&mut harness, "the settings page", |h| {
+            shown(h, "Interface size")
+        });
+        assert!(ticked(&harness, "Keep refreshing while open"));
+        click_checkbox(&mut harness, "Keep refreshing while open");
+        settle(&mut harness);
+        assert!(!ticked(&harness, "Keep refreshing while open"));
+        assert!(!harness.state_mut().shared_mut().refresh_while_open);
+        assert_eq!(saved_refresh_while_open(&folders).as_deref(), Some("0"));
+        drop(harness);
+
+        // A fresh data folder with no key at all reads as off.
+        let fresh = Folders::new();
+        fresh.install_game_data();
+        fresh.set_last_check(990_000);
+        let mut harness = start(Fake::new(Latest::Status(503)), &fresh);
+        assert!(!harness.state_mut().shared_mut().refresh_while_open);
+    }
+
+    #[test]
+    fn with_the_keep_refreshing_choice_off_no_price_is_asked_again() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(990_000);
+        let clock = Arc::new(AtomicI64::new(NOW));
+        let mut harness = start_with_clock(
+            Fake::new(Latest::Body(latest_body(BUILD))),
+            &folders,
+            Arc::clone(&clock),
+        );
+        until(&mut harness, "the build pages", build_page_shown);
+
+        assert_eq!(
+            wait_for_prices(&mut harness, 1),
+            vec![false],
+            "the start-up ask is quiet"
+        );
+        prices_settled(&mut harness);
+        assert!(
+            take_prices(&mut harness).is_empty(),
+            "the start-up ask gives one answer"
+        );
+
+        clock.store(NOW + 3_600, Ordering::SeqCst);
+        settle(&mut harness);
+        assert!(
+            take_prices(&mut harness).is_empty(),
+            "twenty frames an hour on ask for nothing"
+        );
+    }
+
+    #[test]
+    fn with_the_keep_refreshing_choice_on_the_prices_are_asked_again_every_fifteen_minutes() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(990_000);
+        folders.set_refresh_while_open("1");
+        let clock = Arc::new(AtomicI64::new(NOW));
+        let mut harness = start_with_clock(
+            Fake::new(Latest::Body(latest_body(BUILD))),
+            &folders,
+            Arc::clone(&clock),
+        );
+        until(&mut harness, "the build pages", build_page_shown);
+
+        assert_eq!(
+            wait_for_prices(&mut harness, 1),
+            vec![false],
+            "the start-up ask is quiet"
+        );
+        prices_settled(&mut harness);
+        assert!(
+            take_prices(&mut harness).is_empty(),
+            "exactly one answer at start"
+        );
+
+        clock.store(NOW + 899, Ordering::SeqCst);
+        settle(&mut harness);
+        assert!(
+            take_prices(&mut harness).is_empty(),
+            "at +899 the gap has not run out"
+        );
+
+        clock.store(NOW + 900, Ordering::SeqCst);
+        assert_eq!(
+            wait_for_prices(&mut harness, 1),
+            vec![false],
+            "at +900 one quiet answer"
+        );
+        prices_settled(&mut harness);
+        settle(&mut harness);
+        assert!(
+            take_prices(&mut harness).is_empty(),
+            "at +900 one answer, not two"
+        );
+
+        clock.store(NOW + 1_800, Ordering::SeqCst);
+        assert_eq!(
+            wait_for_prices(&mut harness, 1),
+            vec![false],
+            "at +1800 one quiet answer"
+        );
+        prices_settled(&mut harness);
+        settle(&mut harness);
+        assert!(
+            take_prices(&mut harness).is_empty(),
+            "at +1800 one answer, not two"
+        );
+    }
+
+    #[test]
+    fn turning_the_keep_refreshing_choice_on_asks_once_then_waits_its_gap() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(990_000);
+        let clock = Arc::new(AtomicI64::new(NOW));
+        let mut harness = start_with_clock(
+            Fake::new(Latest::Body(latest_body(BUILD))),
+            &folders,
+            Arc::clone(&clock),
+        );
+        until(&mut harness, "the build pages", build_page_shown);
+
+        assert_eq!(
+            wait_for_prices(&mut harness, 1),
+            vec![false],
+            "the start-up ask is quiet"
+        );
+        prices_settled(&mut harness);
+        assert!(
+            take_prices(&mut harness).is_empty(),
+            "the start-up ask gives one answer"
+        );
+
+        // The choice was off at start, so nothing was timed: ticking it makes the next frame due.
+        harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
+        until(&mut harness, "the settings page", |h| {
+            shown(h, "Interface size")
+        });
+        click_checkbox(&mut harness, "Keep refreshing while open");
+        settle(&mut harness);
+        assert!(
+            harness.state_mut().shared_mut().refresh_while_open,
+            "the choice is on"
+        );
+
+        assert_eq!(
+            wait_for_prices(&mut harness, 1),
+            vec![false],
+            "the frame after the tick asks once, quietly"
+        );
+        prices_settled(&mut harness);
+        settle(&mut harness);
+        assert!(
+            take_prices(&mut harness).is_empty(),
+            "the rest of the minute asks nothing"
+        );
+
+        clock.store(NOW + 899, Ordering::SeqCst);
+        settle(&mut harness);
+        assert!(
+            take_prices(&mut harness).is_empty(),
+            "the gap from the tick has not run out"
+        );
+
+        clock.store(NOW + 900, Ordering::SeqCst);
+        assert_eq!(
+            wait_for_prices(&mut harness, 1),
+            vec![false],
+            "the gap from the tick runs out at +900"
+        );
+    }
+
+    #[test]
+    fn turning_the_keep_refreshing_choice_off_and_on_again_asks_at_once() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(990_000);
+        folders.set_refresh_while_open("1");
+        let clock = Arc::new(AtomicI64::new(NOW));
+        let mut harness = start_with_clock(
+            Fake::new(Latest::Body(latest_body(BUILD))),
+            &folders,
+            Arc::clone(&clock),
+        );
+        until(&mut harness, "the build pages", build_page_shown);
+
+        assert_eq!(
+            wait_for_prices(&mut harness, 1),
+            vec![false],
+            "the start-up ask is quiet"
+        );
+        prices_settled(&mut harness);
+        assert!(
+            take_prices(&mut harness).is_empty(),
+            "the start-up ask gives one answer"
+        );
+
+        // Off while the start-up gap still has time left: nothing is asked, and the time the
+        // gap had left is dropped with the choice.
+        clock.store(NOW + 120, Ordering::SeqCst);
+        harness.key_press_modifiers(Modifiers::CTRL, Key::Comma);
+        until(&mut harness, "the settings page", |h| {
+            shown(h, "Interface size")
+        });
+        click_checkbox(&mut harness, "Keep refreshing while open");
+        settle(&mut harness);
+        assert!(
+            !harness.state_mut().shared_mut().refresh_while_open,
+            "the choice is off"
+        );
+        assert_eq!(saved_refresh_while_open(&folders).as_deref(), Some("0"));
+        settle(&mut harness);
+        assert!(
+            take_prices(&mut harness).is_empty(),
+            "the choice off asks for nothing"
+        );
+
+        // Back on before the gap's old time (NOW + 900) has come: the next frame asks, it does
+        // not wait out what the choice had left when it went off.
+        clock.store(NOW + 600, Ordering::SeqCst);
+        click_checkbox(&mut harness, "Keep refreshing while open");
+        settle(&mut harness);
+        assert!(
+            harness.state_mut().shared_mut().refresh_while_open,
+            "the choice is on again"
+        );
+        assert_eq!(saved_refresh_while_open(&folders).as_deref(), Some("1"));
+
+        assert_eq!(
+            wait_for_prices(&mut harness, 1),
+            vec![false],
+            "the frame after the choice comes back on asks at once, quietly"
+        );
+        prices_settled(&mut harness);
+        settle(&mut harness);
+        assert!(
+            take_prices(&mut harness).is_empty(),
+            "the ask comes once, not on every frame"
         );
     }
 
