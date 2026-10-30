@@ -15,6 +15,7 @@ use mop_store::PlanRecord;
 use super::prices::Held;
 use super::{Edit, Offer, buy_inputs, chosen, contract_line, offers};
 use crate::Shared;
+use crate::build::invention::InventionLine;
 use crate::build::state::{report, type_name};
 
 // `offers` calls `freight::quote`, which resolves to this module, so the core quote is re-exported here.
@@ -260,6 +261,9 @@ fn choose<T: Copy + PartialEq>(
 /// The rate card of the freight service the Buy list shows as chosen: none when the plan has no
 /// route. The job cost code reads it, so a bought part's freight is the one the Buy list charges.
 ///
+/// `invention` is the lines the Buy list shows: the counted invention of each part, which the
+/// buy list adds to its cargo.
+///
 /// # Errors
 /// The buy list cannot be worked out, so neither can the service it would choose.
 pub(crate) fn chosen_card(
@@ -269,11 +273,12 @@ pub(crate) fn chosen_card(
     cx: &mut Shared,
     held: &Held,
     now: i64,
+    invention: &[InventionLine],
 ) -> Result<Option<RateCard>, String> {
     if record.route.is_none() {
         return Ok(None);
     }
-    let Some((inputs, _)) = buy_inputs(plan, record, cx, held, now, &[]) else {
+    let Some((inputs, _)) = buy_inputs(plan, record, cx, held, now, invention) else {
         return Err(
             "the buy list does not add up: a volume or value does not fit the supported range"
                 .to_owned(),

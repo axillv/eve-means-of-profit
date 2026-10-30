@@ -449,6 +449,19 @@ pub fn invention_lines(
     Ok(inventions)
 }
 
+/// The lines the Buy list shows: the counted invention of each part, with the parts the plan
+/// does not invent or cannot count left out.
+fn counted_lines(inventions: &Inventions) -> Vec<InventionLine> {
+    inventions
+        .parts
+        .values()
+        .filter_map(|shown| match shown {
+            InventionShown::Counted { line, .. } => Some(line.clone()),
+            InventionShown::Not | InventionShown::Unavailable(_) => None,
+        })
+        .collect()
+}
+
 /// The plan's T2 steps: made by invention and with at least one run, one entry per type. A type
 /// the game data has no invention for is left out here.
 fn t2_steps(plan: &Plan, recipes: &RecipeBook) -> Vec<(TypeId, u64)> {
@@ -692,7 +705,8 @@ fn compute_inner(
     costs.inventions = invention_lines(ui, page, record, plan, cx, &held)?;
     // A buy list that cannot be worked out has no chosen freight: the decision would then leave
     // freight out silently, so it is the costs' error line instead.
-    let card = buy_list::chosen_card(ui, record, plan, cx, &held, now)?;
+    let invention = counted_lines(&costs.inventions);
+    let card = buy_list::chosen_card(ui, record, plan, cx, &held, now, &invention)?;
     let types = reachable(&page.products, recipes);
     let modifiers = modifiers(
         record,
@@ -877,6 +891,28 @@ mod tests {
                 panic!("expected counted numbers, got {other:?}")
             }
         }
+    }
+
+    #[test]
+    fn counted_lines_keeps_only_the_counted_parts() {
+        let activity = activity();
+        let product = product();
+        let datacores = datacores();
+        let inventions = Inventions {
+            parts: BTreeMap::from([
+                (1, InventionShown::Not),
+                (2, InventionShown::Unavailable("why".to_owned())),
+                (
+                    HOBGOBLIN_II,
+                    count_part(&input(&activity, &product, &datacores)),
+                ),
+            ]),
+            ..Inventions::default()
+        };
+        let lines = counted_lines(&inventions);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].type_id, HOBGOBLIN_II);
+        assert_eq!(lines[0].materials, vec![(20418, 1), (20419, 1)]);
     }
 
     fn recipe(made_by_invention: bool) -> Recipe {
