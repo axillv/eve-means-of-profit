@@ -5,7 +5,6 @@ use egui::{ComboBox, Id, RichText, Ui};
 use mop_core::fees::{Standing, npc_broker_rate, sales_tax_rate};
 use mop_core::industry::TypeId;
 use mop_core::money::Rate;
-use mop_esi::error::EsiError;
 use mop_esi::skills::{CharacterSkills, NpcStanding, StandingFrom};
 use mop_store::FeeSettings;
 
@@ -25,7 +24,6 @@ const BROKER_RELATIONS: TypeId = 3_446;
 /// The Caldari State faction and the Caldari Navy corporation.
 const CALDARI_STATE: u32 = 500_001;
 const CALDARI_NAVY: u32 = 1_000_035;
-const REFUSED: &str = "EVE refused. Log in again and allow skills and standings.";
 
 /// What the panel keeps between frames: the text of each field, and what the store holds.
 #[derive(Debug, Clone, Default)]
@@ -155,16 +153,6 @@ fn standing_of(standings: &[NpcStanding], from_id: u32, from: StandingFrom) -> S
         .find(|standing| standing.from_id == from_id && standing.from == from)
         .and_then(|standing| Standing::from_hundredths(standing.hundredths).ok())
         .unwrap_or_default()
-}
-
-/// The notice for a read that failed. EVE's refusal tells the player to log in again and allow
-/// skills and standings; anything else shows the error itself.
-pub(super) fn read_error(name: &str, error: &EsiError) -> String {
-    if matches!(error, EsiError::Server(403) | EsiError::Denied(_)) {
-        format!("Could not read {name}: {REFUSED}")
-    } else {
-        format!("Could not read {name}: {error}")
-    }
 }
 
 fn draw(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
@@ -329,11 +317,10 @@ mod tests {
     use mop_core::fees::Standing;
     use mop_core::industry::TypeId;
     use mop_core::money::Rate;
-    use mop_esi::error::EsiError;
     use mop_esi::skills::{CharacterSkills, NpcStanding, StandingFrom};
     use mop_store::FeeSettings;
 
-    use super::{fees_from, percent_text, read_error, standing_text};
+    use super::{fees_from, percent_text, standing_text};
 
     fn skills(levels: &[(TypeId, u8)]) -> CharacterSkills {
         CharacterSkills {
@@ -396,6 +383,18 @@ mod tests {
     }
 
     #[test]
+    fn a_standing_keeps_its_whole_part_and_two_decimals() {
+        assert_eq!(standing_text(standing(1_000)), "10.00");
+        assert_eq!(standing_text(standing(-1_000)), "-10.00");
+    }
+
+    #[test]
+    fn a_percentage_drops_only_the_trailing_zeros() {
+        assert_eq!(percent_text(Rate::from_ppm(1_000_000)), "100.00%");
+        assert_eq!(percent_text(Rate::from_ppm(12_340)), "1.234%");
+    }
+
+    #[test]
     fn a_read_without_the_fee_data_leaves_zero_and_keeps_the_override() {
         let before = FeeSettings {
             accounting: 2,
@@ -418,27 +417,6 @@ mod tests {
                 corporation_standing: standing(0),
                 broker_override: Some(Rate::from_ppm(2_500)),
             }
-        );
-    }
-
-    #[test]
-    fn a_refused_read_says_to_log_in_again() {
-        assert_eq!(
-            read_error("Ana Tester", &EsiError::Server(403)),
-            "Could not read Ana Tester: EVE refused. Log in again and allow skills and standings."
-        );
-        assert_eq!(
-            read_error("Ana Tester", &EsiError::Denied("no scope".to_owned())),
-            "Could not read Ana Tester: EVE refused. Log in again and allow skills and standings."
-        );
-    }
-
-    #[test]
-    fn another_read_error_shows_the_error_itself() {
-        let error = EsiError::Network("timed out".to_owned());
-        assert_eq!(
-            read_error("Ana Tester", &error),
-            format!("Could not read Ana Tester: {error}")
         );
     }
 }

@@ -21,7 +21,6 @@ use mop_esi::error::EsiError;
 use mop_esi::skills::{CharacterSkills, NpcStanding};
 use mop_store::StoreError;
 
-use self::fees::read_error;
 use crate::Shared;
 use crate::session::lock_eve;
 use crate::settings_window;
@@ -29,6 +28,7 @@ use crate::status::Notice;
 
 const NO_CHARACTER: &str = "No character logged in";
 const READING: &str = "Reading…";
+const REFUSED: &str = "EVE refused. Log in again and allow skills and standings.";
 
 /// What one read answers: the character's skills and standings, or why they could not be read.
 pub(super) type ReadResult = Result<(CharacterSkills, Vec<NpcStanding>), EsiError>;
@@ -180,6 +180,16 @@ fn start_read(
     }
 }
 
+/// The notice for a read that failed. EVE's refusal tells the player to log in again and allow
+/// skills and standings; anything else shows the error itself.
+fn read_error(name: &str, error: &EsiError) -> String {
+    if matches!(error, EsiError::Server(403) | EsiError::Denied(_)) {
+        format!("Could not read {name}: {REFUSED}")
+    } else {
+        format!("Could not read {name}: {error}")
+    }
+}
+
 /// Takes in the answer of a read, when it has come back. A good answer is returned; a failure
 /// shows its notice and leaves the panel's fields as they were.
 pub(super) fn take_read(reading: &mut Option<Reading>, cx: &mut Shared) -> Option<ReadAnswer> {
@@ -234,5 +244,33 @@ pub fn show(_page: &mut SetupPage, panel: SetupPanel, ui: &mut Ui, cx: &mut Shar
                 settings_window::show(ui, cx, &data_dir);
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mop_esi::error::EsiError;
+
+    use super::read_error;
+
+    #[test]
+    fn a_refused_read_says_to_log_in_again() {
+        assert_eq!(
+            read_error("Ana Tester", &EsiError::Server(403)),
+            "Could not read Ana Tester: EVE refused. Log in again and allow skills and standings."
+        );
+        assert_eq!(
+            read_error("Ana Tester", &EsiError::Denied("no scope".to_owned())),
+            "Could not read Ana Tester: EVE refused. Log in again and allow skills and standings."
+        );
+    }
+
+    #[test]
+    fn another_read_error_shows_the_error_itself() {
+        let error = EsiError::Network("timed out".to_owned());
+        assert_eq!(
+            read_error("Ana Tester", &error),
+            format!("Could not read Ana Tester: {error}")
+        );
     }
 }
