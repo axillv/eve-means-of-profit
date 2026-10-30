@@ -419,6 +419,19 @@ mod tests {
     }
 
     #[test]
+    fn the_exponent_bound_is_inclusive() {
+        assert_eq!(Factor::one().times(1, 38), Ok(Factor { num: 1, exp: 38 }));
+        assert_eq!(Factor::one().times(1, 39), Err(JobTimeError::Overflow));
+    }
+
+    #[test]
+    fn normalized_strips_trailing_zeros_only() {
+        assert_eq!(normalized(100, 0), Factor { num: 100, exp: 0 });
+        assert_eq!(normalized(1200, 2), Factor { num: 12, exp: 0 });
+        assert_eq!(normalized(100, 2), Factor { num: 1, exp: 0 });
+    }
+
+    #[test]
     fn duration_reports_the_whole_job() {
         assert_eq!(
             duration(&input(15_000, 4, 3, 0), 10),
