@@ -14,7 +14,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use egui::accesskit::Role;
+    use egui::accesskit::{Role, Toggled};
     use egui::{OutputCommand, Rect, vec2};
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
@@ -775,6 +775,63 @@ mod tests {
         harness.set_size(vec2(1280.0, 800.0));
         harness.run();
         harness.snapshot("what-to-build-empty");
+    }
+
+    #[test]
+    fn the_what_to_build_page_shows_its_four_views_and_its_filters() {
+        let env = env();
+        let mut harness = start(&env, FakeEve::new(Vec::new(), None), NOW);
+        loaded(&mut harness);
+        rail(&mut harness, "What to build");
+        harness.run();
+
+        for label in [
+            "Best per day",
+            "Best margin %",
+            "Cheap to start",
+            "With my blueprints",
+        ] {
+            assert!(shown(&harness, label), "{label} is shown");
+        }
+        assert!(
+            combo_on_row(&harness, "Blueprint", "All"),
+            "the Blueprint filter is shown on All"
+        );
+        let toggle = harness
+            .query_all_by_label("Only what my skills allow")
+            .find(|node| node.accesskit_node().role() == Role::CheckBox)
+            .expect("the skills toggle is a checkbox");
+        assert_ne!(
+            toggle.accesskit_node().toggled(),
+            Some(Toggled::True),
+            "Only what my skills allow starts unchecked"
+        );
+
+        harness.set_size(vec2(1280.0, 800.0));
+        harness.run();
+        harness.snapshot("what-to-build-filters");
+    }
+
+    /// Whether a dropdown showing `value` sits on a row some node labelled `label` is on. A
+    /// combo box has no label of its own, only its value, so the label beside it anchors it.
+    fn combo_on_row(harness: &Harness<'_, App>, label: &str, value: &str) -> bool {
+        fn find(node: &egui_kittest::Node<'_>, value: &str, rows: &[f32]) -> bool {
+            let accesskit = node.accesskit_node();
+            if accesskit.role() == Role::ComboBox
+                && accesskit.value().as_deref() == Some(value)
+                && rows
+                    .iter()
+                    .any(|row| (node.rect().center().y - row).abs() <= 3.0)
+            {
+                return true;
+            }
+            node.children().any(|child| find(&child, value, rows))
+        }
+        let rows: Vec<f32> = harness
+            .query_all_by_label(label)
+            .map(|node| node.rect().center().y)
+            .collect();
+        !rows.is_empty() && find(&harness.root(), value, &rows)
     }
 
     /// The rail's left edge. Every rail entry starts there; panel titles start to its right.
