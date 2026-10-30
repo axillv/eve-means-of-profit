@@ -4,16 +4,17 @@
 use egui::{Button, Color32, ComboBox, Id, Label, RichText, TextEdit, Ui};
 use mop_esi::character_data::{CharacterData, Fetched, Kind};
 use mop_esi::characters::Login;
-use mop_store::StoreError;
 use mop_store::net_worth::Account;
+use mop_store::{Density, StoreError};
 
 use super::Inner;
 use crate::Shared;
 use crate::build::prices::age_text;
+use crate::images::{self, Picture};
 use crate::session::eve::NO_CLIENT_ID;
 use crate::status::Notice;
 use crate::table::Table;
-use crate::table::model::{Cell, Column, ColumnKind, Row};
+use crate::table::model::{Cell, Column, ColumnKind, Row, row_height};
 use crate::theme::Style;
 
 /// One kind's column: the age text, its colour, and the hover.
@@ -588,6 +589,12 @@ fn confirm(ui: &mut Ui, name: &str) -> Option<Click> {
     click
 }
 
+/// The side of a character portrait, in points: the row height less the gap around it, never so
+/// small that the blank square is hard to see.
+pub fn portrait_size(density: Density) -> f32 {
+    (row_height(density) - 4.0).max(8.0)
+}
+
 fn table(
     ui: &mut Ui,
     cx: &mut Shared,
@@ -597,6 +604,7 @@ fn table(
 ) -> Option<Click> {
     let style = cx.style;
     let density = cx.density;
+    let portrait = portrait_size(density);
     let mut click = None;
     // What the player picked in an Account dropdown, applied once the table is drawn.
     let mut picks: Vec<(u64, Option<i64>)> = Vec::new();
@@ -623,6 +631,12 @@ fn table(
             return false;
         };
         match column {
+            "character" => {
+                images::show(ui, Picture::Character(key), portrait);
+                ui.add_space(4.0);
+                ui.add(Label::new(line.name.as_str()).selectable(false));
+                true
+            }
             "login" => {
                 let (text, color) = login_view(line.expired, &style);
                 let text = RichText::new(text).color(color);
