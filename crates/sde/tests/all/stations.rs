@@ -294,6 +294,32 @@ mod tests {
     }
 
     #[test]
+    fn an_exact_station_name_comes_before_a_longer_prefix_match() {
+        let dir = TempDir::new().unwrap();
+        let source = stations_source(&dir);
+        let q = "Jita IV - Moon 4 - Caldari Navy Assembly Plant";
+        edit_record(&source.join("mapMoons.jsonl"), 40008952, |value| {
+            value["uniqueName"] = json!({ "en": q });
+        });
+        let sde = import_and_open(&source, &dir);
+        let found = sde.search_stations(q, 10).unwrap();
+        assert!(found.len() >= 2);
+        assert_eq!(found[0], (60003760, q.to_owned()));
+        assert_eq!(
+            found[1],
+            (
+                60003454,
+                "Jita IV - Moon 4 - Caldari Navy Assembly Plant - Caldari Business Tribunal"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            sde.search_stations(q, 1).unwrap(),
+            vec![(60003760, q.to_owned())]
+        );
+    }
+
+    #[test]
     fn a_blank_query_or_a_zero_limit_finds_nothing() {
         let dir = TempDir::new().unwrap();
         let sde = import_and_open(&stations_source(&dir), &dir);
