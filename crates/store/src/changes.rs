@@ -1143,4 +1143,200 @@ mod tests {
             "{refused:?}"
         );
     }
+
+    #[test]
+    fn an_asset_that_moves_place_or_flag_is_a_change() {
+        let (_dir, mut store) = open_temp();
+        assert_eq!(
+            store
+                .record_assets(
+                    CHARACTER,
+                    1_000,
+                    &[asset(500, 34, 10, STATION, Some("Hangar"), false)]
+                )
+                .expect("first record"),
+            1
+        );
+        assert_eq!(
+            store
+                .record_assets(
+                    CHARACTER,
+                    1_100,
+                    &[asset(500, 34, 10, STATION + 1, Some("Hangar"), false)]
+                )
+                .expect("place moves"),
+            1
+        );
+        assert_eq!(
+            store
+                .record_assets(
+                    CHARACTER,
+                    1_200,
+                    &[asset(500, 34, 10, STATION + 1, Some("Cargo"), false)]
+                )
+                .expect("flag moves"),
+            1
+        );
+        assert_eq!(
+            store.changes(CHARACTER, Kind::Asset).expect("changes"),
+            vec![
+                change(
+                    Kind::Asset,
+                    (500, 1_000, Event::Appeared),
+                    (34, 10, STATION),
+                    None,
+                    Some("Hangar")
+                ),
+                change(
+                    Kind::Asset,
+                    (500, 1_100, Event::Changed),
+                    (34, 10, STATION + 1),
+                    None,
+                    Some("Hangar")
+                ),
+                change(
+                    Kind::Asset,
+                    (500, 1_200, Event::Changed),
+                    (34, 10, STATION + 1),
+                    None,
+                    Some("Cargo")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unchanged_job_appends_nothing() {
+        let (_dir, mut store) = open_temp();
+        let row = job(8001, "active", 10);
+        assert_eq!(
+            store
+                .record_jobs(CHARACTER, 1_000, std::slice::from_ref(&row))
+                .expect("first record"),
+            1
+        );
+        assert_eq!(
+            store
+                .record_jobs(CHARACTER, 1_100, std::slice::from_ref(&row))
+                .expect("same record"),
+            0
+        );
+        assert_eq!(
+            store.changes(CHARACTER, Kind::Job).expect("changes"),
+            vec![change(
+                Kind::Job,
+                (8001, 1_000, Event::Appeared),
+                (35, 10, STATION),
+                Some(money(153_770_000)),
+                Some("active")
+            )]
+        );
+    }
+
+    #[test]
+    fn a_change_at_zero_is_kept() {
+        let (_dir, mut store) = open_temp();
+        assert_eq!(
+            store
+                .record_assets(CHARACTER, 0, &[asset(500, 34, 10, STATION, None, false)])
+                .expect("record at zero"),
+            1
+        );
+        assert_eq!(
+            store.changes(CHARACTER, Kind::Asset).expect("changes"),
+            vec![change(
+                Kind::Asset,
+                (500, 0, Event::Appeared),
+                (34, 10, STATION),
+                None,
+                None
+            )]
+        );
+    }
+
+    #[test]
+    fn an_asset_with_item_id_one_is_kept() {
+        let (_dir, mut store) = open_temp();
+        assert_eq!(
+            store
+                .record_assets(CHARACTER, 1_000, &[asset(1, 34, 1, STATION, None, false)])
+                .expect("record item one"),
+            1
+        );
+        assert_eq!(
+            store.changes(CHARACTER, Kind::Asset).expect("changes"),
+            vec![change(
+                Kind::Asset,
+                (1, 1_000, Event::Appeared),
+                (34, 1, STATION),
+                None,
+                None
+            )]
+        );
+    }
+
+    #[test]
+    fn a_zero_order_price_is_kept_and_read() {
+        let (_dir, mut store) = open_temp();
+        let mut zero = order(7001, 10);
+        zero.price = money(0);
+        assert_eq!(
+            store
+                .record_orders(CHARACTER, 1_000, std::slice::from_ref(&zero))
+                .expect("record zero price"),
+            1
+        );
+        assert_eq!(
+            store.changes(CHARACTER, Kind::Order).expect("changes"),
+            vec![change(
+                Kind::Order,
+                (7001, 1_000, Event::Appeared),
+                (34, 10, STATION),
+                Some(money(0)),
+                Some("sell")
+            )]
+        );
+        assert_eq!(
+            store
+                .record_orders(CHARACTER, 1_100, std::slice::from_ref(&zero))
+                .expect("same record"),
+            0
+        );
+    }
+
+    #[test]
+    fn a_buy_order_kept_again_appends_nothing() {
+        let (_dir, mut store) = open_temp();
+        let mut buy = order(7001, 10);
+        buy.is_buy = true;
+        assert_eq!(
+            store
+                .record_orders(CHARACTER, 1_000, std::slice::from_ref(&buy))
+                .expect("first record"),
+            1
+        );
+        assert_eq!(
+            store.changes(CHARACTER, Kind::Order).expect("changes"),
+            vec![change(
+                Kind::Order,
+                (7001, 1_000, Event::Appeared),
+                (34, 10, STATION),
+                Some(money(57_500)),
+                Some("buy")
+            )]
+        );
+        assert_eq!(
+            store
+                .record_orders(CHARACTER, 1_100, std::slice::from_ref(&buy))
+                .expect("same record"),
+            0
+        );
+        assert_eq!(
+            store
+                .changes(CHARACTER, Kind::Order)
+                .expect("changes")
+                .len(),
+            1
+        );
+    }
 }
