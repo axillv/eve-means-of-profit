@@ -820,6 +820,8 @@ fn view<'a>(
     let own_hover = (running > 0).then(|| {
         format!(
             "{} in hangars, {running} from running jobs",
+            // `running_by_type` stores `units.min(from_stock)` per type, so `running <= own` and
+            // this subtraction cannot underflow.
             own.saturating_sub(running)
         )
     });

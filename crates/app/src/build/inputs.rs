@@ -643,6 +643,9 @@ fn save_stock(page: &mut BuildPage, cx: &mut Shared, stock: PlanStock) {
 /// How many claimed entries the line shows before `and <n> more`.
 const CLAIMS_SHOWN: usize = 3;
 
+const CLAIMED_RANGE: &str =
+    "The claimed line does not add up: a count does not fit the supported range.";
+
 /// The line, last in the Stock row, saying what other plans claim from this plan's stock. Only a
 /// plan that takes its stock from characters and has a result shows it; nothing claimed shows
 /// nothing.
@@ -657,7 +660,9 @@ fn claimed_line(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
         return;
     };
     let assets = resolve(&cx.session.stock_characters()).assets;
-    let listed = claimed_by_others(&scope, &assets, &cx.claims.claims, id);
+    let Some(listed) = claimed_by_others(&scope, &assets, &cx.claims.claims, id) else {
+        return report(cx, CLAIMED_RANGE);
+    };
     if listed.is_empty() {
         return;
     }
@@ -675,21 +680,24 @@ fn claimed_line(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
         entries.push((item, units, name));
     }
     entries.sort_by_cached_key(|(item, _, _)| item.to_lowercase());
-    let (text, full) = claimed_text(&entries);
+    let Some((text, full)) = claimed_text(&entries) else {
+        return report(cx, CLAIMED_RANGE);
+    };
     ui.label(RichText::new(text).color(cx.style.mute))
         .on_hover_text(full);
 }
 
 /// The claimed line and its hover: `<item> <units> (<plan>)` entries joined with `, `; the line
-/// shows the first few and a count of the rest, the hover the whole list.
-fn claimed_text(entries: &[(String, u64, String)]) -> (String, String) {
+/// shows the first few and a count of the rest, the hover the whole list. `None` when a count does
+/// not fit the supported range.
+fn claimed_text(entries: &[(String, u64, String)]) -> Option<(String, String)> {
     let parts: Vec<String> = entries
         .iter()
         .map(|(item, units, plan)| {
-            let units = i64::try_from(*units).unwrap_or(i64::MAX);
-            format!("{item} {} ({plan})", group_thousands(units))
+            let units = i64::try_from(*units).ok()?;
+            Some(format!("{item} {} ({plan})", group_thousands(units)))
         })
-        .collect();
+        .collect::<Option<Vec<_>>>()?;
     let full = parts.join(", ");
     let text = if parts.len() > CLAIMS_SHOWN {
         let shown = parts
@@ -700,24 +708,24 @@ fn claimed_text(entries: &[(String, u64, String)]) -> (String, String) {
             .join(", ");
         format!(
             "Claimed by other plans: {shown} and {} more",
-            parts.len() - CLAIMS_SHOWN
+            parts.len().checked_sub(CLAIMS_SHOWN)?
         )
     } else {
         format!("Claimed by other plans: {full}")
     };
-    (text, full)
+    Some((text, full))
 }
 
 /// What the other plans claim from the stock this scope counts, per type and plan: the units of
 /// every claimed entry that counts and sits in the scope. A plan served after `plan_id` is left
 /// out; without `plan_id` in the serving order, every other plan counts. Sorted by item, then by
-/// the plan's place in the serving order.
+/// the plan's place in the serving order. `None` when a total does not fit `u64`.
 fn claimed_by_others(
     scope: &StockScope,
     assets: &[ResolvedAsset],
     claims: &Claims,
     plan_id: i64,
-) -> Vec<(TypeId, i64, u64)> {
+) -> Option<Vec<(TypeId, i64, u64)>> {
     let cut = claims.order.iter().position(|&served| served == plan_id);
     let served_before = |plan: i64| match cut {
         None => true,
@@ -746,7 +754,7 @@ fn claimed_by_others(
             }
             let key = (type_id, plan);
             let total = totals.entry(key).or_insert(0);
-            *total = total.saturating_add(units);
+            *total = total.checked_add(units)?;
             first_item.entry(key).or_insert(item_id);
         }
     }
@@ -759,10 +767,12 @@ fn claimed_by_others(
         let place = claims.order.iter().position(|served| served == plan);
         (item, place)
     });
-    listed
-        .into_iter()
-        .map(|((type_id, plan), units)| (type_id, plan, units))
-        .collect()
+    Some(
+        listed
+            .into_iter()
+            .map(|((type_id, plan), units)| (type_id, plan, units))
+            .collect(),
+    )
 }
 
 /// Whether an asset sits in the characters and places the scope counts.
@@ -909,7 +919,7 @@ mod tests {
         );
 
         assert_eq!(
-            claimed_by_others(&scope(&[MAIN], Places::All), &assets(), &claims, 12),
+            claimed_by_others(&scope(&[MAIN], Places::All), &assets(), &claims, 12).unwrap(),
             vec![(HOBGOBLIN_I, 11, 4), (TRITANIUM, 11, 1_500)]
         );
         assert_eq!(
@@ -918,7 +928,8 @@ mod tests {
                 &assets(),
                 &claims,
                 11,
-            ),
+            )
+            .unwrap(),
             Vec::new()
         );
         // A plan outside the order sees every claim, not only those of the plans before it.
@@ -928,7 +939,8 @@ mod tests {
                 &assets(),
                 &claims,
                 99,
-            ),
+            )
+            .unwrap(),
             vec![(HOBGOBLIN_I, 11, 7), (TRITANIUM, 11, 1_500)]
         );
     }
@@ -950,11 +962,12 @@ mod tests {
                 &assets(),
                 &claims,
                 11,
-            ),
+            )
+            .unwrap(),
             vec![(HOBGOBLIN_I, 12, 1)]
         );
         assert_eq!(
-            claimed_by_others(&scope(&[MAIN], Places::All), &assets(), &claims, 12),
+            claimed_by_others(&scope(&[MAIN], Places::All), &assets(), &claims, 12).unwrap(),
             Vec::new()
         );
     }
@@ -986,7 +999,8 @@ mod tests {
                 &assets,
                 &claims,
                 12,
-            ),
+            )
+            .unwrap(),
             vec![(TRITANIUM, 11, 100)]
         );
     }
@@ -998,7 +1012,7 @@ mod tests {
 
         // Map order is by plan id, so only the serving order puts 12 before 11 here.
         assert_eq!(
-            claimed_by_others(&scope(&[MAIN], Places::All), &assets, &claims, 13),
+            claimed_by_others(&scope(&[MAIN], Places::All), &assets, &claims, 13).unwrap(),
             vec![(TRITANIUM, 12, 7), (TRITANIUM, 11, 5)]
         );
     }
@@ -1010,11 +1024,11 @@ mod tests {
             ("Tritanium".to_owned(), 1_500, "Hobgoblin A".to_owned()),
         ];
         assert_eq!(
-            claimed_text(&two).0,
+            claimed_text(&two).unwrap().0,
             "Claimed by other plans: Hobgoblin I 4 (Hobgoblin A), Tritanium 1,500 (Hobgoblin A)"
         );
         assert_eq!(
-            claimed_text(&two).1,
+            claimed_text(&two).unwrap().1,
             "Hobgoblin I 4 (Hobgoblin A), Tritanium 1,500 (Hobgoblin A)"
         );
 
@@ -1025,7 +1039,7 @@ mod tests {
             ("Pyerite".to_owned(), 21, "Hobgoblin A".to_owned()),
             ("Tritanium".to_owned(), 1_500, "Hobgoblin A".to_owned()),
         ];
-        let (text, full) = claimed_text(&five);
+        let (text, full) = claimed_text(&five).unwrap();
         assert_eq!(
             text,
             "Claimed by other plans: Hobgoblin I 4 (Hobgoblin A), Isogen 12 (Hobgoblin A), Nocxium 6 (Hobgoblin A) and 2 more"
@@ -1033,6 +1047,24 @@ mod tests {
         assert_eq!(
             full,
             "Hobgoblin I 4 (Hobgoblin A), Isogen 12 (Hobgoblin A), Nocxium 6 (Hobgoblin A), Pyerite 21 (Hobgoblin A), Tritanium 1,500 (Hobgoblin A)"
+        );
+    }
+
+    #[test]
+    fn a_claim_text_count_that_does_not_fit_is_an_error() {
+        let entries = vec![("Tritanium".to_owned(), u64::MAX, "Hobgoblin A".to_owned())];
+
+        assert_eq!(claimed_text(&entries), None);
+    }
+
+    #[test]
+    fn claim_totals_that_do_not_fit_are_an_error() {
+        // Both Tritanium assets are in the scope, and plan 11 comes before plan 12.
+        let claims = claims(&[11, 12], &[(3, &[(11, u64::MAX)]), (4, &[(11, 1)])]);
+
+        assert_eq!(
+            claimed_by_others(&scope(&[MAIN], Places::All), &assets(), &claims, 12),
+            None
         );
     }
 
