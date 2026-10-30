@@ -249,9 +249,171 @@ pub fn show(_page: &mut SetupPage, panel: SetupPanel, ui: &mut Ui, cx: &mut Shar
 
 #[cfg(test)]
 mod tests {
-    use mop_esi::error::EsiError;
+    use std::collections::BTreeMap;
+    use std::io::Write;
+    use std::ops::ControlFlow;
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
 
-    use super::read_error;
+    use mop_esi::error::EsiError;
+    use mop_esi::industry::IndustryData;
+    use mop_esi::skills::{CharacterSkills, NpcStanding, StandingFrom};
+    use mop_market::error::MarketError;
+    use mop_market::fuzzwork::{BytesHttp, BytesResponse};
+    use mop_sde::{Fetch, FetchError};
+    use mop_store::{Density, Store};
+    use tempfile::TempDir;
+
+    use super::{ReadResult, Reading, read_error, take_read};
+    use crate::Shared;
+    use crate::build::prices::Prices;
+    use crate::claims::ClaimsState;
+    use crate::selection::Selection;
+    use crate::session::{NoEve, Session};
+    use crate::status::Level;
+    use crate::theme::Style;
+    use crate::worker::Worker;
+
+    const NOW: i64 = 1_000_000;
+
+    /// The network, never reached: these tests never start a read.
+    struct NoFetch;
+
+    impl Fetch for NoFetch {
+        fn get_text(&self, _url: &str) -> Result<String, FetchError> {
+            Err(FetchError::Http { status: 503 })
+        }
+
+        fn download(
+            &self,
+            _url: &str,
+            _dest: &mut dyn Write,
+            _progress: &mut dyn FnMut(u64, Option<u64>) -> ControlFlow<()>,
+        ) -> Result<u64, FetchError> {
+            Err(FetchError::Http { status: 503 })
+        }
+    }
+
+    /// A market that never answers: no price is read in these tests.
+    struct NoHttp;
+
+    impl BytesHttp for NoHttp {
+        fn get_bytes(
+            &self,
+            _url: &str,
+            _if_none_match: Option<&str>,
+        ) -> Result<BytesResponse, MarketError> {
+            Err(MarketError::Network("not in these tests".to_owned()))
+        }
+    }
+
+    /// An empty user store with everything a panel reads around it. The clock is fixed at [`NOW`].
+    fn shared(dir: &TempDir) -> Shared {
+        Shared {
+            sde: None,
+            store: Store::open(&dir.path().join("user.sqlite"), NOW)
+                .expect("the store opens")
+                .store,
+            worker: Worker::spawn(egui::Context::default(), Box::new(NoFetch)),
+            market: Arc::new(Prices::new(Box::new(NoHttp))),
+            plex_http: Arc::new(mop_market::http::UreqHttp::new()),
+            copy_notices: Arc::new(Mutex::new(Vec::new())),
+            style: Style::eve_dense(),
+            density: Density::Normal,
+            rail_icons_only: false,
+            refresh_while_open: false,
+            data_dir: dir.path().to_path_buf(),
+            notices: Vec::new(),
+            clock: Box::new(|| NOW),
+            session: Session::new(Box::new(NoEve)),
+            selection: Selection::default(),
+            industry: IndustryData::default(),
+            claims: ClaimsState::default(),
+        }
+    }
+
+    /// `rx` as the read Ana Tester is waiting on.
+    fn waiting_on(rx: mpsc::Receiver<ReadResult>) -> Reading {
+        Reading {
+            name: "Ana Tester".to_owned(),
+            result: Arc::new(Mutex::new(rx)),
+        }
+    }
+
+    #[test]
+    fn a_read_waiting_for_its_answer_stays_waiting() {
+        let dir = TempDir::new().expect("a temporary directory");
+        let mut cx = shared(&dir);
+        let (_tx, rx) = mpsc::channel();
+        let mut reading = Some(waiting_on(rx));
+
+        assert!(take_read(&mut reading, &mut cx).is_none());
+        assert!(reading.is_some());
+        assert!(cx.notices.is_empty());
+    }
+
+    #[test]
+    fn a_good_answer_ends_the_read_and_is_returned() {
+        let dir = TempDir::new().expect("a temporary directory");
+        let mut cx = shared(&dir);
+        let skills = CharacterSkills {
+            levels: BTreeMap::new(),
+            total_sp: 4_000_000,
+        };
+        let standings = vec![NpcStanding {
+            from_id: 500_001,
+            from: StandingFrom::Faction,
+            hundredths: -250,
+        }];
+        let (tx, rx) = mpsc::channel();
+        let mut reading = Some(waiting_on(rx));
+        tx.send(Ok((skills.clone(), standings.clone())))
+            .expect("the answer is sent");
+
+        let answer = take_read(&mut reading, &mut cx).expect("the answer is returned");
+        assert_eq!(answer.name, "Ana Tester");
+        assert_eq!(answer.skills, skills);
+        assert_eq!(answer.standings, standings);
+        assert!(reading.is_none());
+        assert!(cx.notices.is_empty());
+    }
+
+    #[test]
+    fn a_refused_answer_clears_the_read_and_notifies() {
+        let dir = TempDir::new().expect("a temporary directory");
+        let mut cx = shared(&dir);
+        let (tx, rx) = mpsc::channel();
+        let mut reading = Some(waiting_on(rx));
+        tx.send(Err(EsiError::Server(403)))
+            .expect("the refusal is sent");
+
+        assert!(take_read(&mut reading, &mut cx).is_none());
+        assert!(reading.is_none());
+        assert_eq!(cx.notices.len(), 1);
+        assert_eq!(cx.notices[0].level, Level::Error);
+        assert_eq!(
+            cx.notices[0].text,
+            "Could not read Ana Tester: EVE refused. Log in again and allow skills and standings."
+        );
+    }
+
+    #[test]
+    fn a_dropped_channel_ends_the_read_with_a_notice() {
+        let dir = TempDir::new().expect("a temporary directory");
+        let mut cx = shared(&dir);
+        let (tx, rx) = mpsc::channel::<ReadResult>();
+        drop(tx);
+        let mut reading = Some(waiting_on(rx));
+
+        assert!(take_read(&mut reading, &mut cx).is_none());
+        assert!(reading.is_none());
+        assert_eq!(cx.notices.len(), 1);
+        assert_eq!(cx.notices[0].level, Level::Error);
+        assert_eq!(
+            cx.notices[0].text,
+            "Could not read Ana Tester: the read stopped unexpectedly."
+        );
+    }
 
     #[test]
     fn a_refused_read_says_to_log_in_again() {
