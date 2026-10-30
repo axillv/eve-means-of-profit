@@ -11,7 +11,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use egui::accesskit::Role;
-    use egui::vec2;
+    use egui::{Key, Modifiers, vec2};
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
     use eve_means_of_profit::rail::Page;
@@ -20,6 +20,7 @@ mod tests {
     use mop_core::freight::{Packing, RateCard};
     use mop_core::industry::{Activity, TypeId};
     use mop_core::money::{Money, Rate};
+    use mop_core::price_history::Retention;
     use mop_core::volume::Volume;
     use mop_market::book::PriceRule;
     use mop_market::fuzzwork::{Side, SummaryRow};
@@ -200,6 +201,40 @@ mod tests {
             field.scroll_to_me();
         }
         harness.run_steps(2);
+    }
+
+    /// Replaces the text of the field with this caption: selects all of it, then types the new text.
+    fn replace_into(harness: &mut Harness<'_, App>, caption: &str, text: &str) {
+        reveal_field(harness, caption);
+        {
+            let field = harness
+                .query_all_by_label(caption)
+                .find(|node| node.accesskit_node().role() == Role::TextInput)
+                .unwrap_or_else(|| panic!("no text field captioned {caption}"));
+            field.click();
+        }
+        harness.run_steps(2);
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness.run_steps(1);
+        harness.key_press(Key::Backspace);
+        harness.run_steps(2);
+        {
+            let field = harness
+                .query_all_by_label(caption)
+                .find(|node| node.accesskit_node().role() == Role::TextInput)
+                .unwrap_or_else(|| panic!("no text field captioned {caption}"));
+            field.type_text(text);
+        }
+        harness.run_steps(3);
+    }
+
+    /// The rect of the text field with this caption.
+    fn field_rect(harness: &Harness<'_, App>, caption: &str) -> egui::Rect {
+        harness
+            .query_all_by_label(caption)
+            .find(|node| node.accesskit_node().role() == Role::TextInput)
+            .unwrap_or_else(|| panic!("no text field captioned {caption}"))
+            .rect()
     }
 
     /// Clicks the `index`th combo box that shows `value`, counting from the top of the page. A combo
@@ -807,6 +842,29 @@ mod tests {
             })
     }
 
+    /// The Forge's saved retention rule.
+    fn forge_retention(folders: &Folders) -> Retention {
+        Store::open(&folders.data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store
+            .history_markets()
+            .expect("the markets")
+            .into_iter()
+            .find(|market| market.place == 10_000_002)
+            .expect("the Forge is listed")
+            .retention
+    }
+
+    /// The saved size limit.
+    fn history_limit(folders: &Folders) -> Option<u64> {
+        Store::open(&folders.data.join("user.sqlite"), NOW)
+            .expect("the store opens")
+            .store
+            .history_settings()
+            .expect("the settings")
+            .limit_bytes
+    }
+
     #[test]
     fn net_worth_price_copies_show_apart_from_the_daily_history() {
         let folders = Folders::new();
@@ -871,6 +929,242 @@ mod tests {
             &harness,
             "Kept for good: these prices cannot be fetched again, so no rule or limit above thins them."
         ));
+    }
+
+    #[test]
+    fn a_zero_daily_day_shows_its_error_under_the_daily_field() {
+        let folders = Folders::new();
+        seed_forge_history(&folders);
+        let mut harness = start_at(&folders, vec2(1280.0, 1400.0));
+        click_nth(&mut harness, "The Forge", 0);
+        replace_into(&mut harness, "Daily for", "0");
+
+        let error = "Daily days must be 1 or more";
+        assert_eq!(
+            harness.query_all_by_label(error).count(),
+            1,
+            "one node reads the daily error"
+        );
+        let error_rect = harness
+            .query_all_by_label(error)
+            .next()
+            .expect("the daily error shows")
+            .rect();
+        let daily = field_rect(&harness, "Daily for");
+        let weekly = field_rect(&harness, "Then weekly for");
+        assert!(
+            error_rect.min.y >= daily.max.y,
+            "the error is below the daily field: {error_rect:?} against {daily:?}"
+        );
+        assert!(
+            error_rect.min.y < weekly.min.y,
+            "the error is above the weekly field: {error_rect:?} against {weekly:?}"
+        );
+        assert!(disabled(&harness, "Save rule"), "Save rule is off");
+
+        harness.run_steps(3);
+        let retention = forge_retention(&folders);
+        assert_eq!(
+            retention.daily_days, 90,
+            "the saved daily days are unchanged"
+        );
+        assert_eq!(retention.total_days, None, "nothing weekly was saved");
+    }
+
+    #[test]
+    fn a_weekly_part_shorter_than_the_daily_part_shows_under_the_weekly_field() {
+        let folders = Folders::new();
+        seed_forge_history(&folders);
+        let mut harness = start_at(&folders, vec2(1280.0, 1400.0));
+        click_nth(&mut harness, "The Forge", 0);
+        replace_into(&mut harness, "Daily for", "30");
+        replace_into(&mut harness, "Then weekly for", "20");
+
+        let error = "The weekly part cannot be shorter than the daily part";
+        assert_eq!(
+            harness.query_all_by_label(error).count(),
+            1,
+            "one node reads the weekly error"
+        );
+        let error_rect = harness
+            .query_all_by_label(error)
+            .next()
+            .expect("the weekly error shows")
+            .rect();
+        let weekly = field_rect(&harness, "Then weekly for");
+        let save = harness
+            .query_all_by_label("Save rule")
+            .next()
+            .expect("the Save rule button shows")
+            .rect();
+        assert!(
+            error_rect.min.y >= weekly.max.y,
+            "the error is below the weekly field: {error_rect:?} against {weekly:?}"
+        );
+        assert!(
+            error_rect.max.y <= save.min.y,
+            "the error is above Save rule: {error_rect:?} against {save:?}"
+        );
+        assert!(disabled(&harness, "Save rule"), "Save rule is off");
+
+        harness.run_steps(3);
+        let retention = forge_retention(&folders);
+        assert_eq!(
+            retention.daily_days, 90,
+            "the saved daily days are unchanged"
+        );
+        assert_eq!(retention.total_days, None, "nothing weekly was saved");
+    }
+
+    #[test]
+    fn a_bad_size_limit_shows_its_error_under_the_row() {
+        let folders = Folders::new();
+        seed_forge_history(&folders);
+        let mut harness = start_at(&folders, vec2(1280.0, 1400.0));
+        click_nth(&mut harness, "The Forge", 0);
+        type_into(&mut harness, "Keep at most", "abc");
+
+        let error = "Keep at most must be a whole number.";
+        assert_eq!(
+            harness.query_all_by_label(error).count(),
+            1,
+            "one node reads the limit error"
+        );
+        let error_rect = harness
+            .query_all_by_label(error)
+            .next()
+            .expect("the limit error shows")
+            .rect();
+        let save = harness
+            .query_all_by_label("Save limit")
+            .next()
+            .expect("the Save limit button shows")
+            .rect();
+        assert!(
+            error_rect.min.y >= save.max.y,
+            "the error is below the row: {error_rect:?} against {save:?}"
+        );
+        assert!(
+            error_rect.min.y - save.max.y <= 8.0,
+            "the error is at most 8 px under the row: {error_rect:?} against {save:?}"
+        );
+        assert!(disabled(&harness, "Save limit"), "Save limit is off");
+        drop(harness);
+        assert_eq!(history_limit(&folders), None, "no limit was saved");
+    }
+
+    #[test]
+    fn a_good_size_limit_saves_and_drops_days() {
+        let folders = Folders::new();
+        seed_forge_history(&folders);
+        let mut harness = start_at(&folders, vec2(1280.0, 1400.0));
+        click_nth(&mut harness, "The Forge", 0);
+        type_into(&mut harness, "Keep at most", "10");
+        click(&mut harness, "Save limit");
+
+        assert!(
+            !shown(&harness, "Keep at most must be a whole number."),
+            "the error is gone"
+        );
+        let dropped = dropped_days(&harness).expect("the limit drops days");
+        assert!(dropped > 0, "the Forge history is thinned: {dropped} days");
+        drop(harness);
+        assert_eq!(history_limit(&folders), Some(10_000), "10 kB is saved");
+    }
+
+    #[test]
+    fn clearing_the_size_limit_saves_no_limit() {
+        let folders = Folders::new();
+        seed_forge_history(&folders);
+        let mut store = folders.store();
+        let mut settings = store.history_settings().expect("the settings");
+        settings.limit_bytes = Some(10_000);
+        store
+            .save_history_settings(&settings)
+            .expect("the limit saves");
+        drop(store);
+
+        let mut harness = start_at(&folders, vec2(1280.0, 1400.0));
+        assert_eq!(
+            harness
+                .query_all_by_label("Keep at most")
+                .find(|node| node.accesskit_node().role() == Role::TextInput)
+                .expect("the limit field shows")
+                .value()
+                .as_deref(),
+            Some("10"),
+            "the limit shows its saved number"
+        );
+
+        replace_into(&mut harness, "Keep at most", "");
+        assert_eq!(
+            harness
+                .query_all_by_label("Keep at most")
+                .find(|node| node.accesskit_node().role() == Role::TextInput)
+                .expect("the limit field shows")
+                .value()
+                .as_deref(),
+            Some(""),
+            "the limit field is empty"
+        );
+        click(&mut harness, "Save limit");
+        drop(harness);
+        assert_eq!(history_limit(&folders), None, "the limit is cleared");
+    }
+
+    #[test]
+    fn the_price_history_field_errors_picture_for_the_owner_is_taken() {
+        let folders = Folders::new();
+        seed_forge_history(&folders);
+        let mut harness = start_at(&folders, vec2(1280.0, 1400.0));
+        click_nth(&mut harness, "The Forge", 0);
+        replace_into(&mut harness, "Daily for", "0");
+        type_into(&mut harness, "Keep at most", "abc");
+
+        // The fields are typed at the taller size, where they are on screen; shrink for the picture.
+        harness.set_size(vec2(1280.0, 800.0));
+        harness.run_steps(3);
+        reveal_field(&mut harness, "Daily for");
+        harness.run_steps(2);
+        // Scroll down a little so the limit row below the rule also shows.
+        {
+            let field = harness
+                .query_all_by_label("Daily for")
+                .find(|node| node.accesskit_node().role() == Role::TextInput)
+                .expect("the daily field shows");
+            field.scroll_down();
+        }
+        harness.run_steps(2);
+        // Nudge the content back down a few pixels so the daily row clears the panel's top edge.
+        {
+            let field = harness
+                .query_all_by_label("Then weekly for")
+                .find(|node| node.accesskit_node().role() == Role::TextInput)
+                .expect("the weekly field shows");
+            field.hover();
+        }
+        harness.run_steps(1);
+        harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, 14.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::default(),
+        });
+        harness.run_steps(2);
+        let daily_text = harness
+            .query_all_by_label("Daily for")
+            .find(|node| node.accesskit_node().role() == Role::TextInput)
+            .expect("the daily field shows")
+            .value();
+        assert_eq!(daily_text.as_deref(), Some("0"), "the daily text is typed");
+        assert_eq!(
+            harness
+                .query_all_by_label("Daily days must be 1 or more")
+                .count(),
+            1,
+            "the daily error shows"
+        );
+        crate::ui::picture(&mut harness, "history-field-errors");
     }
 
     #[test]

@@ -17,6 +17,8 @@ const MUTE: &str = "One reading a day is kept for each market, for as long as it
 const KEPT_FOR_GOOD: &str =
     "Kept for good: these prices cannot be fetched again, so no rule or limit above thins them.";
 const NO_VALUE: &str = "—";
+/// The error for a daily period of zero days, which is about the daily field alone.
+const ZERO_DAILY: &str = "Daily days must be 1 or more";
 /// The most market rows the table shows before it scrolls.
 const TABLE_ROWS: usize = 6;
 /// The panel reads the history again after this many seconds, so new readings show up.
@@ -327,17 +329,49 @@ fn rule_form(
             .map_or("forever".to_owned(), |days| days.to_string());
         panel.confirm_remove = None;
     }
-    let mut save = false;
-    ui.horizontal_wrapped(|ui| {
-        ui.label("Daily for");
-        ui.add(TextEdit::singleline(&mut panel.daily).desired_width(60.0));
-        ui.label("days   Then weekly for");
-        ui.add(TextEdit::singleline(&mut panel.weekly).desired_width(80.0));
-        ui.label("days");
-        save = ui.add(Button::new("Save rule")).clicked();
+    let daily = daily_value(&panel.daily);
+    let weekly = weekly_value(&panel.weekly);
+    let retention = match (&daily, &weekly) {
+        (Ok(daily), Ok(weekly)) => Some(retention_of(*daily, *weekly)),
+        _ => None,
+    };
+    // A zero daily period is about the daily field, not the pair; the other retention error is
+    // about the two fields together.
+    let daily_error = match &daily {
+        Err(error) => Some(error.as_str()),
+        Ok(0) => Some(ZERO_DAILY),
+        Ok(_) => None,
+    };
+    let weekly_error = weekly.as_ref().err().map(String::as_str).or_else(|| {
+        retention
+            .as_ref()
+            .and_then(|retention| retention.as_ref().err())
+            .map(String::as_str)
+            .filter(|_| !matches!(&daily, Ok(0)))
     });
-    if save {
-        save_rule(panel, cx, market.id);
+    ui.horizontal(|ui| {
+        let caption = ui.label("Daily for");
+        ui.add(TextEdit::singleline(&mut panel.daily).desired_width(60.0))
+            .labelled_by(caption.id);
+        ui.label("days");
+    });
+    if let Some(error) = daily_error {
+        ui.colored_label(cx.style.neg, error);
+    }
+    ui.horizontal(|ui| {
+        let caption = ui.label("Then weekly for");
+        ui.add(TextEdit::singleline(&mut panel.weekly).desired_width(80.0))
+            .labelled_by(caption.id);
+        ui.label("days");
+    });
+    if let Some(error) = weekly_error {
+        ui.colored_label(cx.style.neg, error);
+    }
+    let valid = matches!(&retention, Some(Ok(_)));
+    if ui.add_enabled(valid, Button::new("Save rule")).clicked()
+        && let Some(Ok(retention)) = &retention
+    {
+        save_rule(panel, cx, market.id, *retention);
     }
 
     let name = market_name(market);
@@ -373,43 +407,8 @@ fn rule_form(
     });
 }
 
-/// Saves the daily and weekly days of a market. A bad pair keeps the old values.
-fn save_rule(panel: &mut Panel, cx: &mut Shared, market: i64) {
-    let Ok(daily) = panel.daily.trim().parse::<u32>() else {
-        panel.message = Some((true, "Daily days must be a whole number.".to_owned()));
-        return;
-    };
-    let weekly = match panel.weekly.trim() {
-        "forever" => None,
-        text => match text.parse::<u32>() {
-            Ok(days) => Some(days),
-            Err(_) => {
-                panel.message = Some((
-                    true,
-                    "The weekly days must be a whole number, or forever.".to_owned(),
-                ));
-                return;
-            }
-        },
-    };
-    let retention = match Retention::new(daily, weekly) {
-        Ok(retention) => retention,
-        Err(RetentionError::ZeroDaily) => {
-            panel.message = Some((true, "Daily days must be 1 or more".to_owned()));
-            return;
-        }
-        Err(RetentionError::TotalBelowDaily) => {
-            panel.message = Some((
-                true,
-                "The weekly part cannot be shorter than the daily part".to_owned(),
-            ));
-            return;
-        }
-        Err(error) => {
-            panel.message = Some((true, error.to_string()));
-            return;
-        }
-    };
+/// Saves a new daily and weekly rule. Only the save itself: the form checks the values each frame.
+fn save_rule(panel: &mut Panel, cx: &mut Shared, market: i64, retention: Retention) {
     match cx.store.set_retention(market, retention) {
         Ok(outcome) => {
             panel.message = Some((false, format!("Dropped {} days", outcome.days_dropped)));
@@ -419,8 +418,53 @@ fn save_rule(panel: &mut Panel, cx: &mut Shared, market: i64) {
     panel.snapshot = None;
 }
 
+/// The daily days the text says, or why it is not a whole number.
+fn daily_value(text: &str) -> Result<u32, String> {
+    text.trim()
+        .parse::<u32>()
+        .map_err(|_error| "Daily days must be a whole number.".to_owned())
+}
+
+/// The weekly days the text says, `None` for `forever`, or why it is neither.
+fn weekly_value(text: &str) -> Result<Option<u32>, String> {
+    match text.trim() {
+        "forever" => Ok(None),
+        text => text
+            .parse::<u32>()
+            .map(Some)
+            .map_err(|_error| "The weekly days must be a whole number, or forever.".to_owned()),
+    }
+}
+
+/// The retention a parsed pair makes, or why it cannot be used.
+fn retention_of(daily: u32, weekly: Option<u32>) -> Result<Retention, String> {
+    Retention::new(daily, weekly).map_err(|error| match error {
+        RetentionError::ZeroDaily => ZERO_DAILY.to_owned(),
+        RetentionError::TotalBelowDaily => {
+            "The weekly part cannot be shorter than the daily part".to_owned()
+        }
+        RetentionError::Overflow => RetentionError::Overflow.to_string(),
+    })
+}
+
+/// The size limit the text says, `None` for an empty field, or why it is not a whole number.
+fn limit_bytes(text: &str, unit: Unit) -> Result<Option<u64>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let amount = text
+        .parse::<u64>()
+        .map_err(|_error| "Keep at most must be a whole number.".to_owned())?;
+    amount
+        .checked_mul(unit.bytes())
+        .map(Some)
+        .ok_or_else(|| "Keep at most is too large.".to_owned())
+}
+
 /// The size limit: a number and a unit, or nothing for no limit. Saving it thins at once.
 fn limit_form(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
+    let limit = limit_bytes(&panel.limit, panel.unit);
     let mut save = false;
     ui.horizontal_wrapped(|ui| {
         let caption = ui.label("Keep at most");
@@ -437,24 +481,18 @@ fn limit_form(panel: &mut Panel, ui: &mut Ui, cx: &mut Shared) {
                     ui.selectable_value(&mut panel.unit, unit, unit.label());
                 }
             });
-        save = ui.add(Button::new("Save limit")).clicked();
+        save = ui
+            .add_enabled(limit.is_ok(), Button::new("Save limit"))
+            .clicked();
     });
+    if let Err(error) = &limit {
+        ui.colored_label(cx.style.neg, error.as_str());
+    }
     if !save {
         return;
     }
-    let text = panel.limit.trim().to_owned();
-    let limit = if text.is_empty() {
-        None
-    } else {
-        let Ok(amount) = text.parse::<u64>() else {
-            panel.message = Some((true, "Keep at most must be a whole number.".to_owned()));
-            return;
-        };
-        let Some(bytes) = amount.checked_mul(panel.unit.bytes()) else {
-            panel.message = Some((true, "Keep at most is too large.".to_owned()));
-            return;
-        };
-        Some(bytes)
+    let Ok(limit) = limit else {
+        return;
     };
     let saved = change_settings(panel, cx, |settings| settings.limit_bytes = limit);
     if let (true, Some(bytes)) = (saved, limit) {
@@ -501,7 +539,11 @@ fn remove_market(panel: &mut Panel, cx: &mut Shared, market: i64, name: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{footer_text, net_worth_prices_text};
+    use super::{
+        Unit, daily_value, footer_text, limit_bytes, net_worth_prices_text, retention_of,
+        weekly_value,
+    };
+    use mop_core::price_history::Retention;
 
     #[test]
     fn the_footer_line_leaves_the_database_size_out_when_a_picture_is_taken() {
@@ -512,6 +554,53 @@ mod tests {
         assert_eq!(
             footer_text("39.0 kB", 204_800, false),
             "Total 39.0 kB estimated · database file 204.8 kB"
+        );
+    }
+
+    #[test]
+    fn the_rule_values_are_checked_with_their_own_words() {
+        assert_eq!(daily_value(" 12 "), Ok(12));
+        assert_eq!(daily_value("0"), Ok(0));
+        assert_eq!(
+            daily_value("twelve"),
+            Err("Daily days must be a whole number.".to_owned())
+        );
+        assert_eq!(weekly_value("forever"), Ok(None));
+        assert_eq!(weekly_value(" 30 "), Ok(Some(30)));
+        assert_eq!(
+            weekly_value("soon"),
+            Err("The weekly days must be a whole number, or forever.".to_owned())
+        );
+        assert_eq!(
+            retention_of(0, None),
+            Err("Daily days must be 1 or more".to_owned())
+        );
+        assert_eq!(
+            retention_of(30, Some(20)),
+            Err("The weekly part cannot be shorter than the daily part".to_owned())
+        );
+        assert_eq!(retention_of(90, None), Ok(Retention::DEFAULT));
+        assert_eq!(
+            retention_of(30, Some(40)),
+            Ok(Retention {
+                daily_days: 30,
+                total_days: Some(40),
+            })
+        );
+    }
+
+    #[test]
+    fn the_limit_value_is_checked_in_its_unit() {
+        assert_eq!(limit_bytes("", Unit::Kb), Ok(None));
+        assert_eq!(limit_bytes(" 10 ", Unit::Kb), Ok(Some(10_000)));
+        assert_eq!(limit_bytes("2", Unit::Mb), Ok(Some(2_000_000)));
+        assert_eq!(
+            limit_bytes("abc", Unit::Kb),
+            Err("Keep at most must be a whole number.".to_owned())
+        );
+        assert_eq!(
+            limit_bytes("18446744073709551615", Unit::Gb),
+            Err("Keep at most is too large.".to_owned())
         );
     }
 
