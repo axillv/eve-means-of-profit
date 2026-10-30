@@ -17,7 +17,7 @@ use mop_store::{InventionChoice, PlanRecord};
 
 use super::costs::{self, Costs, InventionShown, PENDING};
 use super::prices::age_text;
-use super::state::{BuildPage, NO_REACTIONS, me_with, push_error, type_name};
+use super::state::{BuildPage, NO_REACTIONS, PlanChange, me_with, push_error, type_name};
 use crate::status::Notice;
 use crate::table::Table;
 use crate::table::model::{Cell, Column, ColumnKind, Row};
@@ -86,26 +86,112 @@ enum Tone {
     Amber,
 }
 
-pub fn show(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
-    let edits = draw(page, ui, cx);
-    if !edits.is_empty() {
-        apply(page, cx, &edits);
-    }
+/// What one drawing of the table asked for, and the rows and decisions it showed.
+#[derive(Debug, Default)]
+struct Drawn {
+    /// The changes clicked in the table, in the order they were clicked.
+    edits: Vec<Edit>,
+    /// Whether the Undo under the table was clicked.
+    undo_clicked: bool,
+    /// The build-or-buy choice of every decided type before the changes are applied.
+    before: BTreeMap<TypeId, Choice>,
+    /// Every drawn row, in table order.
+    rows: Vec<TypeId>,
 }
 
-/// Draws the table and returns the changes asked for in it.
-fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
-    let Some(record) = page.record.as_ref() else {
-        ui.label(RichText::new("No plan selected.").color(cx.style.mute));
-        return Vec::new();
+pub fn show(page: &mut BuildPage, ui: &mut Ui, cx: &mut Shared) {
+    let drawn = draw(page, ui, cx);
+    if drawn.undo_clicked {
+        page.undo_change(cx);
+        return;
+    }
+    if drawn.edits.is_empty() {
+        return;
+    }
+    let change = plan_change(page, &drawn.edits);
+    apply(page, cx, &drawn.edits);
+    let Some(change) = change else {
+        return;
     };
-    let plan = match &page.result {
-        Ok(plan) => plan,
-        Err(error) => {
-            let text = format!("Could not work out the plan: {error}");
-            ui.label(RichText::new(text).color(cx.style.neg));
-            return Vec::new();
+    let now = (cx.clock)();
+    let after = match (page.record.as_ref(), page.result.as_ref()) {
+        (Some(record), Ok(plan)) => costs::compute(ui, page, record, plan, cx, now),
+        _ => Costs::default(),
+    };
+    let moved = moved(&drawn.before, &after.decisions, &drawn.rows);
+    page.moved = moved.iter().map(|(type_id, _)| *type_id).collect();
+    let sde = cx.sde.as_ref();
+    let notices = &mut cx.notices;
+    page.moved_lines = moved_lines(&moved, |type_id| type_name(type_id, sde, notices));
+    page.undo = Some(change);
+}
+
+/// The plan as it was before `edits`, when any of them is a plan edit.
+fn plan_change(page: &BuildPage, edits: &[Edit]) -> Option<PlanChange> {
+    let plan_edit = edits
+        .iter()
+        .any(|edit| matches!(edit, Edit::Build(..) | Edit::Me(..) | Edit::SetBuild(..)));
+    let record = page.record.as_ref()?;
+    plan_edit.then(|| PlanChange {
+        build: record.build.clone(),
+        me: record.me.clone(),
+        dirty: page.dirty,
+    })
+}
+
+/// The drawn rows whose build-or-buy choice differs from `before`, with their new choice, in
+/// table order.
+fn moved(
+    before: &BTreeMap<TypeId, Choice>,
+    after: &BTreeMap<TypeId, Decision>,
+    rows: &[TypeId],
+) -> Vec<(TypeId, Choice)> {
+    let mut moved = Vec::new();
+    for &type_id in rows {
+        let Some(&before) = before.get(&type_id) else {
+            continue;
+        };
+        let Some(after) = after.get(&type_id) else {
+            continue;
+        };
+        if before != after.choice {
+            moved.push((type_id, after.choice));
         }
+    }
+    moved
+}
+
+/// The one line per destination the moved rows switched to, in destination order and with the
+/// names in table order.
+fn moved_lines(moved: &[(TypeId, Choice)], mut name: impl FnMut(TypeId) -> String) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (choice, destination) in [
+        (Choice::Build, "Build"),
+        (Choice::Buy, "Buy"),
+        (Choice::Unknown, "no price either way"),
+    ] {
+        let names: Vec<String> = moved
+            .iter()
+            .filter(|(_, moved)| *moved == choice)
+            .map(|(type_id, _)| name(*type_id))
+            .collect();
+        if names.is_empty() {
+            continue;
+        }
+        let rows = if names.len() == 1 { "row" } else { "rows" };
+        lines.push(format!(
+            "Your change made {} {rows} below switch to {destination}: {}",
+            names.len(),
+            names.join(", ")
+        ));
+    }
+    lines
+}
+
+/// Draws the table and returns what it asked for and showed.
+fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Drawn {
+    let Some((record, plan)) = shown_plan(page, ui, cx) else {
+        return Drawn::default();
     };
     let now = (cx.clock)();
     let assigned = match reserve::assigned_to(record.id, &cx.claims.running, &cx.claims.assignments)
@@ -124,6 +210,7 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
     let names = missing_names(&costs, cx.sde.as_ref(), &mut cx.notices);
     let lines = tree(plan, &page.recipes, &page.products);
     let drawn: BTreeSet<TypeId> = lines.iter().map(|line| line.type_id).collect();
+    let order: Vec<TypeId> = lines.iter().map(|line| line.type_id).collect();
     let back = app_choices(&record.build, &costs.decisions, &drawn);
     let views: BTreeMap<u64, View<'_>> = lines
         .iter()
@@ -186,13 +273,63 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
     {
         cx.selection.item = Some(type_id);
     }
+    let undo_clicked = moved_section(page, ui);
     if let Some(choices) = back
         && ui.button("Back to the app's choice").clicked()
     {
         edits.push(Edit::SetBuild(choices));
     }
     total_line(ui, &costs, &cx.style);
-    edits
+    Drawn {
+        edits,
+        undo_clicked,
+        before: choices(&costs.decisions),
+        rows: order,
+    }
+}
+
+/// The plan on screen, with the message that says why there is none.
+fn shown_plan<'a>(
+    page: &'a BuildPage,
+    ui: &mut Ui,
+    cx: &Shared,
+) -> Option<(&'a PlanRecord, &'a Plan)> {
+    let Some(record) = page.record.as_ref() else {
+        ui.label(RichText::new("No plan selected.").color(cx.style.mute));
+        return None;
+    };
+    match &page.result {
+        Ok(plan) => Some((record, plan)),
+        Err(error) => {
+            let text = format!("Could not work out the plan: {error}");
+            ui.label(RichText::new(text).color(cx.style.neg));
+            None
+        }
+    }
+}
+
+/// The moved-row lines under the table, with `Undo` right of the last one. Returns whether `Undo`
+/// was clicked.
+fn moved_section(page: &BuildPage, ui: &mut Ui) -> bool {
+    let mut undo_clicked = false;
+    let last = page.moved_lines.len().saturating_sub(1);
+    for (index, line) in page.moved_lines.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(line.as_str());
+            if index == last && ui.button("Undo").clicked() {
+                undo_clicked = true;
+            }
+        });
+    }
+    undo_clicked
+}
+
+/// The build-or-buy choice of each decided type.
+fn choices(decisions: &BTreeMap<TypeId, Decision>) -> BTreeMap<TypeId, Choice> {
+    decisions
+        .iter()
+        .map(|(&type_id, decision)| (type_id, decision.choice))
+        .collect()
 }
 
 /// The names of the types whose adjusted prices are missing, for the Job cost cell's hover.
@@ -711,7 +848,7 @@ fn view<'a>(
             .map(|step| jobs_hover(&step.jobs))
             .unwrap_or_default(),
         cost: cost_figure(line, costs, names),
-        decide: decide_figure(line, products, costs),
+        decide: decide_figure(line, products, costs, page.moved.contains(&line.type_id)),
         invention,
         choice,
     }
@@ -778,8 +915,8 @@ fn cost_figure(line: &Line, costs: &Costs, names: &BTreeMap<TypeId, String>) -> 
 
 /// The Make or buy verdict. A product and a part without a recipe show nothing. A part whose
 /// activity cannot be costed shows its set-up message in mute. A verdict the row does not match is
-/// amber, and a click applies it.
-fn decide_figure(line: &Line, products: &[PlanProduct], costs: &Costs) -> Figure {
+/// amber, and a click applies it. A row the last change moved ends ` (moved)`.
+fn decide_figure(line: &Line, products: &[PlanProduct], costs: &Costs, moved: bool) -> Figure {
     if is_product(products, line.type_id) || line.recipe.is_none() {
         return Figure::default();
     }
@@ -791,15 +928,23 @@ fn decide_figure(line: &Line, products: &[PlanProduct], costs: &Costs) -> Figure
         };
     }
     match costs.decisions.get(&line.type_id) {
-        Some(decision) => decision_figure(line, decision, costs.reasons.get(&line.type_id)),
+        Some(decision) => decision_figure(line, decision, costs.reasons.get(&line.type_id), moved),
         None => Figure::default(),
     }
 }
 
-fn decision_figure(line: &Line, decision: &Decision, reason: Option<&String>) -> Figure {
+fn decision_figure(
+    line: &Line,
+    decision: &Decision,
+    reason: Option<&String>,
+    moved: bool,
+) -> Figure {
     let mut text = reason.cloned().unwrap_or_else(|| decision.reason_text());
     if !decision.job_cost_incomplete.is_empty() {
         text.push_str(" (job cost incomplete)");
+    }
+    if moved {
+        text.push_str(" (moved)");
     }
     match decision.choice {
         Choice::Unknown => Figure {
@@ -1569,6 +1714,7 @@ mod tests {
             &line(HOBGOBLIN_I, None, Some(&bought)),
             &build_decision(),
             None,
+            false,
         );
         assert_eq!(figure.text, "You: build: 42,707.00 vs buy 275,000.00");
         assert_eq!(figure.tone, Tone::Amber);
@@ -1580,6 +1726,7 @@ mod tests {
             &line(HOBGOBLIN_I, Some(&built), None),
             &build_decision(),
             None,
+            false,
         );
         assert_eq!(figure.text, "App: build: 42,707.00 vs buy 275,000.00");
         assert_eq!(figure.tone, Tone::Plain);
@@ -1590,6 +1737,7 @@ mod tests {
             &line(HOBGOBLIN_I, Some(&built), None),
             &buy_decision(),
             None,
+            false,
         );
         assert_eq!(figure.text, "You: buy: 1,000.00 vs build 2,000.00");
         assert_eq!(figure.tone, Tone::Amber);
@@ -1604,7 +1752,12 @@ mod tests {
             reason: Reason::NoMarketPrice,
             job_cost_incomplete: Vec::new(),
         };
-        let figure = decision_figure(&line(HOBGOBLIN_I, None, Some(&bought)), &unknown, None);
+        let figure = decision_figure(
+            &line(HOBGOBLIN_I, None, Some(&bought)),
+            &unknown,
+            None,
+            false,
+        );
         assert_eq!(figure.text, "no price either way");
         assert_eq!(figure.tone, Tone::Mute);
         assert!(figure.click.is_none());
@@ -1660,13 +1813,13 @@ mod tests {
             type_id: HOBGOBLIN_II,
             quantity: 1,
         }];
-        let figure = decide_figure(&product, &products, &costs);
+        let figure = decide_figure(&product, &products, &costs, false);
         assert!(figure.text.is_empty());
         assert!(figure.click.is_none());
 
         let material = line(TRITANIUM, None, None);
         costs.decisions.insert(TRITANIUM, build_decision());
-        let figure = decide_figure(&material, &[], &costs);
+        let figure = decide_figure(&material, &[], &costs, false);
         assert!(figure.text.is_empty());
         assert!(figure.click.is_none());
 
@@ -1681,9 +1834,142 @@ mod tests {
         };
         costs.messages.insert(RIFTER, "no facility".to_owned());
         costs.decisions.insert(RIFTER, build_decision());
-        let figure = decide_figure(&rifter, &[], &costs);
+        let figure = decide_figure(&rifter, &[], &costs, false);
         assert_eq!(figure.text, "no facility");
         assert_eq!(figure.tone, Tone::Mute);
         assert!(figure.click.is_none());
+    }
+
+    /// A decision with `choice` and the acceptance's numbers.
+    fn decision(choice: Choice) -> Decision {
+        Decision {
+            choice,
+            quantity: 1,
+            buy_total: Some(Money::from_ten_thousandths(10_000_000)),
+            build_total: Some(Money::from_ten_thousandths(20_000_000)),
+            reason: Reason::Cheaper,
+            job_cost_incomplete: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn only_the_drawn_rows_whose_choice_changed_move() {
+        let before = BTreeMap::from([(HOBGOBLIN_I, Choice::Build), (RIFTER, Choice::Buy)]);
+        let after = BTreeMap::from([
+            (HOBGOBLIN_I, decision(Choice::Buy)),
+            (RIFTER, decision(Choice::Buy)),
+        ]);
+        assert_eq!(
+            moved(&before, &after, &[HOBGOBLIN_I, RIFTER]),
+            vec![(HOBGOBLIN_I, Choice::Buy)]
+        );
+
+        // A type the table does not draw, or one with no new decision, never moves.
+        let before = BTreeMap::from([
+            (HOBGOBLIN_I, Choice::Build),
+            (RIFTER, Choice::Buy),
+            (TRITANIUM, Choice::Build),
+        ]);
+        let after = BTreeMap::from([
+            (HOBGOBLIN_I, decision(Choice::Buy)),
+            (TRITANIUM, decision(Choice::Buy)),
+        ]);
+        assert_eq!(
+            moved(&before, &after, &[HOBGOBLIN_I, RIFTER]),
+            vec![(HOBGOBLIN_I, Choice::Buy)]
+        );
+        assert!(moved(&before, &after, &[RIFTER]).is_empty());
+    }
+
+    const FULLERIDES: TypeId = 30_370;
+    const HYPERSYNAPTIC_FIBERS: TypeId = 30_372;
+    const CRYSTALLINE_CARBONIDE: TypeId = 30_373;
+
+    #[test]
+    fn moved_lines_name_one_destination_with_the_names_in_table_order() {
+        let moved = vec![
+            (FULLERIDES, Choice::Buy),
+            (HYPERSYNAPTIC_FIBERS, Choice::Buy),
+            (CRYSTALLINE_CARBONIDE, Choice::Buy),
+        ];
+        let names = BTreeMap::from([
+            (FULLERIDES, "Fullerides"),
+            (HYPERSYNAPTIC_FIBERS, "Hypersynaptic Fibers"),
+            (CRYSTALLINE_CARBONIDE, "Crystalline Carbonide"),
+        ]);
+        assert_eq!(
+            moved_lines(&moved, |type_id| names[&type_id].to_owned()),
+            vec![
+                "Your change made 3 rows below switch to Buy: Fullerides, Hypersynaptic Fibers, Crystalline Carbonide".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn moved_lines_group_by_destination_in_order_and_say_row_for_one() {
+        let moved = vec![
+            (RIFTER, Choice::Unknown),
+            (HOBGOBLIN_I, Choice::Buy),
+            (ROBOTICS, Choice::Build),
+            (TRITANIUM, Choice::Buy),
+        ];
+        assert_eq!(
+            moved_lines(&moved, |type_id| type_id.to_string()),
+            vec![
+                format!("Your change made 1 row below switch to Build: {ROBOTICS}"),
+                format!("Your change made 2 rows below switch to Buy: {HOBGOBLIN_I}, {TRITANIUM}"),
+                format!("Your change made 1 row below switch to no price either way: {RIFTER}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_moved_decision_ends_with_the_mark() {
+        let bought = buy(HOBGOBLIN_I, 0, 1, 0, 1);
+        let figure = decision_figure(
+            &line(HOBGOBLIN_I, None, Some(&bought)),
+            &build_decision(),
+            None,
+            true,
+        );
+        assert_eq!(
+            figure.text,
+            "You: build: 42,707.00 vs buy 275,000.00 (moved)"
+        );
+        assert!(figure.text.ends_with(" (moved)"));
+
+        let mut incomplete = build_decision();
+        incomplete.job_cost_incomplete = vec![TRITANIUM];
+        let figure = decision_figure(
+            &line(HOBGOBLIN_I, None, Some(&bought)),
+            &incomplete,
+            None,
+            true,
+        );
+        assert_eq!(
+            figure.text,
+            "You: build: 42,707.00 vs buy 275,000.00 (job cost incomplete) (moved)"
+        );
+
+        let built = step(HOBGOBLIN_I, 0, 1, 0, 1, 1, 0);
+        let figure = decision_figure(
+            &line(HOBGOBLIN_I, Some(&built), None),
+            &build_decision(),
+            None,
+            true,
+        );
+        assert_eq!(
+            figure.text,
+            "App: build: 42,707.00 vs buy 275,000.00 (moved)"
+        );
+
+        // A row that did not move keeps its cell as it was.
+        let figure = decision_figure(
+            &line(HOBGOBLIN_I, Some(&built), None),
+            &build_decision(),
+            None,
+            false,
+        );
+        assert_eq!(figure.text, "App: build: 42,707.00 vs buy 275,000.00");
     }
 }

@@ -45,6 +45,14 @@ pub enum Dialog {
     },
 }
 
+/// The plan as it was before a change that moved other rows' build-or-buy choices, for Undo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanChange {
+    pub build: BTreeSet<TypeId>,
+    pub me: BTreeMap<TypeId, u8>,
+    pub dirty: bool,
+}
+
 #[derive(Debug)]
 pub struct BuildPage {
     /// The saved plan on screen, `None` until one is picked.
@@ -75,6 +83,12 @@ pub struct BuildPage {
     /// The product search box.
     pub product_query: String,
     pub dialog: Option<Dialog>,
+    /// The plan as it was before the last change, for Undo, `None` when no change moved a row.
+    pub undo: Option<PlanChange>,
+    /// The drawn rows whose build-or-buy choice the last change moved.
+    pub moved: BTreeSet<TypeId>,
+    /// The one line per destination of the moved rows, under the table.
+    pub moved_lines: Vec<String>,
 }
 
 impl Default for BuildPage {
@@ -98,6 +112,9 @@ impl Default for BuildPage {
             quantity_ok: Vec::new(),
             product_query: String::new(),
             dialog: None,
+            undo: None,
+            moved: BTreeSet::new(),
+            moved_lines: Vec::new(),
         }
     }
 }
@@ -108,6 +125,7 @@ pub(crate) const NO_REACTIONS: &str = "Pick a reactions facility first";
 impl BuildPage {
     /// Works the plan on screen out again and reads the pasted text. Called after every change.
     pub fn recalc(&mut self, cx: &mut Shared) {
+        self.drop_change();
         refresh_claims(cx);
         self.copy_mes = match cx.sde.as_ref() {
             Some(sde) => copy_mes(&self.invention, sde),
@@ -145,6 +163,27 @@ impl BuildPage {
     pub fn edited(&mut self, cx: &mut Shared) {
         self.dirty = true;
         self.recalc(cx);
+    }
+
+    /// Puts the plan back as it was before the change that moved rows, and works it out again
+    /// without touching `dirty`: the plan stays as unsaved as it was then.
+    pub fn undo_change(&mut self, cx: &mut Shared) {
+        let Some(change) = self.undo.take() else {
+            return;
+        };
+        if let Some(record) = self.record.as_mut() {
+            record.build = change.build;
+            record.me = change.me;
+        }
+        self.dirty = change.dirty;
+        self.recalc(cx);
+    }
+
+    /// Drops the Undo snapshot and the marks of the rows the last change moved.
+    fn drop_change(&mut self) {
+        self.undo = None;
+        self.moved.clear();
+        self.moved_lines.clear();
     }
 
     /// Shows `products` as the plan on screen's list, with one quantity text per product, all
@@ -306,6 +345,7 @@ impl BuildPage {
         self.quantity_texts.clear();
         self.quantity_ok.clear();
         self.product_query.clear();
+        self.drop_change();
         self.result = Err(NO_PRODUCT.to_owned());
     }
 
@@ -1503,5 +1543,79 @@ mod tests {
             (640_000, 499_444, 140_556)
         );
         assert_eq!(second.from_assets.get(&TRITANIUM), Some(&499_444));
+    }
+
+    #[test]
+    fn undo_change_puts_the_plan_back_and_drops_the_marks() {
+        let dir = TempDir::new().expect("a temp folder");
+        let mut cx = shared(&dir);
+        let mut page = BuildPage {
+            record: Some(record(BTreeMap::from([(HOBGOBLIN_II, 5)]))),
+            undo: Some(PlanChange {
+                build: BTreeSet::from([HOBGOBLIN_II]),
+                me: BTreeMap::from([(HOBGOBLIN_II, 3)]),
+                dirty: true,
+            }),
+            ..BuildPage::default()
+        };
+        page.moved.insert(HOBGOBLIN_II);
+        page.moved_lines
+            .push("Your change made 1 row below switch to Build: Hobgoblin II".to_owned());
+
+        page.undo_change(&mut cx);
+
+        let record = page.record.as_ref().expect("the record stays");
+        assert_eq!(record.build, BTreeSet::from([HOBGOBLIN_II]));
+        assert_eq!(record.me, BTreeMap::from([(HOBGOBLIN_II, 3)]));
+        assert!(
+            page.dirty,
+            "the plan stays as unsaved as the snapshot had it"
+        );
+        assert!(page.undo.is_none());
+        assert!(page.moved.is_empty());
+        assert!(page.moved_lines.is_empty());
+    }
+
+    #[test]
+    fn undo_change_without_a_snapshot_leaves_the_plan_alone() {
+        let dir = TempDir::new().expect("a temp folder");
+        let mut cx = shared(&dir);
+        let mut page = BuildPage {
+            record: Some(record(BTreeMap::from([(HOBGOBLIN_II, 5)]))),
+            ..BuildPage::default()
+        };
+        page.moved.insert(HOBGOBLIN_II);
+
+        page.undo_change(&mut cx);
+
+        let record = page.record.as_ref().expect("the record stays");
+        assert_eq!(record.me, BTreeMap::from([(HOBGOBLIN_II, 5)]));
+        assert!(page.moved.contains(&HOBGOBLIN_II));
+    }
+
+    #[test]
+    fn drop_change_drops_the_marks_and_leaves_the_record_alone() {
+        let mut page = BuildPage {
+            record: Some(record(BTreeMap::from([(HOBGOBLIN_II, 5)]))),
+            dirty: true,
+            undo: Some(PlanChange {
+                build: BTreeSet::from([HOBGOBLIN_II]),
+                me: BTreeMap::new(),
+                dirty: false,
+            }),
+            ..BuildPage::default()
+        };
+        page.moved.insert(RIFTER);
+        page.moved_lines.push("line".to_owned());
+
+        page.drop_change();
+
+        assert!(page.undo.is_none());
+        assert!(page.moved.is_empty());
+        assert!(page.moved_lines.is_empty());
+        let record = page.record.as_ref().expect("the record stays");
+        assert_eq!(record.me, BTreeMap::from([(HOBGOBLIN_II, 5)]));
+        assert!(record.build.is_empty());
+        assert!(page.dirty, "drop_change leaves the edited flag alone");
     }
 }
