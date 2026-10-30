@@ -847,12 +847,14 @@ impl App {
         self.add_to_layout();
         let activity = self.activity();
         let idle = self.idle_text();
+        let characters = status::characters_text(&self.shared.session, (self.shared.clock)());
         let clicked = status::show(
             ui,
             &self.shared.style,
             &mut self.shared.notices,
             activity.as_deref(),
             &idle,
+            &characters,
         );
         match clicked {
             Some(Action::Update { build }) => self.start_update(build),

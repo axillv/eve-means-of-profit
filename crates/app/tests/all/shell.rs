@@ -773,8 +773,14 @@ mod tests {
         }
         let mut harness = Harness::new_ui_state(
             |ui, state: &mut State| {
-                state.action =
-                    status::show(ui, &Style::eve_dense(), &mut state.notices, None, "idle");
+                state.action = status::show(
+                    ui,
+                    &Style::eve_dense(),
+                    &mut state.notices,
+                    None,
+                    "idle",
+                    "",
+                );
             },
             State {
                 notices: vec![Notice::info("First notice")],
