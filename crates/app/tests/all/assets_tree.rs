@@ -16,8 +16,8 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use crate::ui::{click, find, hover, shown, snapshot, until};
-    use egui::{Event, Key, Modifiers, vec2};
+    use crate::ui::{click, find, hover, shown, snapshot, top, until};
+    use egui::{Event, Key, Modifiers, PointerButton, pos2, vec2};
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
     use eve_means_of_profit::build::prices::Prices;
@@ -402,6 +402,60 @@ mod tests {
         }
     }
 
+    /// A primary click at `pos`: the pointer moves there, then presses and releases.
+    fn click_at(harness: &mut Harness<'_, App>, pos: egui::Pos2) {
+        harness.hover_at(pos);
+        for pressed in [true, false] {
+            harness.event(Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            });
+        }
+        harness.run();
+    }
+
+    /// Opens the row labelled `label` by clicking its fold arrow, just left of its text.
+    fn open_row(harness: &mut Harness<'_, App>, label: &str) {
+        let rect = find(harness, label)
+            .unwrap_or_else(|| panic!("no row labelled {label}"))
+            .rect();
+        click_at(harness, pos2(rect.min.x - 7.0, rect.center().y));
+        harness.run();
+    }
+
+    /// Whether the Places panel (left of the Assets panel) shows `text`. The Assets panel repeats
+    /// some place names, so a global check would find rows the tree has folded away.
+    fn shown_in_places(harness: &Harness<'_, App>, text: &str) -> bool {
+        let split = harness
+            .query_all_by_label("Assets")
+            .map(|node| node.rect().min.x)
+            .fold(0.0, f32::max);
+        harness
+            .query_all_by_label(text)
+            .any(|node| node.rect().center().x < split)
+    }
+
+    /// Opens the whole sample tree: the region, the system, the station and the unknown rows.
+    fn open_all(harness: &mut Harness<'_, App>) {
+        for label in [
+            "The Forge",
+            "Jita",
+            JITA_4_4_NAME,
+            "Unknown region",
+            "Unknown system",
+        ] {
+            open_row(harness, label);
+        }
+    }
+
+    /// Opens the rows above the Jita station: the region and the system.
+    fn open_jita(harness: &mut Harness<'_, App>) {
+        open_row(harness, "The Forge");
+        open_row(harness, "Jita");
+    }
+
     /// Right-clicks the node that shows `label` and opens its menu.
     fn right_click(harness: &mut Harness<'_, App>, label: &str) {
         find(harness, label)
@@ -432,18 +486,18 @@ mod tests {
         )
     }
 
-    /// The rows the spec lists, in order: the label, the stacks and the value.
+    /// The rows the spec lists, in tree order sorted by value: the label, the item count and the value.
     fn expected_rows() -> Vec<(&'static str, &'static str, &'static str)> {
         vec![
-            ("All places", "7", "619,240.00"),
-            ("The Forge", "6", "617,800.00"),
-            ("Jita", "6", "617,800.00"),
-            ("Home Fort", "1", "57,600.00"),
-            (JITA_4_4_NAME, "5", "560,200.00"),
-            ("Rifter", "1", "4,800.00"),
-            ("Unknown region", "1", "1,440.00"),
-            ("Unknown system", "1", "1,440.00"),
-            (REFUSED_NAME, "1", "1,440.00"),
+            ("All places", "239", "619,240.00"),
+            ("The Forge", "236", "617,800.00"),
+            ("Jita", "236", "617,800.00"),
+            (JITA_4_4_NAME, "116", "560,200.00"),
+            ("Rifter", "10", "4,800.00"),
+            ("Home Fort", "120", "57,600.00"),
+            ("Unknown region", "3", "1,440.00"),
+            ("Unknown system", "3", "1,440.00"),
+            (REFUSED_NAME, "3", "1,440.00"),
         ]
     }
 
@@ -454,6 +508,7 @@ mod tests {
         let forge = CountingForge::all_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
+        open_all(&mut harness);
 
         let mut last_y = f32::MIN;
         for (label, stacks, value) in expected_rows() {
@@ -476,6 +531,7 @@ mod tests {
         let forge = CountingForge::all_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
+        open_jita(&mut harness);
 
         click(&mut harness, "Characters: all");
         click(&mut harness, "Alt (jEve)");
@@ -483,10 +539,10 @@ mod tests {
         harness.run();
         assert!(shown(&harness, "Characters: 2 of 3"), "the dropdown counts");
         let jita = row(&mut harness, JITA_4_4_NAME).1;
-        assert_eq!(jita.first().map(String::as_str), Some("4"));
+        assert_eq!(jita.first().map(String::as_str), Some("56"));
         assert_eq!(jita.get(1).map(String::as_str), Some("531,400.00"));
         let all = row(&mut harness, "All places").1;
-        assert_eq!(all.first().map(String::as_str), Some("6"));
+        assert_eq!(all.first().map(String::as_str), Some("179"));
         assert_eq!(all.get(1).map(String::as_str), Some("590,440.00"));
 
         click(&mut harness, "Characters: 2 of 3");
@@ -508,6 +564,8 @@ mod tests {
         let forge = CountingForge::all_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
+        open_jita(&mut harness);
+        open_row(&mut harness, JITA_4_4_NAME);
 
         for (label, expected) in [
             ("Home Fort", Some(HOME_FORT)),
@@ -529,6 +587,7 @@ mod tests {
         let forge = CountingForge::all_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
+        open_jita(&mut harness);
 
         assert_eq!(
             row(&mut harness, "Home Fort").1.get(1).map(String::as_str),
@@ -563,6 +622,7 @@ mod tests {
         let forge = CountingForge::with_rows(&[RAM_SELL, RAM_BUY]);
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
+        open_jita(&mut harness);
 
         let (_, cells) = row(&mut harness, JITA_4_4_NAME);
         assert_eq!(cells.get(1).map(String::as_str), Some("55,200.00"));
@@ -586,6 +646,8 @@ mod tests {
         let forge = CountingForge::all_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
+        open_jita(&mut harness);
+        open_row(&mut harness, JITA_4_4_NAME);
 
         assert_eq!(
             row(&mut harness, JITA_4_4_NAME)
@@ -607,6 +669,7 @@ mod tests {
         let forge = CountingForge::no_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
+        open_all(&mut harness);
 
         for (label, _, _) in expected_rows() {
             let (_, cells) = row(&mut harness, label);
@@ -623,9 +686,10 @@ mod tests {
         let blueprint = asset(9_100, BLUEPRINT, JITA_4_4, "Hangar", 1, true);
         let (mut harness, _) = start(&env, &jeve, vec![blueprint], forge);
         harness.run();
+        open_jita(&mut harness);
 
         let (_, cells) = row(&mut harness, JITA_4_4_NAME);
-        assert_eq!(cells.first().map(String::as_str), Some("6"));
+        assert_eq!(cells.first().map(String::as_str), Some("117"));
         assert_eq!(cells.get(1).map(String::as_str), Some("560,200.00"));
         assert!(!shown(&harness, " +"), "no type is unpriced");
     }
@@ -637,6 +701,7 @@ mod tests {
         let forge = CountingForge::all_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
+        open_jita(&mut harness);
 
         right_click(&mut harness, "Jita");
         assert!(
@@ -659,7 +724,10 @@ mod tests {
         assert_eq!(field, 1, "the field holds the typed name");
 
         harness
-            .get_by(|node| node.role() == egui::accesskit::Role::TextInput)
+            .get_by(|node| {
+                node.role() == egui::accesskit::Role::TextInput
+                    && node.value().as_deref() == Some("Home Fort")
+            })
             .click();
         harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
         harness.event(Event::Text("Fort Bravo".to_owned()));
@@ -674,7 +742,10 @@ mod tests {
         right_click(&mut harness, "Fort Bravo");
         click(&mut harness, "Name this structure…");
         harness
-            .get_by(|node| node.role() == egui::accesskit::Role::TextInput)
+            .get_by(|node| {
+                node.role() == egui::accesskit::Role::TextInput
+                    && node.value().as_deref() == Some("Fort Bravo")
+            })
             .click();
         harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
         harness.key_press(Key::Backspace);
@@ -694,6 +765,7 @@ mod tests {
         let forge = CountingForge::all_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
+        open_jita(&mut harness);
 
         let long = "a".repeat(101);
         let expected_error = store_of(&env.data)
@@ -704,7 +776,10 @@ mod tests {
         right_click(&mut harness, "Home Fort");
         click(&mut harness, "Name this structure…");
         harness
-            .get_by(|node| node.role() == egui::accesskit::Role::TextInput)
+            .get_by(|node| {
+                node.role() == egui::accesskit::Role::TextInput
+                    && node.value().as_deref() == Some("Home Fort")
+            })
             .click();
         harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
         harness.event(Event::Text(long));
@@ -733,6 +808,7 @@ mod tests {
         let forge = CountingForge::all_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
+        open_jita(&mut harness);
 
         right_click(&mut harness, JITA_4_4_NAME);
         assert!(!shown(&harness, "Name this structure…"));
@@ -775,6 +851,7 @@ mod tests {
         let forge = CountingForge::all_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
+        open_jita(&mut harness);
 
         assert!(shown(&harness, JITA_4_4_NAME), "the places tree shows");
         for text in [
@@ -790,12 +867,113 @@ mod tests {
     }
 
     #[test]
+    fn the_tree_starts_at_its_top_level_and_the_arrows_open_a_level() {
+        let env = env();
+        let jeve = jeve_profile();
+        let forge = CountingForge::all_rows();
+        let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
+        harness.run();
+
+        assert!(shown(&harness, "Place"));
+        assert!(shown(&harness, "Count"));
+        assert!(shown(&harness, "Value"));
+        for label in ["All places", "The Forge", "Unknown region"] {
+            assert!(shown_in_places(&harness, label), "{label} shows at the top");
+        }
+        assert!(
+            !shown_in_places(&harness, "Jita"),
+            "the region starts folded"
+        );
+        assert!(
+            !shown_in_places(&harness, "Home Fort"),
+            "the system starts folded"
+        );
+        assert!(top(&harness, "All places") < top(&harness, "The Forge"));
+        assert!(top(&harness, "The Forge") < top(&harness, "Unknown region"));
+        let all = row(&mut harness, "All places").1;
+        assert_eq!(all.first().map(String::as_str), Some("239"));
+        assert_eq!(all.get(1).map(String::as_str), Some("619,240.00"));
+
+        // A click 13 points left of the label lands on The Forge's fold arrow.
+        let forge = find(&harness, "The Forge").expect("the region row").rect();
+        click_at(&mut harness, pos2(forge.min.x - 13.0, forge.center().y));
+        harness.run();
+        assert!(shown_in_places(&harness, "Jita"), "the region opens");
+        assert!(
+            !shown_in_places(&harness, JITA_4_4_NAME),
+            "the system stays folded"
+        );
+
+        let jita = find(&harness, "Jita").expect("the system row").rect();
+        click_at(&mut harness, pos2(jita.min.x - 13.0, jita.center().y));
+        harness.run();
+        assert!(shown_in_places(&harness, JITA_4_4_NAME));
+        assert!(shown_in_places(&harness, "Home Fort"));
+        assert!(
+            top(&harness, JITA_4_4_NAME) < top(&harness, "Home Fort"),
+            "the station has the larger value"
+        );
+        let station = row(&mut harness, JITA_4_4_NAME).1;
+        assert_eq!(station.first().map(String::as_str), Some("116"));
+        assert_eq!(station.get(1).map(String::as_str), Some("560,200.00"));
+        let home = row(&mut harness, "Home Fort").1;
+        assert_eq!(home.first().map(String::as_str), Some("120"));
+        assert_eq!(home.get(1).map(String::as_str), Some("57,600.00"));
+    }
+
+    #[test]
+    fn searching_places_keeps_ancestors_and_clearing_restores_the_folds() {
+        let env = env();
+        let jeve = jeve_profile();
+        let forge = CountingForge::all_rows();
+        let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
+        harness.run();
+
+        harness
+            .get_by(|node| node.role() == egui::accesskit::Role::TextInput)
+            .click();
+        harness.event(Event::Text("rifter".to_owned()));
+        harness.run();
+        for label in ["All places", "The Forge", "Jita", JITA_4_4_NAME, "Rifter"] {
+            assert!(shown_in_places(&harness, label), "{label} is kept");
+        }
+        assert!(
+            !shown_in_places(&harness, "Home Fort"),
+            "the sibling does not match"
+        );
+        let forge = row(&mut harness, "The Forge").1;
+        assert_eq!(forge.first().map(String::as_str), Some("236"));
+        assert_eq!(forge.get(1).map(String::as_str), Some("617,800.00"));
+
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness.key_press(Key::Backspace);
+        harness.run();
+        assert!(
+            !shown_in_places(&harness, "Jita"),
+            "clearing folds the region again"
+        );
+        assert!(
+            !shown_in_places(&harness, JITA_4_4_NAME),
+            "clearing folds the system again"
+        );
+
+        harness.event(Event::Text("zzz".to_owned()));
+        harness.run();
+        assert!(shown(&harness, "No places match."));
+        assert!(
+            !shown_in_places(&harness, "All places"),
+            "no table is drawn"
+        );
+    }
+
+    #[test]
     fn the_assets_tree_matches_its_snapshot() {
         let env = env();
         let jeve = jeve_profile();
         let forge = CountingForge::all_rows();
         let (mut harness, _) = start(&env, &jeve, Vec::new(), forge);
         harness.run();
+        open_jita(&mut harness);
         click(&mut harness, JITA_4_4_NAME);
         harness.run();
         snapshot(&mut harness, "assets-tree");

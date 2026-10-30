@@ -186,6 +186,8 @@ struct State {
     sort: Option<(usize, Direction)>,
     /// Whether the sort is the player's or the saved one: until then a table waits for its answer.
     sort_loaded: bool,
+    /// Whether the start fields have been applied.
+    started: bool,
     collapsed: BTreeSet<u64>,
     /// The row keys in the order kept from before a value changed, until a re-sort.
     frozen: Option<Vec<u64>>,
@@ -214,7 +216,11 @@ fn load_sort(ui: &Ui, columns: &[Column], id: Id, state: &mut State) {
     let mut mailbox = mailbox(ui);
     match mailbox.saved.remove(&table) {
         Some(text) => {
-            state.sort = sort_from_text(columns, &text);
+            // An empty saved sort, or one naming a column the table does not have, leaves the
+            // table's own sort (the start sort) in place.
+            if let Some(sort) = sort_from_text(columns, &text) {
+                state.sort = Some(sort);
+            }
             state.sort_loaded = true;
         }
         None => {
@@ -326,6 +332,9 @@ pub struct Table<'a> {
     selected: Option<u64>,
     fit_rows: Option<usize>,
     icons: Option<Icon<'a>>,
+    start_folded: BTreeSet<u64>,
+    start_sort: Option<(usize, Direction)>,
+    expanded: bool,
 }
 
 impl<'a> Table<'a> {
@@ -337,7 +346,35 @@ impl<'a> Table<'a> {
             selected: None,
             fit_rows: None,
             icons: None,
+            start_folded: BTreeSet::new(),
+            start_sort: None,
+            expanded: false,
         }
+    }
+
+    /// The folds and the sort the table starts with, until the player changes them. A saved sort
+    /// replaces the start sort when it names a column; otherwise the start sort stays.
+    pub fn start(mut self, folded: BTreeSet<u64>, sort: Option<(usize, Direction)>) -> Self {
+        self.start_folded = folded;
+        self.start_sort = sort;
+        self
+    }
+
+    /// Shows every row, as when a search shows the ancestors of its matches: the folds are neither
+    /// used nor changed, so clearing the search brings the player's folds back.
+    pub fn expanded(mut self, expanded: bool) -> Self {
+        self.expanded = expanded;
+        self
+    }
+
+    /// Seeds the table's folds and sort once: after that the player's folds and sort own it.
+    fn seed_start(&self, state: &mut State) {
+        if state.started {
+            return;
+        }
+        state.collapsed = self.start_folded.clone();
+        state.sort = self.start_sort;
+        state.started = true;
     }
 
     /// Draws the item icon of each row before the text of `column`. `icon` reads the row key and
@@ -428,6 +465,7 @@ impl<'a> Table<'a> {
         ui.data_mut(|data| data.insert_temp(has_table(self.panel), true));
         let mut state: State =
             ui.data_mut(|data| data.get_temp_mut_or_default::<State>(self.id).clone());
+        self.seed_start(&mut state);
         let sort_before = state.sort;
         let table = self.id.value();
         load_sort(ui, self.columns, self.id, &mut state);
@@ -453,15 +491,15 @@ impl<'a> Table<'a> {
             });
         let fresh = sort_order(rows, column, direction);
         let (order, moved) = arrange(rows, fresh, &mut state);
-        let shown = visible(rows, &order, &state.collapsed);
-        // The panel's copy button sets this flag to ask for a copy; the text is built only then.
-        if ui
-            .data_mut(|data| data.remove_temp::<bool>(copy_request(self.panel)))
-            .unwrap_or(false)
-        {
-            ui.ctx()
-                .copy_text(to_tsv(self.columns, rows, &shown, footer));
-        }
+        // An expanded table, such as a search's ancestors, shows every row whatever the folds.
+        let no_folds = BTreeSet::new();
+        let collapsed = if self.expanded {
+            &no_folds
+        } else {
+            &state.collapsed
+        };
+        let shown = visible(rows, &order, collapsed);
+        copy_if_asked(ui, self.panel, self.columns, rows, &shown, footer);
 
         let look = Look {
             id: self.id,
@@ -469,7 +507,7 @@ impl<'a> Table<'a> {
             style,
             height,
             selected: self.selected,
-            collapsed: &state.collapsed,
+            collapsed,
             changed: &state.changed,
             icons: self.icons,
         };
@@ -512,8 +550,10 @@ impl<'a> Table<'a> {
             draw_footer(ui, self.columns, cells, rect, style);
         }
 
-        // Unfold the row if it was folded, else fold it.
+        // Unfold the row if it was folded, else fold it. An expanded table keeps its folds for
+        // when it shrinks again.
         if let Some(key) = response.toggled
+            && !self.expanded
             && !state.collapsed.remove(&key)
         {
             state.collapsed.insert(key);
@@ -534,6 +574,23 @@ impl<'a> Table<'a> {
         ui.data_mut(|data| data.insert_temp(rows_moved(self.panel), moved));
         ui.data_mut(|data| data.insert_temp(self.id, state));
         response
+    }
+}
+
+/// Copies the shown rows when the panel's copy button asked for it; the text is built only then.
+fn copy_if_asked(
+    ui: &mut Ui,
+    panel: Id,
+    columns: &[Column],
+    rows: &[Row],
+    shown: &[usize],
+    footer: Option<&[Cell]>,
+) {
+    if ui
+        .data_mut(|data| data.remove_temp::<bool>(copy_request(panel)))
+        .unwrap_or(false)
+    {
+        ui.ctx().copy_text(to_tsv(columns, rows, shown, footer));
     }
 }
 
@@ -798,8 +855,11 @@ fn has_children(rows: &[Row], index: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell as Flag;
+    use std::rc::Rc;
     use std::sync::{Arc, Mutex};
 
+    use egui::{Event, Modifiers, PointerButton};
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
 
@@ -1055,5 +1115,98 @@ mod tests {
             0
         );
         assert!(!marked_cell(&mut harness, "B", &style));
+    }
+
+    /// A row of the small tree the start tests fold.
+    fn tree_row(key: u64, depth: u32, item: &str) -> Row {
+        Row {
+            key,
+            depth,
+            cells: vec![Cell::text(item), Cell::int(1, "1"), Cell::missing()],
+        }
+    }
+
+    /// Root, its child, that child's child, and a sibling: the child has children.
+    fn tree_rows() -> Vec<Row> {
+        vec![
+            tree_row(1, 0, "Root"),
+            tree_row(2, 1, "Child"),
+            tree_row(3, 2, "Grandchild"),
+            tree_row(4, 1, "Sibling"),
+        ]
+    }
+
+    fn fold(keys: &[u64]) -> BTreeSet<u64> {
+        keys.iter().copied().collect()
+    }
+
+    /// A table that starts folded at its child and sorted by value, with `expanded` read each frame.
+    fn start_harness(expanded: Rc<Flag<bool>>) -> Harness<'static> {
+        let style = Style::eve_dense();
+        let rows = tree_rows();
+        Harness::builder()
+            .with_size(vec2(800.0, 400.0))
+            .build_ui(move |ui| {
+                style.apply(ui.ctx());
+                let columns = columns();
+                Table::new(Id::new("start test"), &columns)
+                    .start(fold(&[2]), Some((2, Direction::Descending)))
+                    .expanded(expanded.get())
+                    .show(ui, &style, Density::Normal, &rows, None);
+            })
+    }
+
+    /// A primary click at `pos`: the pointer moves there, then presses and releases.
+    fn click_at(harness: &mut Harness<'_>, pos: Pos2) {
+        harness.hover_at(pos);
+        for pressed in [true, false] {
+            harness.event(Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            });
+        }
+    }
+
+    fn shows(harness: &Harness<'_>, label: &str) -> bool {
+        harness.query_all_by_label(label).count() > 0
+    }
+
+    #[test]
+    fn start_folds_the_given_rows_and_expanded_shows_every_row() {
+        let expanded = Rc::new(Flag::new(false));
+        let mut harness = start_harness(Rc::clone(&expanded));
+        harness.run();
+        assert!(shows(&harness, "Root"));
+        assert!(shows(&harness, "Child"));
+        assert!(shows(&harness, "Sibling"));
+        assert!(!shows(&harness, "Grandchild"), "the folded child hides it");
+
+        expanded.set(true);
+        harness.run();
+        assert!(shows(&harness, "Grandchild"), "an expanded table shows all");
+    }
+
+    #[test]
+    fn a_fold_click_while_expanded_leaves_the_folds_alone() {
+        let expanded = Rc::new(Flag::new(true));
+        let mut harness = start_harness(Rc::clone(&expanded));
+        harness.run();
+        let child = harness.get_by_label("Child").rect();
+        click_at(&mut harness, pos2(child.min.x - 7.0, child.center().y));
+        harness.run();
+        assert!(shows(&harness, "Grandchild"));
+
+        // The folded child keeps its fold: shrinking the table again hides the grandchild.
+        expanded.set(false);
+        harness.run();
+        assert!(!shows(&harness, "Grandchild"));
+
+        // With the table folded again, a click unfolds as usual.
+        let child = harness.get_by_label("Child").rect();
+        click_at(&mut harness, pos2(child.min.x - 7.0, child.center().y));
+        harness.run();
+        assert!(shows(&harness, "Grandchild"));
     }
 }

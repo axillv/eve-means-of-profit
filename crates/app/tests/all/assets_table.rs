@@ -17,7 +17,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::ui::{click, shown, snapshot, until};
-    use egui::{Key, Rect, vec2};
+    use egui::{Event, Key, Modifiers, PointerButton, Rect, pos2, vec2};
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
     use eve_means_of_profit::build::prices::Prices;
@@ -457,6 +457,34 @@ mod tests {
             .collect()
     }
 
+    /// A primary click at `pos`: the pointer moves there, then presses and releases.
+    fn click_at(harness: &mut Harness<'_, App>, pos: egui::Pos2) {
+        harness.hover_at(pos);
+        for pressed in [true, false] {
+            harness.event(Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            });
+        }
+        harness.run();
+    }
+
+    /// Opens The Forge and Jita in the Places panel, so their rows show.
+    fn open_places_to_the_station(harness: &mut Harness<'_, App>) {
+        let split = harness.ctx.viewport_rect().width() * 0.25;
+        for label in ["The Forge", "Jita"] {
+            let rect = harness
+                .query_all_by_label(label)
+                .map(|node| node.rect())
+                .find(|rect| rect.center().x < split)
+                .unwrap_or_else(|| panic!("no Places row labelled {label}"));
+            click_at(harness, pos2(rect.min.x - 7.0, rect.center().y));
+            harness.run();
+        }
+    }
+
     /// Clicks the `pick`th table node labelled `label`.
     fn click_table(harness: &mut Harness<'_, App>, label: &str, pick: usize) {
         let (left, right) = panel_bounds(harness);
@@ -740,6 +768,7 @@ mod tests {
         set_value_price(&env, PriceRule::HighestBuy);
         let (mut harness, _) = start(&env, &jeve, Vec::new(), CountingForge::all_rows());
         harness.run();
+        open_places_to_the_station(&mut harness);
 
         let rows = table_rows(&harness, "R.A.M.- Robotics");
         let (_, home) = rows

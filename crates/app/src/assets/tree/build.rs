@@ -71,12 +71,15 @@ fn count(
                 Err(error) => return Err(error),
             };
         sums.places.insert(resolved.place);
-        sums.root.add(value, unpriced, too_large);
+        sums.root
+            .add(resolved.asset.quantity, value, unpriced, too_large);
         for node in nodes_of(assets, by_item, places, resolved)? {
-            sums.rows
-                .entry(node)
-                .or_default()
-                .add(value, unpriced, too_large);
+            sums.rows.entry(node).or_default().add(
+                resolved.asset.quantity,
+                value,
+                unpriced,
+                too_large,
+            );
         }
     }
     Ok(sums)
@@ -243,7 +246,7 @@ fn entry(key: u64, depth: u32, label: String, select: Option<LocationId>, sum: &
         depth,
         label,
         select,
-        stacks: sum.stacks,
+        items: sum.items,
         value: if sum.too_large { None } else { sum.value },
         unpriced: sum.unpriced.len(),
     }

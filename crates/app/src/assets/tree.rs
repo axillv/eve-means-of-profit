@@ -1,5 +1,5 @@
 //! The Places panel of the Assets page: regions, systems, places and the containers that hold items,
-//! with the stacks and the value under each. [`build`] is pure; [`show`] draws the panel.
+//! with the item count and the value under each. [`build`] is pure; [`show`] draws the panel.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -26,7 +26,7 @@ use crate::dock;
 use crate::session::{Session, Source};
 use crate::status::Notice;
 use crate::table::Table;
-use crate::table::model::{Cell, Column, ColumnKind, Row};
+use crate::table::model::{Cell, Column, ColumnKind, Direction, Row};
 
 mod build;
 
@@ -83,9 +83,11 @@ pub(super) struct Entry {
     pub label: String,
     /// What a click picks. `None` for the root and for the unknown region and system.
     pub select: Option<LocationId>,
-    /// The asset rows under this row.
-    pub stacks: u64,
+    /// The units of the asset rows under this row.
+    pub items: u64,
     /// The value of the priced stacks under this row; `None` when none of them is priced.
+    ///
+    /// The count is in `items`, so a blueprinted or unpriced stack still adds its units.
     pub value: Option<Money>,
     /// How many item types under this row have no price.
     pub unpriced: usize,
@@ -124,7 +126,7 @@ impl std::error::Error for TreeError {}
 /// What adds up under one row.
 #[derive(Debug, Default, Clone)]
 struct Sum {
-    stacks: u64,
+    items: u64,
     value: Option<Money>,
     /// The value does not fit in money: this row shows dashes, and the other rows are kept.
     too_large: bool,
@@ -132,11 +134,17 @@ struct Sum {
 }
 
 impl Sum {
-    /// Adds one stack: its value when it is priced, or its type when it has no price. A stack
-    /// whose value does not fit is `too_large`; every row it counts under is too large too.
-    fn add(&mut self, value: Option<Money>, unpriced: Option<TypeId>, too_large: bool) {
-        // Cannot saturate: a count of stacks is at most the number of assets, far below u64::MAX.
-        self.stacks = self.stacks.saturating_add(1);
+    /// Adds one stack of `quantity` units: its value when it is priced, or its type when it has no
+    /// price. A stack whose value does not fit is `too_large`; every row it counts under is too
+    /// large too.
+    fn add(
+        &mut self,
+        quantity: u64,
+        value: Option<Money>,
+        unpriced: Option<TypeId>,
+        too_large: bool,
+    ) {
+        self.items = self.items.saturating_add(quantity);
         if let Some(value) = value {
             match self.value.map_or(Some(value), |sum| sum.checked_add(value)) {
                 Some(sum) => self.value = Some(sum),
@@ -178,23 +186,77 @@ struct Holding {
     top: BTreeMap<LocationId, Vec<usize>>,
 }
 
-/// The rows as the table draws them: the name, the stacks and the value.
-pub(super) fn rows(tree: &Tree) -> Vec<Row> {
-    tree.entries
-        .iter()
-        .map(|entry| {
-            let shown = i64::try_from(entry.stacks)
-                .map_or_else(|_| entry.stacks.to_string(), group_thousands);
-            Row {
-                key: entry.key,
-                depth: entry.depth,
-                cells: vec![
-                    Cell::text(entry.label.clone()),
-                    Cell::int(i128::from(entry.stacks), shown),
-                    entry.value.map_or_else(Cell::missing, Cell::money),
-                ],
+/// The rows as the table draws them: the name, the item count and the value.
+fn rows(entries: &[Entry]) -> Vec<Row> {
+    entries.iter().map(row).collect()
+}
+
+/// One row as the table draws it.
+fn row(entry: &Entry) -> Row {
+    let shown =
+        i64::try_from(entry.items).map_or_else(|_| entry.items.to_string(), group_thousands);
+    Row {
+        key: entry.key,
+        depth: entry.depth,
+        cells: vec![
+            Cell::text(entry.label.clone()),
+            Cell::int(i128::from(entry.items), shown),
+            entry.value.map_or_else(Cell::missing, Cell::money),
+        ],
+    }
+}
+
+/// The rows under a search: each match and its ancestors, in tree order.
+fn search_rows(entries: &[Entry], query: &str) -> Vec<Row> {
+    matching(entries, query)
+        .into_iter()
+        .filter_map(|index| entries.get(index))
+        .map(row)
+        .collect()
+}
+
+/// The indices of the rows a search keeps: a trimmed, lower-case substring of a lower-cased label,
+/// plus the ancestors of each match. Every row is kept when the query is empty.
+fn matching(entries: &[Entry], query: &str) -> Vec<usize> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return (0..entries.len()).collect();
+    }
+    let mut keep = vec![false; entries.len()];
+    for (index, entry) in entries.iter().enumerate() {
+        if !entry.label.to_lowercase().contains(&query) {
+            continue;
+        }
+        if let Some(kept) = keep.get_mut(index) {
+            *kept = true;
+        }
+        // From the match, take the nearest preceding row of a smaller depth until the root.
+        let mut child = index;
+        let mut depth = entry.depth;
+        while depth > 0 {
+            let parent = entries
+                .iter()
+                .take(child)
+                .enumerate()
+                .rev()
+                .find(|(_, candidate)| candidate.depth < depth)
+                .map(|(position, _)| position);
+            let Some(parent) = parent else {
+                break;
+            };
+            let Some(parent_entry) = entries.get(parent) else {
+                break;
+            };
+            if let Some(kept) = keep.get_mut(parent) {
+                *kept = true;
             }
-        })
+            depth = parent_entry.depth;
+            child = parent;
+        }
+    }
+    keep.iter()
+        .enumerate()
+        .filter_map(|(index, &kept)| kept.then_some(index))
         .collect()
 }
 
@@ -208,7 +270,7 @@ fn columns() -> Vec<Column> {
         },
         Column {
             id: "stacks",
-            label: "Stacks".to_owned(),
+            label: "Count".to_owned(),
             kind: ColumnKind::Number,
             width: 90.0,
         },
@@ -252,7 +314,10 @@ struct Built {
 
 impl Built {
     fn new(key: Key, tree: Result<Tree, TreeError>, published_at: Option<i64>) -> Self {
-        let rows = tree.as_ref().map(rows).unwrap_or_default();
+        let rows = tree
+            .as_ref()
+            .map(|tree| rows(&tree.entries))
+            .unwrap_or_default();
         let index = tree.as_ref().map_or_else(
             |_| HashMap::new(),
             |tree| {
@@ -278,6 +343,8 @@ impl Built {
 struct State {
     built: Option<Arc<Built>>,
     dialog: Option<Dialog>,
+    /// What the player typed in `Search places`.
+    search: String,
 }
 
 /// What the table asked for this frame: a row picked, and a structure to name.
@@ -311,6 +378,7 @@ fn draw(state: &mut State, ui: &mut Ui, cx: &mut Shared) {
         }
     };
     filter(ui, cx, &stock, &unticked);
+    ui.add(egui::TextEdit::singleline(&mut state.search).hint_text("Search places"));
 
     let picked: BTreeSet<i64> = stock
         .iter()
@@ -340,7 +408,7 @@ fn draw(state: &mut State, ui: &mut Ui, cx: &mut Shared) {
         }
     };
 
-    let outcome = table(ui, cx, &built, tree);
+    let outcome = table(ui, cx, &built, tree, &state.search);
     if let Some(pick) = outcome.pick {
         cx.selection.place = pick;
     }
@@ -357,9 +425,24 @@ fn draw(state: &mut State, ui: &mut Ui, cx: &mut Shared) {
     name_dialog::show(&mut state.dialog, ui.ctx(), cx);
 }
 
+/// Folds every non-root row that has children, so the tree starts at its top level.
+fn start_folded(entries: &[Entry]) -> BTreeSet<u64> {
+    let mut folded = BTreeSet::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let has_children = entries
+            .get(index + 1)
+            .is_some_and(|next| next.depth > entry.depth);
+        if entry.depth > 0 && has_children {
+            folded.insert(entry.key);
+        }
+    }
+    folded
+}
+
 /// The tree table: rows, the selected row, the marker for unpriced types, and the right-click menu of
-/// a structure. Returns what the player asked for.
-fn table(ui: &mut Ui, cx: &Shared, built: &Built, tree: &Tree) -> Outcome {
+/// a structure. A `query` narrows the rows to the matches and their ancestors. Returns what the
+/// player asked for.
+fn table(ui: &mut Ui, cx: &Shared, built: &Built, tree: &Tree, query: &str) -> Outcome {
     let style = cx.style;
     let selected = cx
         .selection
@@ -371,6 +454,17 @@ fn table(ui: &mut Ui, cx: &Shared, built: &Built, tree: &Tree) -> Outcome {
         })
         .map(|entry| entry.key);
     let columns = columns();
+    let folded = start_folded(&tree.entries);
+    let searching = !query.trim().is_empty();
+    let rows = if searching {
+        search_rows(&tree.entries, query)
+    } else {
+        built.rows.clone()
+    };
+    if searching && rows.is_empty() {
+        ui.colored_label(style.mute, "No places match.");
+        return Outcome::default();
+    }
     let mut outcome = Outcome::default();
     let response = {
         let mut draw_cell = |ui: &mut Ui, key: u64, column: &'static str| -> bool {
@@ -387,9 +481,16 @@ fn table(ui: &mut Ui, cx: &Shared, built: &Built, tree: &Tree) -> Outcome {
                 _ => false,
             }
         };
-        Table::new(Id::new(super::AssetsPanel::Places.title()), &columns)
+        let id = Id::new(super::AssetsPanel::Places.title());
+        let table = Table::new(id, &columns)
             .selected(selected)
-            .show_with(ui, &style, cx.density, &built.rows, None, &mut draw_cell)
+            .start(folded, Some((2, Direction::Descending)));
+        let table = if searching {
+            table.expanded(true).panel(id)
+        } else {
+            table
+        };
+        table.show_with(ui, &style, cx.density, &rows, None, &mut draw_cell)
     };
     // A click on the place cell is caught by the cell; a click anywhere else comes from the table.
     if let Some(key) = response.clicked
@@ -831,7 +932,7 @@ mod tests {
         ])
     }
 
-    /// Depth, label, stacks, value in ten-thousandths, and unpriced types, row by row.
+    /// Depth, label, items, value in ten-thousandths, and unpriced types, row by row.
     fn shape(tree: &Tree) -> Vec<(u32, String, u64, Option<i64>, usize)> {
         tree.entries
             .iter()
@@ -839,7 +940,7 @@ mod tests {
                 (
                     entry.depth,
                     entry.label.clone(),
-                    entry.stacks,
+                    entry.items,
                     entry.value.map(|value| value.ten_thousandths()),
                     entry.unpriced,
                 )
@@ -850,11 +951,11 @@ mod tests {
     fn row(
         depth: u32,
         label: &str,
-        stacks: u64,
+        items: u64,
         value: Option<i64>,
         unpriced: usize,
     ) -> (u32, String, u64, Option<i64>, usize) {
-        (depth, label.to_owned(), stacks, value, unpriced)
+        (depth, label.to_owned(), items, value, unpriced)
     }
 
     fn root(tree: &Tree) -> &Entry {
@@ -870,7 +971,7 @@ mod tests {
     }
 
     #[test]
-    fn rows_sum_their_stacks_and_values_in_order() {
+    fn rows_sum_their_items_and_values_in_order() {
         let tree = build(
             &sample(),
             &type_map(Some(RAM_PRICE), Some(RIFTER_PRICE)),
@@ -880,24 +981,24 @@ mod tests {
         assert_eq!(
             shape(&tree),
             vec![
-                row(0, "All places", 7, Some(5_605_034_000), 0),
-                row(1, "The Forge", 6, Some(5_591_105_000), 0),
-                row(2, "Jita", 6, Some(5_591_105_000), 0),
-                row(3, "Home Fort", 1, Some(557_160_000), 0),
+                row(0, "All places", 239, Some(5_605_034_000), 0),
+                row(1, "The Forge", 236, Some(5_591_105_000), 0),
+                row(2, "Jita", 236, Some(5_591_105_000), 0),
+                row(3, "Home Fort", 120, Some(557_160_000), 0),
                 row(
                     3,
                     "Jita IV - Moon 4 - Caldari Navy Assembly Plant",
-                    5,
+                    116,
                     Some(5_033_945_000),
                     0,
                 ),
-                row(4, "Rifter", 1, Some(46_430_000), 0),
-                row(1, "Unknown region", 1, Some(13_929_000), 0),
-                row(2, "Unknown system", 1, Some(13_929_000), 0),
+                row(4, "Rifter", 10, Some(46_430_000), 0),
+                row(1, "Unknown region", 3, Some(13_929_000), 0),
+                row(2, "Unknown system", 3, Some(13_929_000), 0),
                 row(
                     3,
                     "Structure 1035466617999 (no access)",
-                    1,
+                    3,
                     Some(13_929_000),
                     0
                 ),
@@ -958,7 +1059,7 @@ mod tests {
         );
         let tree = build(&assets, &types, &place_map()).unwrap();
         let jita = jita_row(&tree);
-        assert_eq!(jita.stacks, 6);
+        assert_eq!(jita.items, 117);
         assert_eq!(
             jita.value.map(|value| value.ten_thousandths()),
             Some(5_033_945_000)
@@ -981,7 +1082,102 @@ mod tests {
         assert!(tree.too_large);
         assert_eq!(root(&tree).value, None);
         assert!(tree.entries.iter().all(|entry| entry.value.is_none()));
-        assert_eq!(root(&tree).stacks, 7);
+        assert_eq!(root(&tree).items, 239);
+    }
+
+    #[test]
+    fn a_search_keeps_a_match_and_its_ancestors_in_tree_order() {
+        let tree = build(
+            &sample(),
+            &type_map(Some(RAM_PRICE), Some(RIFTER_PRICE)),
+            &place_map(),
+        )
+        .unwrap();
+        let labels = |indices: Vec<usize>| -> Vec<String> {
+            indices
+                .into_iter()
+                .map(|index| tree.entries[index].label.clone())
+                .collect()
+        };
+        assert_eq!(
+            labels(matching(&tree.entries, "rifter")),
+            vec![
+                "All places",
+                "The Forge",
+                "Jita",
+                "Jita IV - Moon 4 - Caldari Navy Assembly Plant",
+                "Rifter",
+            ]
+        );
+        assert!(!labels(matching(&tree.entries, "rifter")).contains(&"Home Fort".to_owned()));
+        assert_eq!(matching(&tree.entries, "").len(), 9);
+        assert_eq!(matching(&tree.entries, "   ").len(), 9);
+        assert!(matching(&tree.entries, "zzz").is_empty());
+        assert_eq!(
+            labels(matching(&tree.entries, "  RIFTER  ")),
+            labels(matching(&tree.entries, "rifter")),
+        );
+    }
+
+    #[test]
+    fn search_rows_only_carry_the_kept_rows() {
+        let tree = build(
+            &sample(),
+            &type_map(Some(RAM_PRICE), Some(RIFTER_PRICE)),
+            &place_map(),
+        )
+        .unwrap();
+        let rows = search_rows(&tree.entries, "rifter");
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.cells.first().map(|cell| cell.text.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                Some("All places".to_owned()),
+                Some("The Forge".to_owned()),
+                Some("Jita".to_owned()),
+                Some("Jita IV - Moon 4 - Caldari Navy Assembly Plant".to_owned()),
+                Some("Rifter".to_owned()),
+            ]
+        );
+        let root = &rows[0];
+        assert_eq!(
+            root.cells.get(1).map(|cell| cell.text.as_str()),
+            Some("239")
+        );
+        let station = &rows[3];
+        assert_eq!(
+            station.cells.get(1).map(|cell| cell.text.as_str()),
+            Some("116")
+        );
+        assert_eq!(rows.len(), 5);
+    }
+
+    #[test]
+    fn the_start_folds_every_non_root_row_with_children() {
+        let tree = build(
+            &sample(),
+            &type_map(Some(RAM_PRICE), Some(RIFTER_PRICE)),
+            &place_map(),
+        )
+        .unwrap();
+        let folded = start_folded(&tree.entries);
+        let labels: Vec<&str> = tree
+            .entries
+            .iter()
+            .filter(|entry| folded.contains(&entry.key))
+            .map(|entry| entry.label.as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "The Forge",
+                "Jita",
+                "Jita IV - Moon 4 - Caldari Navy Assembly Plant",
+                "Unknown region",
+                "Unknown system",
+            ]
+        );
     }
 
     #[test]
