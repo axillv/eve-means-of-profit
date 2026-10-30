@@ -29,12 +29,14 @@ const SKILLS_HINT: &str =
     "Invention skills not set: type them in Settings or read them from a character.";
 
 /// A change the table asked for, applied to the plan after the table is drawn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Edit {
     Build(TypeId, bool),
     Me(TypeId, u8),
     Invent(TypeId, bool),
     Decryptor(TypeId, Option<TypeId>),
+    /// The whole build set, from the button that puts every drawn row back on the app's side.
+    SetBuild(BTreeSet<TypeId>),
 }
 
 /// One type of the chain, with its step or its bought line.
@@ -121,6 +123,8 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
     let costs = costs::compute(ui, page, record, plan, cx, now);
     let names = missing_names(&costs, cx.sde.as_ref(), &mut cx.notices);
     let lines = tree(plan, &page.recipes, &page.products);
+    let drawn: BTreeSet<TypeId> = lines.iter().map(|line| line.type_id).collect();
+    let back = app_choices(&record.build, &costs.decisions, &drawn);
     let views: BTreeMap<u64, View<'_>> = lines
         .iter()
         .map(|line| {
@@ -182,6 +186,11 @@ fn draw(page: &BuildPage, ui: &mut Ui, cx: &mut Shared) -> Vec<Edit> {
     {
         cx.selection.item = Some(type_id);
     }
+    if let Some(choices) = back
+        && ui.button("Back to the app's choice").clicked()
+    {
+        edits.push(Edit::SetBuild(choices));
+    }
     total_line(ui, &costs, &cx.style);
     edits
 }
@@ -233,10 +242,10 @@ fn figure_cell(ui: &mut Ui, figure: &Figure, style: &Style, edits: &mut Vec<Edit
     if !figure.hover.is_empty() {
         response = response.on_hover_text(figure.hover.as_str());
     }
-    if let Some(edit) = figure.click
+    if let Some(edit) = &figure.click
         && response.clicked()
     {
-        edits.push(edit);
+        edits.push(edit.clone());
     }
     true
 }
@@ -481,33 +490,37 @@ fn apply(page: &mut BuildPage, cx: &mut Shared, edits: &[Edit]) {
     let mut choices = Vec::new();
     if let Some(record) = page.record.as_mut() {
         for edit in edits {
-            match *edit {
+            match edit {
                 Edit::Build(id, true) => {
-                    record.build.insert(id);
+                    record.build.insert(*id);
                     plan_edit = true;
                 }
                 Edit::Build(id, false) => {
-                    record.build.remove(&id);
+                    record.build.remove(id);
                     plan_edit = true;
                 }
                 Edit::Me(id, me) => {
-                    record.me.insert(id, me);
+                    record.me.insert(*id, *me);
                     plan_edit = true;
                 }
                 Edit::Invent(id, invent) => {
-                    let current = page.invention.get(&id).copied().unwrap_or_default();
+                    let current = page.invention.get(id).copied().unwrap_or_default();
                     choices.push((
-                        id,
+                        *id,
                         InventionChoice {
-                            invent,
-                            decryptor: if invent { current.decryptor } else { None },
+                            invent: *invent,
+                            decryptor: if *invent { current.decryptor } else { None },
                         },
                     ));
                 }
                 Edit::Decryptor(id, decryptor) => {
-                    let mut choice = page.invention.get(&id).copied().unwrap_or_default();
-                    choice.decryptor = decryptor;
-                    choices.push((id, choice));
+                    let mut choice = page.invention.get(id).copied().unwrap_or_default();
+                    choice.decryptor = *decryptor;
+                    choices.push((*id, choice));
+                }
+                Edit::SetBuild(build) => {
+                    record.build = build.clone();
+                    plan_edit = true;
                 }
             }
         }
@@ -796,24 +809,54 @@ fn decision_figure(line: &Line, decision: &Decision, reason: Option<&String>) ->
         },
         Choice::Build | Choice::Buy => {
             let build = decision.choice == Choice::Build;
-            if build == line.step.is_some() {
+            let on_side = if build {
+                line.step.is_some()
+            } else {
+                line.buy.is_some()
+            };
+            if on_side {
                 return Figure {
-                    text,
+                    text: format!("App: {text}"),
                     ..Figure::default()
                 };
             }
             Figure {
-                text,
+                text: format!("You: {text}"),
                 tone: Tone::Amber,
-                hover: if build {
-                    "Click to build this part".to_owned()
-                } else {
-                    "Click to buy this part".to_owned()
-                },
+                hover: "Back to the app's choice".to_owned(),
                 click: Some(Edit::Build(line.type_id, build)),
             }
         }
     }
+}
+
+/// The build set with the app's choice taken on every drawn row, or `None` when every drawn row
+/// with a `Build`/`Buy` decision already sits on that side. Rows without a decision, and `Unknown`
+/// decisions, leave the set alone.
+fn app_choices(
+    build: &BTreeSet<TypeId>,
+    decisions: &BTreeMap<TypeId, Decision>,
+    rows: &BTreeSet<TypeId>,
+) -> Option<BTreeSet<TypeId>> {
+    let mut choices = build.clone();
+    let mut differs = false;
+    for type_id in rows {
+        let Some(decision) = decisions.get(type_id) else {
+            continue;
+        };
+        match decision.choice {
+            Choice::Build if !build.contains(type_id) => {
+                choices.insert(*type_id);
+                differs = true;
+            }
+            Choice::Buy if build.contains(type_id) => {
+                choices.remove(type_id);
+                differs = true;
+            }
+            Choice::Build | Choice::Buy | Choice::Unknown => {}
+        }
+    }
+    differs.then_some(choices)
 }
 
 /// `<full_jobs> × <runs_per_full_job> runs + 1 × <last_job_runs> runs`, each part only when not 0.
@@ -1030,6 +1073,8 @@ fn columns() -> Vec<Column> {
 #[cfg(test)]
 mod tests {
     use mop_core::industry::{Activity, JobSplit};
+    use mop_core::make_or_buy::Reason;
+    use mop_core::money::Money;
 
     use super::*;
 
@@ -1482,5 +1527,163 @@ mod tests {
         );
         assert_eq!(row.cells.len(), columns().len());
         assert_eq!(row.cells[22].text, "");
+    }
+
+    /// A `Build` decision for Hobgoblin I: building costs 42,707.00, buying 275,000.00.
+    fn build_decision() -> Decision {
+        Decision {
+            choice: Choice::Build,
+            quantity: 1,
+            buy_total: Some(Money::from_ten_thousandths(2_750_000_000)),
+            build_total: Some(Money::from_ten_thousandths(427_070_000)),
+            reason: Reason::Cheaper,
+            job_cost_incomplete: Vec::new(),
+        }
+    }
+
+    fn buy_decision() -> Decision {
+        Decision {
+            choice: Choice::Buy,
+            quantity: 1,
+            buy_total: Some(Money::from_ten_thousandths(10_000_000)),
+            build_total: Some(Money::from_ten_thousandths(20_000_000)),
+            reason: Reason::Cheaper,
+            job_cost_incomplete: Vec::new(),
+        }
+    }
+
+    fn line<'a>(type_id: TypeId, step: Option<&'a Step>, buy: Option<&'a BuyLine>) -> Line<'a> {
+        Line {
+            type_id,
+            depth: 0,
+            step,
+            buy,
+            recipe: None,
+        }
+    }
+
+    #[test]
+    fn a_decision_says_who_chose_and_offers_the_apps_choice() {
+        let bought = buy(HOBGOBLIN_I, 0, 1, 0, 1);
+        let figure = decision_figure(
+            &line(HOBGOBLIN_I, None, Some(&bought)),
+            &build_decision(),
+            None,
+        );
+        assert_eq!(figure.text, "You: build: 42,707.00 vs buy 275,000.00");
+        assert_eq!(figure.tone, Tone::Amber);
+        assert_eq!(figure.hover, "Back to the app's choice");
+        assert_eq!(figure.click, Some(Edit::Build(HOBGOBLIN_I, true)));
+
+        let built = step(HOBGOBLIN_I, 0, 1, 0, 1, 1, 0);
+        let figure = decision_figure(
+            &line(HOBGOBLIN_I, Some(&built), None),
+            &build_decision(),
+            None,
+        );
+        assert_eq!(figure.text, "App: build: 42,707.00 vs buy 275,000.00");
+        assert_eq!(figure.tone, Tone::Plain);
+        assert!(figure.hover.is_empty());
+        assert!(figure.click.is_none());
+
+        let figure = decision_figure(
+            &line(HOBGOBLIN_I, Some(&built), None),
+            &buy_decision(),
+            None,
+        );
+        assert_eq!(figure.text, "You: buy: 1,000.00 vs build 2,000.00");
+        assert_eq!(figure.tone, Tone::Amber);
+        assert_eq!(figure.hover, "Back to the app's choice");
+        assert_eq!(figure.click, Some(Edit::Build(HOBGOBLIN_I, false)));
+
+        let unknown = Decision {
+            choice: Choice::Unknown,
+            quantity: 1,
+            buy_total: None,
+            build_total: None,
+            reason: Reason::NoMarketPrice,
+            job_cost_incomplete: Vec::new(),
+        };
+        let figure = decision_figure(&line(HOBGOBLIN_I, None, Some(&bought)), &unknown, None);
+        assert_eq!(figure.text, "no price either way");
+        assert_eq!(figure.tone, Tone::Mute);
+        assert!(figure.click.is_none());
+    }
+
+    #[test]
+    fn app_choices_applies_every_drawn_decision_to_the_build_set() {
+        let build: BTreeSet<TypeId> = [RIFTER, TRITANIUM].into_iter().collect();
+        let unknown = Decision {
+            choice: Choice::Unknown,
+            quantity: 1,
+            buy_total: None,
+            build_total: None,
+            reason: Reason::NoMarketPrice,
+            job_cost_incomplete: Vec::new(),
+        };
+        let decisions = BTreeMap::from([
+            (HOBGOBLIN_I, build_decision()),
+            (RIFTER, buy_decision()),
+            (ROBOTICS, unknown),
+        ]);
+        let rows: BTreeSet<TypeId> = [HOBGOBLIN_I, RIFTER, ROBOTICS, 36].into_iter().collect();
+        assert_eq!(
+            app_choices(&build, &decisions, &rows),
+            Some([HOBGOBLIN_I, TRITANIUM].into_iter().collect())
+        );
+
+        // Every drawn row sits on its decision's side.
+        let build: BTreeSet<TypeId> = [HOBGOBLIN_I, TRITANIUM].into_iter().collect();
+        let decisions = BTreeMap::from([(HOBGOBLIN_I, build_decision()), (RIFTER, buy_decision())]);
+        let rows: BTreeSet<TypeId> = [HOBGOBLIN_I, RIFTER].into_iter().collect();
+        assert_eq!(app_choices(&build, &decisions, &rows), None);
+
+        // No drawn row has a decision.
+        assert_eq!(app_choices(&build, &BTreeMap::new(), &rows), None);
+    }
+
+    #[test]
+    fn products_messages_and_recipe_less_rows_keep_no_prefix() {
+        let book = game_book();
+        let mut costs = Costs::default();
+        costs.decisions.insert(HOBGOBLIN_II, build_decision());
+        let product_recipe = book.get(HOBGOBLIN_II).expect("the product's recipe");
+        let product_step = step(HOBGOBLIN_II, 0, 1, 0, 1, 1, 0);
+        let product = Line {
+            type_id: HOBGOBLIN_II,
+            depth: 0,
+            step: Some(&product_step),
+            buy: None,
+            recipe: Some(product_recipe),
+        };
+        let products = [PlanProduct {
+            type_id: HOBGOBLIN_II,
+            quantity: 1,
+        }];
+        let figure = decide_figure(&product, &products, &costs);
+        assert!(figure.text.is_empty());
+        assert!(figure.click.is_none());
+
+        let material = line(TRITANIUM, None, None);
+        costs.decisions.insert(TRITANIUM, build_decision());
+        let figure = decide_figure(&material, &[], &costs);
+        assert!(figure.text.is_empty());
+        assert!(figure.click.is_none());
+
+        let rifter_recipe = book.get(RIFTER).expect("the Rifter's recipe");
+        let rifter_step = step(RIFTER, 0, 1, 0, 1, 1, 0);
+        let rifter = Line {
+            type_id: RIFTER,
+            depth: 0,
+            step: Some(&rifter_step),
+            buy: None,
+            recipe: Some(rifter_recipe),
+        };
+        costs.messages.insert(RIFTER, "no facility".to_owned());
+        costs.decisions.insert(RIFTER, build_decision());
+        let figure = decide_figure(&rifter, &[], &costs);
+        assert_eq!(figure.text, "no facility");
+        assert_eq!(figure.tone, Tone::Mute);
+        assert!(figure.click.is_none());
     }
 }

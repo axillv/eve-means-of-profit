@@ -519,7 +519,10 @@ mod tests {
 
     const II_COST: &str = "125,587.00";
     // The Raitaru's 1% material bonus lowers Tritanium to 5,040 (the spec says 5,090, 42,907.00).
-    const I_BUILD: &str = "build: 42,707.00 vs buy 275,000.00";
+    // The app chose build; the row is bought, so the user's side is named.
+    const I_BUILD: &str = "You: build: 42,707.00 vs buy 275,000.00";
+    // The same verdict once the row follows it: the app's side, plain.
+    const I_BUILD_MADE: &str = "App: build: 42,707.00 vs buy 275,000.00";
 
     fn has_cell(harness: &Harness<'_, App>, row: &str, text: &str) -> bool {
         cells(harness, row).iter().any(|cell| cell == text)
@@ -591,7 +594,7 @@ mod tests {
         settle_cell(&mut harness, "Hobgoblin I", I_BUILD);
         assert!(!shown_containing(&harness, "Job cost 129,434.00"));
         hover_cell(&mut harness, "Hobgoblin I", I_BUILD);
-        assert!(shown(&harness, "Click to build this part"));
+        assert!(shown(&harness, "Back to the app's choice"));
         // The suggestion the row does not follow is amber.
         let area = cell_area(&harness, "Hobgoblin I", I_BUILD);
         assert!(coloured(&mut harness, area), "the verdict is not amber");
@@ -602,7 +605,11 @@ mod tests {
         });
         assert!(label_ends_with(&harness, " (unsaved)"));
         let row = cells(&harness, "Hobgoblin I");
-        assert_eq!(row.last().map(String::as_str), Some(I_BUILD), "{row:?}");
+        assert_eq!(
+            row.last().map(String::as_str),
+            Some(I_BUILD_MADE),
+            "{row:?}"
+        );
         assert!(row.iter().any(|cell| cell == "3,847.00"), "{row:?}");
         assert_eq!(
             cell_under(&harness, "Hobgoblin I", "Make").as_deref(),
@@ -610,7 +617,7 @@ mod tests {
             "{row:?}"
         );
         // The row now follows the verdict, so it is in the text colour.
-        let area = cell_area(&harness, "Hobgoblin I", I_BUILD);
+        let area = cell_area(&harness, "Hobgoblin I", I_BUILD_MADE);
         assert!(!coloured(&mut harness, area), "the verdict is still amber");
         for (name, need) in [
             ("Tritanium", "5,040"),
