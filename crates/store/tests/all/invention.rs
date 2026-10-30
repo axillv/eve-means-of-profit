@@ -214,6 +214,22 @@ mod tests {
     }
 
     #[test]
+    fn a_sign_in_a_stored_skill_key_is_bad_data() {
+        let (_dir, path, store) = fresh();
+        let conn = Connection::open(&path).expect("open");
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?1, ?2)",
+            params!["invention.skill.+5", "3"],
+        )
+        .expect("insert");
+        drop(conn);
+        match store.invention_skills() {
+            Err(StoreError::BadData(what)) => assert!(what.contains("invention.skill.+5")),
+            other => panic!("expected bad data, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn the_attempts_rule_is_saved_and_read_back() {
         let (_dir, path, mut store) = fresh();
         let sure95 = AttemptRule::Confidence(Rate::from_ppm(950_000));
