@@ -720,4 +720,105 @@ mod tests {
         assert!(shown(&harness, "No character logged in"));
         assert!(disabled(&harness, "Read"));
     }
+
+    #[test]
+    fn both_panels_read_in_one_session_and_keep_their_own_results() {
+        let env = Env::new();
+        let (eve, _refuse) = FakeEve::new(vec![ana()]);
+        let mut harness = start(&env, eve);
+        open_fees(&mut harness);
+        assert!(shown(&harness, "Ana Tester"), "Fees makes its own pick");
+
+        click(&mut harness, "Read");
+        wait_for_notice(
+            &mut harness,
+            Level::Notice,
+            "Read skills and standings from Ana Tester.",
+        );
+        harness.run_steps(2);
+
+        // The dock paints the tab titles, and the tab_bar_point helper anchors on the Structures
+        // header, which is hidden now that Fees is the shown tab. Press where the Invention tab is
+        // drawn instead, over the shown panel's header.
+        let header = harness
+            .query_all_by_value("Fees and skills")
+            .next()
+            .expect("the Fees panel shows")
+            .rect();
+        press_at(
+            &mut harness,
+            egui::pos2(header.min.x + 230.0, header.min.y - 18.0),
+        );
+        assert!(
+            shown(&harness, "Ana Tester"),
+            "Invention makes its own pick"
+        );
+        assert!(
+            !disabled(&harness, "Read"),
+            "the finished Fees read left the shared Read idle"
+        );
+
+        click(&mut harness, "Read");
+        wait_for_notice(
+            &mut harness,
+            Level::Notice,
+            "Read invention skills from Ana Tester.",
+        );
+        harness.run_steps(2);
+
+        let notices = &harness.state_mut().shared_mut().notices;
+        let held = |text: &str| {
+            notices
+                .iter()
+                .any(|notice| notice.level == Level::Notice && notice.text == text)
+        };
+        assert!(
+            held("Read skills and standings from Ana Tester."),
+            "the Fees notice is still held"
+        );
+        assert!(
+            held("Read invention skills from Ana Tester."),
+            "the Invention notice is still held"
+        );
+
+        // The Invention tab is the shown one now, so press the Fees tab from its header.
+        let header = harness
+            .query_all_by_value("Invention skills")
+            .next()
+            .expect("the Invention panel shows")
+            .rect();
+        press_at(
+            &mut harness,
+            egui::pos2(header.min.x + 120.0, header.min.y - 18.0),
+        );
+        assert!(
+            value_on_row(&harness, "Accounting", "4"),
+            "the Fees read still stands"
+        );
+        assert_eq!(field_text(&harness, "Caldari State standing"), "5.23");
+
+        assert_eq!(
+            env.store().fee_settings().unwrap(),
+            FeeSettings {
+                accounting: 4,
+                broker_relations: 5,
+                faction_standing: standing(523),
+                corporation_standing: standing(-126),
+                broker_override: None,
+            }
+        );
+        assert_eq!(
+            env.store().invention_skills().unwrap(),
+            BTreeMap::from([
+                (11_445, 0),
+                (11_446, 0),
+                (11_452, 0),
+                (11_453, 4),
+                (21_791, 0),
+                (23_087, 0),
+                (23_121, 3),
+            ]),
+            "every invention skill is saved, the untrained ones as 0"
+        );
+    }
 }
