@@ -430,13 +430,18 @@ mod tests {
             return Vec::new();
         };
         let row = product.rect().center().y;
+        // Right of the rail, whose entries can share the header's row.
+        let left = product.rect().min.x - 1.0;
         let mut found: Vec<String> = Vec::new();
         for node in harness.root().children_recursive() {
             let access = node.accesskit_node();
             let Some(text) = access.label().or_else(|| access.value()) else {
                 continue;
             };
-            if (node.rect().center().y - row).abs() <= 3.0 && !found.contains(&text) {
+            if (node.rect().center().y - row).abs() <= 3.0
+                && node.rect().min.x >= left
+                && !found.contains(&text)
+            {
                 found.push(text);
             }
         }

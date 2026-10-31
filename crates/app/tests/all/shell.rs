@@ -979,7 +979,7 @@ mod tests {
 
         // The Display panel is scrollable and Copy path sits at its bottom.
         let at = harness.get_by_label("Interface size").rect().center();
-        scroll_display(&mut harness, at, -250.0);
+        scroll_display(&mut harness, at, -400.0);
         harness.get_by_label("Copy path").click();
         harness.run_steps(1);
         assert_eq!(

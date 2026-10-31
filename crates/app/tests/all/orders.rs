@@ -399,6 +399,9 @@ mod tests {
         );
         loaded(&mut harness);
         click(&mut harness, "Orders");
+        // The page padding leaves the Age column past the edge at 1,280 wide; give it room.
+        harness.set_size(vec2(1400.0, 800.0));
+        harness.run_steps(2);
 
         let two_hours = harness
             .get_all_by_label("2h")

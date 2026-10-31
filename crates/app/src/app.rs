@@ -42,8 +42,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use egui::{
-    Button, Context, Key, Modifiers, RichText, Sense, Stroke, TextWrapMode, Ui, ViewportCommand,
-    WidgetInfo, WidgetType, vec2,
+    Context, Key, Modifiers, Sense, Stroke, Ui, ViewportCommand, WidgetInfo, WidgetType, vec2,
 };
 use egui_dock::{DockState, NodeIndex};
 use egui_phosphor::regular;
@@ -569,20 +568,43 @@ fn page_starts_group(page: Page) -> bool {
     matches!(page, Page::WhatToBuild | Page::Assets | Page::Characters)
 }
 
+/// Whether the rail shows icons alone: when the player asked for it, or when the window is
+/// narrower than 1,280 points, where the labelled rail no longer leaves the page its room.
+fn rail_icons_only(setting: bool, width: f32) -> bool {
+    setting || width < 1280.0
+}
+
+/// The page's frame: the page background, with the mock-up's padding at the sides and top and
+/// bottom.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the theme's page margins are whole points"
+)]
+fn page_frame(style: &Style) -> egui::Frame {
+    egui::Frame::new()
+        .fill(style.bg)
+        .inner_margin(egui::Margin {
+            left: style.sizes.page_margin_x as i8,
+            right: style.sizes.page_margin_x as i8,
+            top: style.sizes.page_margin_y as i8,
+            bottom: style.sizes.page_margin_y as i8,
+        })
+}
+
 /// Draws the line between groups of rail entries, with space above and below.
 fn rail_divider(ui: &mut Ui, style: &Style) {
-    ui.add_space(8.0);
+    ui.add_space(7.0);
     let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
     ui.painter().hline(
         line.x_range(),
         line.center().y,
         Stroke::new(1.0, style.line),
     );
-    ui.add_space(8.0);
+    ui.add_space(7.0);
 }
 
-/// Draws one icon-only rail entry, accented when it is the one on show, with its label as hover
-/// text and as its widget label.
+/// Draws one icon-only rail entry, with the page on show's bar when it is selected, and its label
+/// as hover text and as its widget label.
 fn icon_entry(
     ui: &mut Ui,
     style: &Style,
@@ -592,17 +614,21 @@ fn icon_entry(
     hover: &str,
     selected: bool,
 ) -> egui::Response {
-    let (fill, text) = if selected {
-        (style.accent, style.on_accent)
-    } else {
-        (style.row, style.text)
-    };
-    let button = Button::new(RichText::new(icon).color(text))
-        .fill(fill)
-        .corner_radius(style.control_radius)
-        .wrap_mode(TextWrapMode::Extend)
-        .min_size(vec2(content_width, 40.0));
-    let response = ui.add(button);
+    let size = vec2(content_width, style.sizes.rail_row);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let (fill, text) = rail::entry_colors(style, selected, response.hovered());
+    let painter = ui.painter();
+    painter.rect_filled(rect, style.control_radius, fill);
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        egui::FontId::proportional(style.sizes.rail_icon),
+        text,
+    );
+    if selected {
+        rail::selected_bar(ui, style, rect);
+    }
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
     response.on_hover_text(hover)
 }
@@ -1116,7 +1142,8 @@ impl App {
 
     /// Draws the rail and takes the entry the player picked, page or layout.
     fn rail(&mut self, ui: &mut Ui, style: &Style) {
-        if self.shared.rail_icons_only {
+        let width = ui.ctx().content_rect().width();
+        if rail_icons_only(self.shared.rail_icons_only, width) {
             self.icons_only_rail(ui, style);
             return;
         }
@@ -1217,7 +1244,9 @@ impl App {
         if self.show_layout(ui, &style) {
             return;
         }
-        egui::CentralPanel::default().show(ui, |ui| match self.page {
+        let frame = page_frame(&style);
+        let panel = egui::CentralPanel::default().frame(frame);
+        panel.show(ui, |ui| match self.page {
             Page::Today => {
                 if let Some(page) = today::show(ui, &mut self.shared) {
                     self.go_to(page);
@@ -2250,5 +2279,112 @@ mod tests {
         let app = App::new(&Context::default(), config(data, cache)).expect("the app starts");
         assert!(!app.shared.refresh_while_open);
         assert_eq!(app.refresh_at, None);
+    }
+
+    #[test]
+    fn the_rail_folds_to_icons_when_the_window_is_narrow() {
+        assert!(!rail_icons_only(false, 1280.0));
+        assert!(rail_icons_only(false, 1279.0));
+        assert!(!rail_icons_only(false, 1920.0));
+        assert!(rail_icons_only(true, 2560.0));
+    }
+
+    #[test]
+    fn the_page_frame_pads_the_page_and_fills_its_background() {
+        let style = Style::eve_dense();
+        let frame = page_frame(&style);
+        assert_eq!(
+            frame.inner_margin,
+            egui::Margin {
+                left: 16,
+                right: 16,
+                top: 12,
+                bottom: 12,
+            }
+        );
+        assert_eq!(frame.fill, style.bg);
+    }
+
+    /// A harness drawing one icon-only rail entry for Build, with the theme applied.
+    fn icons_only_entry(selected: bool) -> egui_kittest::Harness<'static, ()> {
+        let style = Style::eve_dense();
+        egui_kittest::Harness::builder()
+            .with_size(vec2(400.0, 120.0))
+            .build_ui_state(
+                move |ui, _: &mut ()| {
+                    style.apply(ui.ctx());
+                    let content_width = style.rail_narrow
+                        - egui::Frame::side_top_panel(ui.style())
+                            .total_margin()
+                            .sum()
+                            .x;
+                    icon_entry(
+                        ui,
+                        &style,
+                        content_width,
+                        regular::HAMMER,
+                        Page::Build.label(),
+                        Page::Build.title(),
+                        selected,
+                    );
+                },
+                (),
+            )
+    }
+
+    /// The rects painted with `fill`.
+    fn filled_rects<S>(
+        harness: &egui_kittest::Harness<'_, S>,
+        fill: egui::Color32,
+    ) -> Vec<egui::Rect> {
+        fn collect(shape: &egui::Shape, fill: egui::Color32, rects: &mut Vec<egui::Rect>) {
+            if let egui::Shape::Vec(shapes) = shape {
+                for shape in shapes {
+                    collect(shape, fill, rects);
+                }
+            }
+            if let egui::Shape::Rect(rect) = shape
+                && rect.fill == fill
+            {
+                rects.push(rect.rect);
+            }
+        }
+        let mut rects = Vec::new();
+        for clipped in &harness.output().shapes {
+            collect(&clipped.shape, fill, &mut rects);
+        }
+        rects
+    }
+
+    #[test]
+    fn an_icons_only_entry_is_34_tall_and_the_selected_one_carries_the_bar() {
+        use egui_kittest::kittest::Queryable;
+
+        let style = Style::eve_dense();
+        let mut harness = icons_only_entry(true);
+        harness.run_steps(2);
+        let entry = harness.get_by_label(Page::Build.label()).rect();
+        assert!(
+            (entry.height() - 34.0).abs() < 0.01,
+            "{} tall",
+            entry.height()
+        );
+
+        let accent = filled_rects(&harness, style.accent);
+        let bars: Vec<egui::Rect> = accent
+            .iter()
+            .copied()
+            .filter(|rect| (rect.min.x - entry.min.x).abs() < 0.01)
+            .collect();
+        assert_eq!(bars.len(), 1, "one bar at the entry's left edge");
+        assert!((bars[0].width() - 3.0).abs() < 0.01, "3 px wide");
+        assert!(
+            (bars[0].height() - entry.height()).abs() < 0.01,
+            "as tall as the entry"
+        );
+        assert!(
+            accent.iter().all(|rect| rect.width() < entry.width() / 2.0),
+            "no accent fill covers the entry"
+        );
     }
 }
