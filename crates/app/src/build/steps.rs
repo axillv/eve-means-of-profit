@@ -1862,7 +1862,7 @@ mod tests {
         assert!(figure.click.is_none());
     }
 
-    /// A decision with `choice` and the acceptance's numbers.
+    /// A decision with `choice`; buy 1,000.00, build 2,000.00.
     fn decision(choice: Choice) -> Decision {
         Decision {
             choice,

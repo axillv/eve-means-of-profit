@@ -1091,8 +1091,8 @@ mod tests {
         pin: Option<String>,
     }
 
-    /// The acceptance layout: Buy list left, Steps pinned to plan 1 right.
-    fn acceptance_dock() -> DockState<Slot> {
+    /// The layout Buy list left, Steps pinned to plan 1 right.
+    fn buy_list_steps_dock() -> DockState<Slot> {
         user_dock(
             "EVE Means of Profit layout 1\nname: Test\nsplit right 50%\n  Buy list\n  Steps [pinned plan 1]\n",
         )
@@ -1348,7 +1348,7 @@ mod tests {
     #[test]
     fn headers_say_whether_each_panel_follows_or_is_pinned() {
         let mut harness = user_harness(
-            acceptance_dock(),
+            buy_list_steps_dock(),
             Some((2, "Rifter 31")),
             Some("Hobgoblin 10"),
         );
@@ -1485,7 +1485,7 @@ mod tests {
     #[test]
     fn closing_every_tab_empties_the_layout_and_stops_the_body() {
         let mut harness = user_harness(
-            acceptance_dock(),
+            buy_list_steps_dock(),
             Some((2, "Rifter 31")),
             Some("Hobgoblin 10"),
         );
@@ -1518,7 +1518,7 @@ mod tests {
     #[test]
     fn dragging_the_steps_tab_onto_the_lower_edge_of_buy_list_splits_down() {
         let mut harness = user_harness(
-            acceptance_dock(),
+            buy_list_steps_dock(),
             Some((2, "Rifter 31")),
             Some("Hobgoblin 10"),
         );
