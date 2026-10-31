@@ -1,14 +1,5 @@
 use super::*;
 
-/// An image server that never answers, so a test sees only the pictures it keeps itself.
-struct NoImages;
-
-impl images::Fetch for NoImages {
-    fn get(&self, _url: &str) -> Result<Vec<u8>, String> {
-        Err("offline".to_owned())
-    }
-}
-
 /// A 16 by 16 picture that is red everywhere.
 const RED_PNG: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
