@@ -811,7 +811,10 @@ impl App {
             interface_size: settings.interface_size,
             industry_loaded: false,
             industry_timing: IndustryTimings::default(),
-            refresh_at: keep_refreshing.then(|| now.saturating_add(MIN_GAP_SECS)),
+            // An overflowing sum leaves `None`, so the refresh falls due once the session loads.
+            refresh_at: keep_refreshing
+                .then_some(now.checked_add(MIN_GAP_SECS))
+                .flatten(),
         };
         app.begin(settings.last_sde_check, now);
         Ok(app)
@@ -1764,7 +1767,8 @@ impl App {
         if now < self.refresh_at.unwrap_or(now) {
             return;
         }
-        self.refresh_at = Some(now.saturating_add(MIN_GAP_SECS));
+        // An overflowing sum leaves `None`, which is due again next frame.
+        self.refresh_at = now.checked_add(MIN_GAP_SECS);
         characters::refresh_all(&mut self.shared, &self.ctx, false);
     }
 
@@ -2297,6 +2301,59 @@ mod tests {
         let app = App::new(&Context::default(), config(data, cache)).expect("the app starts");
         assert!(!app.shared.refresh_while_open);
         assert_eq!(app.refresh_at, None);
+    }
+
+    #[test]
+    fn a_keep_refreshing_app_at_the_clock_ceiling_is_due_at_once() {
+        let dir = TempDir::new().expect("a temp folder");
+        let data = dir.path().join("data");
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&data).expect("the data folder");
+        set_refresh_choice(&data, "1");
+
+        // The sum would overflow, so the refresh is due as soon as the session loads.
+        let mut cfg = config(data, cache);
+        cfg.clock = Box::new(|| i64::MAX);
+        let app = App::new(&Context::default(), cfg).expect("the app starts");
+        assert!(app.shared.refresh_while_open);
+        assert_eq!(app.refresh_at, None);
+    }
+
+    #[test]
+    fn a_due_refresh_near_the_clock_ceiling_falls_due_again_next_frame() {
+        let dir = TempDir::new().expect("a temp folder");
+        let data = dir.path().join("data");
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&data).expect("the data folder");
+
+        let mut cfg = config(data, cache);
+        cfg.clock = Box::new(|| i64::MAX);
+        let mut app = App::new(&Context::default(), cfg).expect("the app starts");
+        app.shared.refresh_while_open = true;
+        app.shared.session.mark_loaded();
+        app.refresh_at = Some(i64::MAX - 1);
+
+        app.refresh_when_due();
+        assert_eq!(
+            app.refresh_at, None,
+            "the sum overflows, so the refresh is due again"
+        );
+    }
+
+    #[test]
+    fn a_due_refresh_well_below_the_clock_ceiling_gets_the_usual_gap() {
+        let dir = TempDir::new().expect("a temp folder");
+        let data = dir.path().join("data");
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&data).expect("the data folder");
+
+        let mut app = App::new(&Context::default(), config(data, cache)).expect("the app starts");
+        app.shared.refresh_while_open = true;
+        app.shared.session.mark_loaded();
+        app.refresh_at = Some(NOW);
+
+        app.refresh_when_due();
+        assert_eq!(app.refresh_at, Some(NOW + MIN_GAP_SECS));
     }
 
     #[test]
