@@ -83,8 +83,8 @@ pub(super) struct Entry {
     pub label: String,
     /// What a click picks. `None` for the root and for the unknown region and system.
     pub select: Option<LocationId>,
-    /// The units of the asset rows under this row.
-    pub items: u64,
+    /// The units of the asset rows under this row; `None` when the count does not fit in `u64`.
+    pub items: Option<u64>,
     /// The value of the priced stacks under this row; `None` when none of them is priced.
     ///
     /// The count is in `items`, so a blueprinted or unpriced stack still adds its units.
@@ -124,13 +124,24 @@ impl fmt::Display for TreeError {
 impl std::error::Error for TreeError {}
 
 /// What adds up under one row.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 struct Sum {
-    items: u64,
+    items: Option<u64>,
     value: Option<Money>,
     /// The value does not fit in money: this row shows dashes, and the other rows are kept.
     too_large: bool,
     unpriced: BTreeSet<TypeId>,
+}
+
+impl Default for Sum {
+    fn default() -> Self {
+        Self {
+            items: Some(0),
+            value: None,
+            too_large: false,
+            unpriced: BTreeSet::new(),
+        }
+    }
 }
 
 impl Sum {
@@ -144,7 +155,8 @@ impl Sum {
         unpriced: Option<TypeId>,
         too_large: bool,
     ) {
-        self.items = self.items.saturating_add(quantity);
+        // The count is checked: a total that does not fit is missing, never clamped.
+        self.items = self.items.and_then(|items| items.checked_add(quantity));
         if let Some(value) = value {
             match self.value.map_or(Some(value), |sum| sum.checked_add(value)) {
                 Some(sum) => self.value = Some(sum),
@@ -193,14 +205,16 @@ fn rows(entries: &[Entry]) -> Vec<Row> {
 
 /// One row as the table draws it.
 fn row(entry: &Entry) -> Row {
-    let shown =
-        i64::try_from(entry.items).map_or_else(|_| entry.items.to_string(), group_thousands);
+    let items = entry.items.map_or_else(Cell::missing, |items| {
+        let shown = i64::try_from(items).map_or_else(|_| items.to_string(), group_thousands);
+        Cell::int(i128::from(items), shown)
+    });
     Row {
         key: entry.key,
         depth: entry.depth,
         cells: vec![
             Cell::text(entry.label.clone()),
-            Cell::int(i128::from(entry.items), shown),
+            items,
             entry.value.map_or_else(Cell::missing, Cell::money),
         ],
     }
@@ -934,8 +948,11 @@ mod tests {
         ])
     }
 
+    /// One shaped row: depth, label, items, value in ten-thousandths, and unpriced types.
+    type Shaped = (u32, String, Option<u64>, Option<i64>, usize);
+
     /// Depth, label, items, value in ten-thousandths, and unpriced types, row by row.
-    fn shape(tree: &Tree) -> Vec<(u32, String, u64, Option<i64>, usize)> {
+    fn shape(tree: &Tree) -> Vec<Shaped> {
         tree.entries
             .iter()
             .map(|entry| {
@@ -953,10 +970,10 @@ mod tests {
     fn row(
         depth: u32,
         label: &str,
-        items: u64,
+        items: Option<u64>,
         value: Option<i64>,
         unpriced: usize,
-    ) -> (u32, String, u64, Option<i64>, usize) {
+    ) -> Shaped {
         (depth, label.to_owned(), items, value, unpriced)
     }
 
@@ -983,24 +1000,24 @@ mod tests {
         assert_eq!(
             shape(&tree),
             vec![
-                row(0, "All places", 239, Some(5_605_034_000), 0),
-                row(1, "The Forge", 236, Some(5_591_105_000), 0),
-                row(2, "Jita", 236, Some(5_591_105_000), 0),
-                row(3, "Home Fort", 120, Some(557_160_000), 0),
+                row(0, "All places", Some(239), Some(5_605_034_000), 0),
+                row(1, "The Forge", Some(236), Some(5_591_105_000), 0),
+                row(2, "Jita", Some(236), Some(5_591_105_000), 0),
+                row(3, "Home Fort", Some(120), Some(557_160_000), 0),
                 row(
                     3,
                     "Jita IV - Moon 4 - Caldari Navy Assembly Plant",
-                    116,
+                    Some(116),
                     Some(5_033_945_000),
                     0,
                 ),
-                row(4, "Rifter", 10, Some(46_430_000), 0),
-                row(1, "Unknown region", 3, Some(13_929_000), 0),
-                row(2, "Unknown system", 3, Some(13_929_000), 0),
+                row(4, "Rifter", Some(10), Some(46_430_000), 0),
+                row(1, "Unknown region", Some(3), Some(13_929_000), 0),
+                row(2, "Unknown system", Some(3), Some(13_929_000), 0),
                 row(
                     3,
                     "Structure 1035466617999 (no access)",
-                    3,
+                    Some(3),
                     Some(13_929_000),
                     0
                 ),
@@ -1061,7 +1078,7 @@ mod tests {
         );
         let tree = build(&assets, &types, &place_map()).unwrap();
         let jita = jita_row(&tree);
-        assert_eq!(jita.items, 117);
+        assert_eq!(jita.items, Some(117));
         assert_eq!(
             jita.value.map(|value| value.ten_thousandths()),
             Some(5_033_945_000)
@@ -1084,7 +1101,29 @@ mod tests {
         assert!(tree.too_large);
         assert_eq!(root(&tree).value, None);
         assert!(tree.entries.iter().all(|entry| entry.value.is_none()));
-        assert_eq!(root(&tree).items, 239);
+        assert_eq!(root(&tree).items, Some(239));
+    }
+
+    #[test]
+    fn a_count_too_large_for_u64_shows_dashes_and_keeps_the_tree() {
+        let mut assets = sample();
+        assets.push(asset(7, RAM, JITA_IV, JITA_IV, u64::MAX));
+        assets.push(asset(8, RAM, JITA_IV, JITA_IV, 1));
+        let tree = build(
+            &assets,
+            &type_map(Some(RAM_PRICE), Some(RIFTER_PRICE)),
+            &place_map(),
+        )
+        .unwrap();
+        assert_eq!(root(&tree).items, None);
+        assert_eq!(super::row(root(&tree)).cells[1].text, "—");
+        assert_eq!(super::row(jita_row(&tree)).cells[1].text, "—");
+        let home = tree
+            .entries
+            .iter()
+            .find(|entry| entry.label == "Home Fort")
+            .unwrap();
+        assert_eq!(home.items, Some(120));
     }
 
     #[test]

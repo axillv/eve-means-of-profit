@@ -623,6 +623,11 @@ fn count(amount: u64) -> Cell {
     )
 }
 
+/// A footer count, or a dash when the total does not fit in `u64`.
+fn total_count(amount: Option<u64>) -> Cell {
+    amount.map_or_else(Cell::missing, count)
+}
+
 fn all_columns() -> Vec<Column> {
     vec![
         column("item", "Item", ColumnKind::Text, 170.0),
@@ -662,20 +667,20 @@ fn footer_cells(buy: &BuyList) -> Vec<Cell> {
     let needed = buy
         .rows
         .iter()
-        .fold(0u64, |sum, row| sum.saturating_add(row.needed));
+        .try_fold(0u64, |sum, row| sum.checked_add(row.needed));
     let from_stock = buy
         .rows
         .iter()
-        .fold(0u64, |sum, row| sum.saturating_add(row.from_stock));
+        .try_fold(0u64, |sum, row| sum.checked_add(row.from_stock));
     let to_buy = buy
         .rows
         .iter()
-        .fold(0u64, |sum, row| sum.saturating_add(row.to_buy));
+        .try_fold(0u64, |sum, row| sum.checked_add(row.to_buy));
     vec![
         Cell::text("Total"),
-        count(needed),
-        count(from_stock),
-        count(to_buy),
+        total_count(needed),
+        total_count(from_stock),
+        total_count(to_buy),
         Cell::text(""),
         volume_cell(buy.volume),
         Cell::money(buy.value),
@@ -960,12 +965,16 @@ mod tests {
     use mop_core::money::Money;
     use mop_market::fuzzwork::Refresh;
 
+    use mop_core::buylist::{BuyList, BuyRow, LinePrice};
     use mop_core::freight::Contract;
     use mop_core::invention_cost::InventionNeed;
     use mop_core::plan::BuyLine;
     use mop_core::volume::Volume;
 
-    use super::{InventionLine, Manual, contract_line, diff_text, too_soon_notice, with_invention};
+    use super::{
+        InventionLine, Manual, contract_line, diff_text, footer_cells, too_soon_notice,
+        with_invention,
+    };
 
     fn isk(text: &str) -> Money {
         Money::parse_isk(text).expect("a price")
@@ -1003,6 +1012,53 @@ mod tests {
             from_stock,
             to_buy: needed - from_stock,
         }
+    }
+
+    fn footer_row(type_id: u32, needed: u64, from_stock: u64, to_buy: u64) -> BuyRow {
+        BuyRow {
+            type_id,
+            name: String::new(),
+            needed,
+            from_stock,
+            to_buy,
+            unit_volume: None,
+            price: LinePrice::Missing,
+            volume: None,
+            value: None,
+        }
+    }
+
+    fn footer_list(rows: Vec<BuyRow>) -> BuyList {
+        BuyList {
+            rows,
+            volume: Volume::default(),
+            value: Money::ZERO,
+            incomplete: Vec::new(),
+            oldest_priced_at: None,
+        }
+    }
+
+    #[test]
+    fn footer_counts_that_do_not_fit_u64_show_dashes() {
+        let amount = u64::MAX;
+        let half = u64::MAX / 2;
+        let rows = (0..3)
+            .map(|type_id| footer_row(type_id, amount, half, amount - half))
+            .collect();
+        let footer = footer_cells(&footer_list(rows));
+        for cell in &footer[1..=3] {
+            assert_eq!(cell.text, "—");
+            assert_eq!(cell.plain, "");
+        }
+    }
+
+    #[test]
+    fn footer_counts_that_fit_stay_exact() {
+        let rows = vec![footer_row(1, 4_307, 1_000, 3_307)];
+        let footer = footer_cells(&footer_list(rows));
+        assert_eq!(footer[1].text, "4,307");
+        assert_eq!(footer[2].text, "1,000");
+        assert_eq!(footer[3].text, "3,307");
     }
 
     #[test]
