@@ -545,6 +545,41 @@ fn optional_unsigned<T: TryFrom<u64>>(
         .transpose()
 }
 
+pub(crate) fn optional_signed<T: TryFrom<i64>>(
+    object: &Value,
+    key: &'static str,
+    route: &str,
+) -> Result<Option<T>, EsiError> {
+    optional(object, key)
+        .map(|value| signed_of(value, key, route))
+        .transpose()
+}
+
+pub(crate) fn optional_text(
+    object: &Value,
+    key: &'static str,
+    route: &str,
+) -> Result<Option<String>, EsiError> {
+    optional(object, key)
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| bad_data(route, key, &shown(value)))
+        })
+        .transpose()
+}
+
+pub(crate) fn optional_money(
+    object: &Value,
+    key: &'static str,
+    route: &str,
+) -> Result<Option<Money>, EsiError> {
+    optional(object, key)
+        .map(|value| money_of(value, key, route))
+        .transpose()
+}
+
 pub(crate) fn text<'a>(
     object: &'a Value,
     key: &'static str,
@@ -556,7 +591,7 @@ pub(crate) fn text<'a>(
         .ok_or_else(|| bad_data(route, key, &shown(value)))
 }
 
-fn flag(object: &Value, key: &'static str, route: &str) -> Result<bool, EsiError> {
+pub(crate) fn flag(object: &Value, key: &'static str, route: &str) -> Result<bool, EsiError> {
     let value = field(object, key, route)?;
     value
         .as_bool()
@@ -576,7 +611,7 @@ fn flag_or(
     })
 }
 
-fn money(object: &Value, key: &'static str, route: &str) -> Result<Money, EsiError> {
+pub(crate) fn money(object: &Value, key: &'static str, route: &str) -> Result<Money, EsiError> {
     money_of(field(object, key, route)?, key, route)
 }
 
@@ -593,7 +628,7 @@ fn money_of(value: &Value, key: &'static str, route: &str) -> Result<Money, EsiE
 }
 
 /// An RFC 3339 UTC time (`2026-10-19T09:30:00Z`) as Unix seconds.
-fn time(object: &Value, key: &'static str, route: &str) -> Result<i64, EsiError> {
+pub(crate) fn time(object: &Value, key: &'static str, route: &str) -> Result<i64, EsiError> {
     let value = text(object, key, route)?;
     utc_seconds(value).ok_or_else(|| bad_data(route, key, value))
 }

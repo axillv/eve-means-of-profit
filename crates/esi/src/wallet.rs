@@ -7,7 +7,10 @@ use mop_core::industry::TypeId;
 use mop_core::money::Money;
 use serde_json::Value;
 
-use crate::character_data::{Fetched, array, fetched, field, utc_seconds};
+use crate::character_data::{
+    Fetched, array, fetched, flag, money, optional_money, optional_signed, optional_text, signed,
+    text, time, unsigned,
+};
 use crate::client::{Answer, Client, bad_data};
 use crate::error::EsiError;
 use crate::token::AccessToken;
@@ -160,7 +163,7 @@ fn page_count(answer: &Answer, route: &str) -> Result<u32, EsiError> {
 }
 
 fn journal_entry(row: &Value, route: &str) -> Result<JournalEntry, EsiError> {
-    let id = integer(row, "id", route)?;
+    let id: i64 = signed(row, "id", route)?;
     if id < 0 {
         return Err(bad_data(route, "id", &id.to_string()));
     }
@@ -172,22 +175,22 @@ fn journal_entry(row: &Value, route: &str) -> Result<JournalEntry, EsiError> {
         id,
         at: time(row, "date", route)?,
         ref_type: ref_type.to_owned(),
-        ref_id: optional_integer(row, "ref_id", route)?,
-        first_party_id: optional_integer(row, "first_party_id", route)?,
-        second_party_id: optional_integer(row, "second_party_id", route)?,
+        ref_id: optional_signed(row, "ref_id", route)?,
+        first_party_id: optional_signed(row, "first_party_id", route)?,
+        second_party_id: optional_signed(row, "second_party_id", route)?,
         amount: optional_money(row, "amount", route)?,
         balance: optional_money(row, "balance", route)?,
         reason: optional_text(row, "reason", route)?,
         tax: optional_money(row, "tax", route)?,
-        tax_receiver_id: optional_integer(row, "tax_receiver_id", route)?,
-        context_id: optional_integer(row, "context_id", route)?,
+        tax_receiver_id: optional_signed(row, "tax_receiver_id", route)?,
+        context_id: optional_signed(row, "context_id", route)?,
         context_id_type: optional_text(row, "context_id_type", route)?,
         description: text(row, "description", route)?.to_owned(),
     })
 }
 
 fn transaction(row: &Value, route: &str) -> Result<WalletTransaction, EsiError> {
-    let transaction_id = integer(row, "transaction_id", route)?;
+    let transaction_id: i64 = signed(row, "transaction_id", route)?;
     if transaction_id < 0 {
         return Err(bad_data(
             route,
@@ -195,103 +198,22 @@ fn transaction(row: &Value, route: &str) -> Result<WalletTransaction, EsiError> 
             &transaction_id.to_string(),
         ));
     }
-    let quantity = whole(row, "quantity", route)?;
+    let quantity: u32 = unsigned(row, "quantity", route)?;
     if quantity == 0 {
         return Err(bad_data(route, "quantity", "0"));
     }
     Ok(WalletTransaction {
         transaction_id,
         at: time(row, "date", route)?,
-        client_id: integer(row, "client_id", route)?,
-        is_buy: boolean(row, "is_buy", route)?,
-        is_personal: boolean(row, "is_personal", route)?,
-        journal_ref_id: integer(row, "journal_ref_id", route)?,
-        location_id: integer(row, "location_id", route)?,
+        client_id: signed(row, "client_id", route)?,
+        is_buy: flag(row, "is_buy", route)?,
+        is_personal: flag(row, "is_personal", route)?,
+        journal_ref_id: signed(row, "journal_ref_id", route)?,
+        location_id: signed(row, "location_id", route)?,
         quantity,
-        type_id: whole(row, "type_id", route)?,
-        unit_price: money(field(row, "unit_price", route)?, "unit_price", route)?,
+        type_id: unsigned(row, "type_id", route)?,
+        unit_price: money(row, "unit_price", route)?,
     })
-}
-
-/// The field `key` as a whole number.
-fn integer(row: &Value, key: &'static str, route: &str) -> Result<i64, EsiError> {
-    let value = field(row, key, route)?;
-    value
-        .as_i64()
-        .ok_or_else(|| bad_data(route, key, &value.to_string()))
-}
-
-/// The field `key` as a whole number within a `u32`.
-fn whole(row: &Value, key: &'static str, route: &str) -> Result<u32, EsiError> {
-    let value = field(row, key, route)?;
-    let number = value
-        .as_u64()
-        .ok_or_else(|| bad_data(route, key, &value.to_string()))?;
-    u32::try_from(number).map_err(|_error| bad_data(route, key, &number.to_string()))
-}
-
-/// The field `key` as text; an absent field is `BadData`.
-fn text<'a>(row: &'a Value, key: &'static str, route: &str) -> Result<&'a str, EsiError> {
-    let value = field(row, key, route)?;
-    value
-        .as_str()
-        .ok_or_else(|| bad_data(route, key, &value.to_string()))
-}
-
-fn boolean(row: &Value, key: &'static str, route: &str) -> Result<bool, EsiError> {
-    let value = field(row, key, route)?;
-    value
-        .as_bool()
-        .ok_or_else(|| bad_data(route, key, &value.to_string()))
-}
-
-/// The field `key` when it is present and not null.
-fn optional<'a>(row: &'a Value, key: &str) -> Option<&'a Value> {
-    row.get(key).filter(|value| !value.is_null())
-}
-
-fn optional_integer(row: &Value, key: &'static str, route: &str) -> Result<Option<i64>, EsiError> {
-    optional(row, key)
-        .map(|value| {
-            value
-                .as_i64()
-                .ok_or_else(|| bad_data(route, key, &value.to_string()))
-        })
-        .transpose()
-}
-
-fn optional_text(row: &Value, key: &'static str, route: &str) -> Result<Option<String>, EsiError> {
-    optional(row, key)
-        .map(|value| {
-            value
-                .as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| bad_data(route, key, &value.to_string()))
-        })
-        .transpose()
-}
-
-fn optional_money(row: &Value, key: &'static str, route: &str) -> Result<Option<Money>, EsiError> {
-    optional(row, key)
-        .map(|value| money(value, key, route))
-        .transpose()
-}
-
-/// An RFC 3339 UTC time as Unix seconds.
-fn time(row: &Value, key: &'static str, route: &str) -> Result<i64, EsiError> {
-    let value = text(row, key, route)?;
-    utc_seconds(value).ok_or_else(|| bad_data(route, key, value))
-}
-
-/// Money as EVE writes it, read exactly: the number's own text is parsed, never a float.
-fn money(value: &Value, key: &'static str, route: &str) -> Result<Money, EsiError> {
-    match value {
-        Value::Number(number) => Money::parse_decimal(&number.to_string())
-            .map_err(|_error| bad_data(route, key, &number.to_string())),
-        Value::Null | Value::Bool(_) | Value::String(_) | Value::Array(_) | Value::Object(_) => {
-            Err(bad_data(route, key, &value.to_string()))
-        }
-    }
 }
 
 #[cfg(test)]
