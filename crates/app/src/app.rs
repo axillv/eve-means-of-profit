@@ -1142,7 +1142,7 @@ impl App {
                 }
                 self.layout_shown = match shown {
                     Some(shown) if shown == index => {
-                        self.page = Page::ALL[0];
+                        self.page = Page::ALL.first().copied().unwrap_or(Page::Today);
                         None
                     }
                     Some(shown) if shown > index => Some(shown - 1),
