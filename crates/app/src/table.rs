@@ -8,8 +8,8 @@ use std::iter;
 
 use egui::epaint::PathStroke;
 use egui::{
-    Align, Color32, CornerRadius, Id, Label, Layout, Pos2, Rect, ScrollArea, Sense, Shape, Ui,
-    UiBuilder, pos2, vec2,
+    Align, Color32, CornerRadius, Id, Label, Layout, Pos2, Rect, RichText, ScrollArea, Sense,
+    Shape, TextStyle, TextWrapMode, Ui, UiBuilder, WidgetInfo, WidgetText, WidgetType, pos2, vec2,
 };
 use mop_store::Density;
 
@@ -283,11 +283,16 @@ pub(crate) fn sync_sorts(ctx: &egui::Context, cx: &mut Shared) {
 
 /// The width of the fold arrow and the indent per depth, in points.
 const ARROW_WIDTH: f32 = 14.0;
+/// The gap between a tree's fold arrow and the cell text after it.
+const ARROW_GAP: f32 = 4.0;
 const INDENT: f32 = 14.0;
 /// How far a sort triangle sits in from the edge of its header cell.
 const MARK_INSET: f32 = 8.0;
 /// The room left at each side of a cell's text, so a number does not touch the next column's text.
-const CELL_PAD: f32 = 6.0;
+const CELL_PAD: f32 = 8.0;
+
+/// The header row's height, the same at every density.
+const HEADER_HEIGHT: f32 = 28.0;
 /// The width of the `+N columns` cell that says how many columns are hidden.
 const MORE_WIDTH: f32 = 90.0;
 
@@ -655,9 +660,14 @@ impl<'a> Table<'a> {
         let sort_before = state.sort;
         notice_changes(ui, self.columns, self.panel, &mut state);
 
-        let (header, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+        let (header, _) = ui.allocate_exact_size(vec2(width, HEADER_HEIGHT), Sense::hover());
         let click = draw_header(ui, self.id, columns, more, header, style, &mut state.sort);
         let save_sort = apply_header_click(&mut state, click, level, ui);
+        // The hairline under the header takes its own point, so no data row loses one.
+        horizontal(ui, header.min.x, header.max.x, header.max.y, style.line);
+        // The header allocation already left the item spacing after it: take it back, then leave
+        // exactly the one point of the hairline.
+        ui.add_space(1.0 - ui.spacing().item_spacing.y);
 
         let (column, direction) = state
             .sort
@@ -688,7 +698,7 @@ impl<'a> Table<'a> {
         };
         // The footer is drawn below the scroll area, so the rows leave room for it.
         let footer_height = if footer.is_some() { height } else { 0.0 };
-        let mut body = (panel_height - footer_height - height).max(0.0);
+        let mut body = (panel_height - footer_height - HEADER_HEIGHT - 1.0).max(0.0);
         if let Some(fit) = self.fit_rows {
             // A table with no rows keeps one row of room, so it does not vanish.
             let wanted = shown.len().clamp(1, fit.max(1));
@@ -711,7 +721,7 @@ impl<'a> Table<'a> {
                         continue;
                     };
                     let rect = Rect::from_min_size(pos2(origin.x, top), vec2(row_width, height));
-                    let hit = draw_row(look, ui, rows, index, rect, position % 2 == 1, draw);
+                    let hit = draw_row(look, ui, rows, index, rect, draw);
                     match hit {
                         Some(Hit::Clicked(key)) => response.clicked = Some(key),
                         Some(Hit::Toggled(key)) => response.toggled = Some(key),
@@ -795,6 +805,37 @@ fn plain_label(ui: &mut Ui, text: &str) {
     ui.add(Label::new(text).selectable(false));
 }
 
+/// A one-point line across the table from `left` to `right` at `top`.
+fn horizontal(ui: &Ui, left: f32, right: f32, top: f32, color: Color32) {
+    ui.painter().rect_filled(
+        Rect::from_min_max(pos2(left, top), pos2(right, top + 1.0)),
+        CornerRadius::ZERO,
+        color,
+    );
+}
+
+/// A header title: small, strong and grey, and as unclickable as a cell label. It takes the whole
+/// cell, so its label is the column rather than just the width of its letters.
+fn header_label(ui: &mut Ui, text: &str, style: &Style) {
+    let rect = ui.available_rect_before_wrap();
+    let response = ui.allocate_rect(rect, Sense::hover());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, ui.is_enabled(), text));
+    let title = RichText::new(text).small().strong().color(style.mute);
+    let galley = WidgetText::from(title).into_galley(
+        ui,
+        Some(TextWrapMode::Extend),
+        f32::INFINITY,
+        TextStyle::Small,
+    );
+    let x = match ui.layout().horizontal_placement() {
+        Align::Min => rect.min.x,
+        Align::Center => rect.center().x - galley.size().x / 2.0,
+        Align::Max => rect.max.x - galley.size().x,
+    };
+    let y = rect.center().y - galley.size().y / 2.0;
+    ui.painter().galley(pos2(x, y), galley, style.mute);
+}
+
 fn layout_for(kind: ColumnKind) -> Layout {
     match kind {
         ColumnKind::Text => Layout::left_to_right(Align::Center),
@@ -834,7 +875,7 @@ fn draw_header(
                 .max_rect(cell.shrink2(vec2(CELL_PAD, 0.0)))
                 .layout(layout_for(column.kind)),
             |ui| {
-                plain_label(ui, &column.label);
+                header_label(ui, &column.label, style);
             },
         );
         match *sort {
@@ -860,7 +901,7 @@ fn draw_header(
                 .max_rect(cell.shrink2(vec2(CELL_PAD, 0.0)))
                 .layout(Layout::left_to_right(Align::Center)),
             |ui| {
-                plain_label(ui, &format!("+{more} columns"));
+                header_label(ui, &format!("+{more} columns"), style);
             },
         );
     }
@@ -961,7 +1002,6 @@ fn draw_row(
     rows: &[Row],
     index: usize,
     rect: Rect,
-    zebra: bool,
     draw: &mut dyn FnMut(&mut Ui, u64, &'static str) -> bool,
 ) -> Option<Hit> {
     let row = rows.get(index)?;
@@ -970,10 +1010,10 @@ fn draw_row(
     ui.painter().rect_filled(
         rect,
         CornerRadius::ZERO,
-        look.style.row_fill(zebra, hit_row.hovered(), selected),
+        look.style.row_fill(false, hit_row.hovered(), selected),
     );
 
-    // The arrow sits in the first column, after the indent of this row's depth.
+    // The cell padding comes first, then the indent of this row's depth and its arrow.
     // Depths past 65,535 levels are indented as 65,535: no tree is that deep, and the list still draws.
     let depth = f32::from(u16::try_from(row.depth).unwrap_or(u16::MAX));
     let mut arrow = None;
@@ -989,7 +1029,7 @@ fn draw_row(
         }
         let content = if position == 0 && has_children(rows, index) {
             let arrow_rect = Rect::from_min_size(
-                pos2(cell.min.x + depth * INDENT, cell.min.y),
+                pos2(cell.min.x + CELL_PAD + depth * INDENT, cell.min.y),
                 vec2(ARROW_WIDTH, look.height),
             );
             fold_mark(
@@ -1002,14 +1042,23 @@ fn draw_row(
             Rect::from_min_max(pos2(arrow_rect.max.x, cell.min.y), cell.max)
         } else if position == 0 {
             // A leaf keeps the text place an arrow would take, so siblings line up.
-            let left = cell.min.x + depth * INDENT + ARROW_WIDTH;
+            let left = cell.min.x + CELL_PAD + depth * INDENT + ARROW_WIDTH;
             Rect::from_min_max(pos2(left, cell.min.y), cell.max)
         } else {
             cell
         };
+        // The first column's padding is before its indent and arrow; the others take it here.
+        let text_rect = if position == 0 {
+            Rect::from_min_max(
+                pos2(content.min.x + ARROW_GAP, content.min.y),
+                pos2(cell.max.x - CELL_PAD, content.max.y),
+            )
+        } else {
+            content.shrink2(vec2(CELL_PAD, 0.0))
+        };
         ui.scope_builder(
             UiBuilder::new()
-                .max_rect(content.shrink2(vec2(CELL_PAD, 0.0)))
+                .max_rect(text_rect)
                 .layout(layout_for(column.kind)),
             |ui| {
                 // A cell the callback drew is left as it is.
@@ -1035,6 +1084,9 @@ fn draw_row(
             },
         );
     }
+
+    // The hairline under the row sits inside its bottom edge, the full table width.
+    horizontal(ui, rect.min.x, rect.max.x, rect.max.y - 1.0, look.style.row);
 
     if let Some(arrow_rect) = arrow {
         let hit_arrow = ui.interact(
@@ -1412,5 +1464,182 @@ mod tests {
         click_at(&mut harness, pos2(child.min.x - 7.0, child.center().y));
         harness.run();
         assert!(shows(&harness, "Grandchild"));
+    }
+
+    /// A table filling the harness, with the point it starts at written to `top` every frame.
+    fn paint_harness(
+        columns: Vec<Column>,
+        rows: Vec<Row>,
+        density: Density,
+        top: &Arc<Mutex<Pos2>>,
+    ) -> Harness<'static> {
+        let top = Arc::clone(top);
+        let style = Style::eve_dense();
+        Harness::builder()
+            .with_size(vec2(800.0, 400.0))
+            .build_ui(move |ui| {
+                style.apply(ui.ctx());
+                if let Ok(mut top) = top.lock() {
+                    *top = ui.cursor().min;
+                }
+                Table::new(Id::new("paint test"), &columns).show(ui, &style, density, &rows, None);
+            })
+    }
+
+    /// The centre of the pixel at `x`, `y`, in points.
+    fn pixel_centre(x: u32, y: u32, per_point: f32) -> Pos2 {
+        let x = f32::from(u16::try_from(x).unwrap_or(u16::MAX));
+        let y = f32::from(u16::try_from(y).unwrap_or(u16::MAX));
+        pos2((x + 0.5) / per_point, (y + 0.5) / per_point)
+    }
+
+    /// The colour drawn at the pixel under `pos`.
+    fn colour_at(harness: &mut Harness<'_>, pos: Pos2) -> Color32 {
+        let per_point = harness.ctx.pixels_per_point();
+        let image = harness.render().expect("the frame draws");
+        image
+            .enumerate_pixels()
+            .find_map(|(x, y, pixel)| {
+                let centre = pixel_centre(x, y, per_point);
+                let near = (centre.x - pos.x).abs() <= 0.5 / per_point
+                    && (centre.y - pos.y).abs() <= 0.5 / per_point;
+                let [r, g, b, _] = pixel.0;
+                near.then_some(Color32::from_rgb(r, g, b))
+            })
+            .expect("a pixel under the point")
+    }
+
+    /// The heights, in pixels, of the horizontal runs of `colour` near the table's left edge.
+    fn colour_bands(harness: &mut Harness<'_>, top: Pos2, colour: Color32) -> Vec<usize> {
+        let per_point = harness.ctx.pixels_per_point();
+        let image = harness.render().expect("the frame draws");
+        let (width, height) = image.dimensions();
+        let start = (0..width)
+            .find(|&x| pixel_centre(x, 0, per_point).x >= top.x + 1.0)
+            .expect("a pixel in the table");
+        let mut bands = Vec::new();
+        let mut band = 0;
+        for y in 0..height {
+            let run = (start..start + 40).all(|x| {
+                let [r, g, b, _] = image.get_pixel(x, y).0;
+                Color32::from_rgb(r, g, b) == colour
+            });
+            if run {
+                band += 1;
+            } else if band > 0 {
+                bands.push(band);
+                band = 0;
+            }
+        }
+        if band > 0 {
+            bands.push(band);
+        }
+        bands
+    }
+
+    #[test]
+    fn plain_rows_sit_on_the_background_with_a_hairline_after_each() {
+        let style = Style::eve_dense();
+        let top = Arc::new(Mutex::new(Pos2::ZERO));
+        let mut harness = paint_harness(columns(), value_rows(), Density::Normal, &top);
+        harness.run();
+        let top = *top.lock().unwrap();
+        let per_point = harness.ctx.pixels_per_point();
+        for label in ["A", "B", "C"] {
+            let centre = harness.get_by_label(label).rect().center().y;
+            let behind = colour_at(&mut harness, pos2(top.x + 2.0, centre));
+            assert_eq!(behind, style.bg, "{label}'s row sits on the background");
+        }
+
+        let bands = colour_bands(&mut harness, top, style.row);
+        assert_eq!(bands.len(), 3, "one hairline after each of the three rows");
+        assert!(
+            bands.iter().all(|&height| {
+                let height = f32::from(u16::try_from(height).unwrap_or(u16::MAX));
+                (height / per_point - 1.0).abs() < 0.01
+            }),
+            "each hairline is 1.0 tall: {bands:?}"
+        );
+    }
+
+    #[test]
+    fn the_header_is_28_tall_at_every_density_and_a_point_gap_precedes_the_rows() {
+        let top = Arc::new(Mutex::new(Pos2::ZERO));
+        for density in [Density::Dense, Density::Normal, Density::Sparse] {
+            let top_point = Arc::clone(&top);
+            let mut harness = paint_harness(columns(), value_rows(), density, &top_point);
+            harness.run();
+            let top = *top.lock().unwrap();
+            let header = harness.get_by_label("Item").rect();
+            assert!(
+                (header.center().y - top.y - HEADER_HEIGHT / 2.0).abs() <= 0.5,
+                "{density:?}'s header is {HEADER_HEIGHT} tall"
+            );
+            let first = harness.get_by_label("A").rect();
+            let wanted = top.y + HEADER_HEIGHT + 1.0 + row_height(density) / 2.0;
+            assert!(
+                (first.center().y - wanted).abs() <= 0.5,
+                "{density:?}'s first row starts a point below the header: {}",
+                first.center().y - top.y
+            );
+        }
+    }
+
+    /// Qty first, so the text column after it is plain rather than a tree column.
+    fn padding_columns() -> Vec<Column> {
+        vec![
+            Column {
+                id: "qty",
+                label: "Qty".to_owned(),
+                kind: ColumnKind::Number,
+                width: 80.0,
+            },
+            Column {
+                id: "item",
+                label: "Item".to_owned(),
+                kind: ColumnKind::Text,
+                width: 220.0,
+            },
+            Column {
+                id: "value",
+                label: "Value".to_owned(),
+                kind: ColumnKind::Money,
+                width: 140.0,
+            },
+        ]
+    }
+
+    fn padding_rows() -> Vec<Row> {
+        vec![Row {
+            key: 1,
+            depth: 0,
+            cells: vec![
+                Cell::int(10, "10"),
+                Cell::text("Tritanium"),
+                Cell::int(4307, "4,307"),
+            ],
+        }]
+    }
+
+    #[test]
+    fn cell_text_keeps_8_points_from_its_cell_edges() {
+        let top = Arc::new(Mutex::new(Pos2::ZERO));
+        let mut harness = paint_harness(padding_columns(), padding_rows(), Density::Normal, &top);
+        harness.run();
+        let top = *top.lock().unwrap();
+        let item = harness.get_by_label("Tritanium").rect();
+        let item_left = top.x + 80.0;
+        assert!(
+            (item.min.x - item_left - CELL_PAD).abs() <= 0.5,
+            "Tritanium starts {CELL_PAD} in from its cell: {}",
+            item.min.x - item_left
+        );
+        let value = harness.get_by_label("4,307").rect();
+        let value_right = top.x + 80.0 + 220.0 + 140.0;
+        assert!(
+            (value_right - value.max.x - CELL_PAD).abs() <= 0.5,
+            "4,307 ends {CELL_PAD} before its cell's right edge: {}",
+            value_right - value.max.x
+        );
     }
 }
