@@ -218,6 +218,7 @@ fn typing_a_short_name_saves_it_and_clearing_the_field_removes_it() {
     // The player types the name into Main's Short name field and presses Enter.
     {
         let mut harness = open(&env, &eve);
+        choose_level(&mut harness, "Standard");
         type_short(&mut harness, "Main", "Indy 2");
         harness.key_press(Key::Enter);
         until(&mut harness, "the row redrawn", |h| shown(h, "Indy 2"));
@@ -225,8 +226,9 @@ fn typing_a_short_name_saves_it_and_clearing_the_field_removes_it() {
         assert_eq!(hover(&mut harness, "Indy 2"), vec!["Main".to_owned()]);
     }
 
-    // A new app reads the saved name back.
+    // A new app reads the saved name back, once Standard shows the field.
     let mut harness = open(&env, &eve);
+    choose_level(&mut harness, "Standard");
     until(&mut harness, "the short name after a restart", |h| {
         shown(h, "Indy 2")
     });

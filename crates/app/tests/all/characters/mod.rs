@@ -509,6 +509,14 @@ mod tests {
         frames(harness);
     }
 
+    /// Picks `label` from the Characters table's Columns menu.
+    fn choose_level(harness: &mut Harness<'_, App>, label: &str) {
+        harness.get_by_label("Columns").click();
+        frames(harness);
+        harness.get_by_label(label).click();
+        frames(harness);
+    }
+
     fn shown(harness: &Harness<'_, App>, text: &str) -> bool {
         harness.query_all_by_label(text).next().is_some()
     }

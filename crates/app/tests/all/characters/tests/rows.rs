@@ -1,5 +1,85 @@
 use super::*;
 
+/// The number of labels or values that contain a plus sign, as the `+N columns` cell does.
+fn plus_labels(harness: &Harness<'_, App>) -> usize {
+    harness
+        .query_all_by(|node| {
+            node.label()
+                .or_else(|| node.value())
+                .is_some_and(|text| text.contains('+'))
+        })
+        .count()
+}
+
+#[test]
+fn summary_shows_the_character_login_ages_and_actions() {
+    let env = env();
+    let eve = FakeEve::new(&env, partial);
+    let mut harness = open(&env, &eve);
+    until(&mut harness, "the rows", |h| shown(h, "5m"));
+    for label in ["Character", "Login", "Assets", "Orders", "Jobs", "Wallet"] {
+        assert!(shown(&harness, label), "{label} is drawn at Summary");
+    }
+    assert!(!shown(&harness, "Account"));
+    assert!(!shown(&harness, "Short name"));
+    assert_eq!(plus_labels(&harness), 0, "Summary fits at 1280");
+    assert!(shown(&harness, "Main"));
+    assert!(shown(&harness, "ok"));
+    assert!(shown(&harness, "login expired: log in again"));
+    for age in ["0s", "5m", "30s"] {
+        assert!(shown(&harness, age), "{age} is drawn at Summary");
+    }
+    assert!(shown(&harness, "Refresh"));
+    assert!(shown(&harness, "Remove…"));
+}
+
+#[test]
+fn standard_and_technical_show_the_same_nine_columns() {
+    let env = env();
+    let eve = FakeEve::new(&env, partial);
+    let mut harness = open(&env, &eve);
+    until(&mut harness, "the rows", |h| shown(h, "5m"));
+    harness.set_size(vec2(1800.0, 800.0));
+    frames(&mut harness);
+    let labels = [
+        "Character",
+        "Short name",
+        "Login",
+        "Account",
+        "Assets",
+        "Orders",
+        "Jobs",
+        "Wallet",
+    ];
+    for level in ["Standard", "Technical"] {
+        choose_level(&mut harness, level);
+        for label in labels {
+            assert!(shown(&harness, label), "{label} is drawn at {level}");
+        }
+        assert_eq!(plus_labels(&harness), 0, "{level} has no +N cell");
+    }
+}
+
+#[test]
+fn the_columns_menu_picks_the_level_and_the_account_and_short_name_follow() {
+    let env = env();
+    let eve = FakeEve::new(&env, partial);
+    let mut harness = open(&env, &eve);
+    until(&mut harness, "the rows", |h| shown(h, "5m"));
+    harness.get_by_label("Columns").click();
+    frames(&mut harness);
+    for choice in ["Summary", "Standard", "Technical"] {
+        assert!(shown(&harness, choice), "{choice} is in the menu");
+    }
+    harness.get_by_label("Standard").click();
+    frames(&mut harness);
+    assert!(shown(&harness, "Account"));
+    assert!(shown(&harness, "Short name"));
+    choose_level(&mut harness, "Summary");
+    assert!(!shown(&harness, "Account"));
+    assert!(!shown(&harness, "Short name"));
+}
+
 #[test]
 fn rows_are_sorted_by_name_with_the_login_and_the_age_of_each_kind() {
     let env = env();

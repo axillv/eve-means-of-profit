@@ -222,6 +222,9 @@ fn a_fresh_store_shows_no_account_and_a_new_account_empties_the_field() {
     let eve = FakeEve::new(&env, partial);
     let mut harness = open(&env, &eve);
     until(&mut harness, "the rows", |h| shown(h, "5m"));
+    // Summary has no Account column, so no dropdown.
+    assert_eq!(combos_showing(&harness, "(none)"), 0);
+    choose_level(&mut harness, "Standard");
     // Both rows say (none) in the Account column.
     assert_eq!(combos_showing(&harness, "(none)"), 2);
     type_into(&mut harness, "New account", " Main acct ");
@@ -243,6 +246,7 @@ fn picking_an_account_for_a_character_stores_it_and_a_new_app_shows_the_same() {
     let env = env();
     let eve = FakeEve::new(&env, partial);
     let mut harness = open(&env, &eve);
+    choose_level(&mut harness, "Standard");
     type_into(&mut harness, "New account", "Main acct");
     press(&mut harness, "Add account", 0);
     // Rows sort by name, so Alt's dropdown is the first one saying (none).
@@ -257,8 +261,9 @@ fn picking_an_account_for_a_character_stores_it_and_a_new_app_shows_the_same() {
     assert_eq!(accounts[0].name, "Main acct");
     assert_eq!(accounts[0].characters, vec![ALT]);
 
-    // A new app on the same data folder shows the same.
+    // A new app on the same data folder shows the same, once Standard is picked.
     let mut again = open(&env, &eve);
+    choose_level(&mut again, "Standard");
     until(&mut again, "the accounts", |h| {
         combos_showing(h, "Main acct") == 1
     });
@@ -302,6 +307,7 @@ fn an_account_with_three_other_characters_is_listed_but_disabled() {
     let env = env();
     let eve = FakeEve::new(&env, partial);
     let mut harness = open(&env, &eve);
+    choose_level(&mut harness, "Standard");
     let full = {
         let store = &mut harness.state_mut().shared_mut().store;
         let full = store.add_account("Full").expect("the account");

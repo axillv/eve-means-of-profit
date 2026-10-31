@@ -14,8 +14,8 @@ use crate::build::prices::age_text;
 use crate::images::{self, Picture};
 use crate::session::eve::NO_CLIENT_ID;
 use crate::status::Notice;
-use crate::table::Table;
 use crate::table::model::{Cell, Column, ColumnKind, Row, row_height};
+use crate::table::{self, Level, Table};
 use crate::theme::Style;
 
 /// One kind's column: the age text, its colour, and the hover.
@@ -117,12 +117,21 @@ fn kinds(data: Option<&CharacterData>, now: i64, style: &Style) -> [KindView; 4]
     ]
 }
 
+/// The login column's text.
+pub fn login_text(expired: bool) -> &'static str {
+    if expired {
+        "login expired: log in again"
+    } else {
+        "ok"
+    }
+}
+
 /// The login column: its text and colour.
 pub fn login_view(expired: bool, style: &Style) -> (&'static str, Color32) {
     if expired {
-        ("login expired: log in again", style.neg)
+        (login_text(expired), style.neg)
     } else {
-        ("ok", style.text)
+        (login_text(expired), style.text)
     }
 }
 
@@ -167,24 +176,61 @@ struct Line {
     kinds: [KindView; 4],
 }
 
-fn columns() -> Vec<Column> {
+/// The columns of a level: Summary keeps the character, the login, the four ages and the
+/// actions; Standard and Technical add the short name and the account.
+fn columns(level: Level) -> Vec<Column> {
     let column = |id: &'static str, label: &str, width: f32| Column {
         id,
         label: label.to_owned(),
         kind: ColumnKind::Text,
         width,
     };
-    vec![
-        column("character", "Character", 180.0),
-        column("short", "Short name", 120.0),
-        column("login", "Login", 210.0),
-        column("account", "Account", 150.0),
-        column("assets", "Assets", 80.0),
-        column("orders", "Orders", 80.0),
-        column("jobs", "Jobs", 80.0),
-        column("wallet", "Wallet", 80.0),
-        column("actions", "", 300.0),
-    ]
+    let character = || column("character", "Character", 180.0);
+    let short = || column("short", "Short name", 120.0);
+    let login = || column("login", "Login", 210.0);
+    let account = || column("account", "Account", 150.0);
+    let ages = || {
+        [
+            column("assets", "Assets", 80.0),
+            column("orders", "Orders", 80.0),
+            column("jobs", "Jobs", 80.0),
+            column("wallet", "Wallet", 80.0),
+        ]
+    };
+    match level {
+        Level::Summary => {
+            let mut columns = vec![character(), login()];
+            columns.extend(ages());
+            columns.push(column("actions", "", 250.0));
+            columns
+        }
+        Level::Standard | Level::Technical => {
+            let mut columns = vec![character(), short(), login(), account()];
+            columns.extend(ages());
+            columns.push(column("actions", "", 300.0));
+            columns
+        }
+    }
+}
+
+/// The cells of one row, in the order of `columns`.
+fn cells(line: &Line, accounts: Option<&[Account]>, columns: &[Column]) -> Vec<Cell> {
+    columns
+        .iter()
+        .map(|column| match column.id {
+            "character" => Cell::text(line.name.as_str()),
+            "login" => Cell::text(login_text(line.expired)),
+            "account" => Cell::text(account_text(accounts, line.id)),
+            "assets" | "orders" | "jobs" | "wallet" => {
+                let position = KIND_COLUMNS.iter().position(|id| *id == column.id);
+                position
+                    .and_then(|at| line.kinds.get(at))
+                    .map_or_else(|| Cell::text(""), |kind| Cell::text(kind.text.as_str()))
+            }
+            // The short name has its own widget and the actions their buttons; both copy nothing.
+            _ => Cell::text(""),
+        })
+        .collect()
 }
 
 /// A small button that can be disabled with a reason shown on hover. Returns whether it was clicked.
@@ -608,27 +654,27 @@ fn table(
     let density = cx.density;
     let portrait = portrait_size(density);
     let mut click = None;
-    // What the player picked in an Account dropdown, applied once the table is drawn.
-    let mut picks: Vec<(u64, Option<i64>)> = Vec::new();
+    let id = Id::new(super::CharactersPanel::Characters.title());
+    let mut level = table::level(ui, id, Level::Summary);
+    ui.horizontal(|ui| {
+        ui.menu_button("Columns", |ui| {
+            if let Some(picked) = table::level_choices(ui, level) {
+                table::set_level(ui, id, picked);
+                level = picked;
+            }
+        });
+    });
+    let columns = columns(level);
     let rows: Vec<Row> = lines
         .iter()
-        .map(|line| {
-            let mut cells = vec![
-                Cell::text(line.name.as_str()),
-                Cell::text(""),
-                Cell::text(login_view(line.expired, &style).0),
-                Cell::text(account_text(accounts, line.id)),
-            ];
-            cells.extend(line.kinds.iter().map(|kind| Cell::text(kind.text.as_str())));
-            cells.push(Cell::text(""));
-            Row {
-                key: line.id,
-                depth: 0,
-                cells,
-            }
+        .map(|line| Row {
+            key: line.id,
+            depth: 0,
+            cells: cells(line, accounts, &columns),
         })
         .collect();
-    let columns = columns();
+    // What the player picked in an Account dropdown, applied once the table is drawn.
+    let mut picks: Vec<(u64, Option<i64>)> = Vec::new();
     // What the player typed in a Short name field, queued to be saved once the table is drawn.
     let mut pending: Vec<(u64, String)> = Vec::new();
     let mut draw = |ui: &mut Ui, key: u64, column: &'static str| -> bool {
@@ -684,11 +730,9 @@ fn table(
             _ => false,
         }
     };
-    Table::new(
-        Id::new(super::CharactersPanel::Characters.title()),
-        &columns,
-    )
-    .show_with(ui, &style, density, &rows, None, &mut draw);
+    Table::new(id, &columns)
+        .level(level)
+        .show_with(ui, &style, density, &rows, None, &mut draw);
     // The Short name fields the table queued: a save that lands drops the typed text (the field
     // starts again from the saved name), one that is refused keeps it for the player to fix.
     for (character, text) in pending {
