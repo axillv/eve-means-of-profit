@@ -473,6 +473,20 @@ mod tests {
         assert!(on_row(&harness, "Copying", &["paused"]));
         assert!(shown(&harness, "ready to deliver"));
         assert!(!shown(&harness, "1970-01-11 10:00"));
+        assert!(!shown(&harness, "active"));
+        assert!(!shown(&harness, "ready"));
+        let footer = harness
+            .query_all_by_label("4 jobs · 2 ready to deliver")
+            .next()
+            .expect("the footer");
+        let reactions = harness
+            .query_all_by_label("Reactions")
+            .next()
+            .expect("the Reactions row");
+        assert!(
+            footer.rect().height() > reactions.rect().height(),
+            "the footer is 16 px against the 14 px body"
+        );
     }
 
     #[test]
@@ -506,10 +520,15 @@ mod tests {
         harness.run();
 
         assert!(shown(&harness, "5 jobs · 2 ready to deliver"));
-        assert!(shown(&harness, "delivered"));
-        assert!(top(&harness, "delivered") > top(&harness, "Copying"));
-        assert!(on_row(&harness, "delivered", &["1970-01-11 10:00"]));
-        assert!(shown(&harness, "1970-01-11 10:00"));
+        assert!(shown(&harness, "delivered 1970-01-11 10:00"));
+        assert!(top(&harness, "delivered 1970-01-11 10:00") > top(&harness, "Copying"));
+        assert!(on_row(
+            &harness,
+            "Manufacturing",
+            &["delivered 1970-01-11 10:00"]
+        ));
+        assert!(!shown(&harness, "delivered"));
+        assert!(!shown(&harness, "1970-01-11 10:00"));
     }
 
     #[test]
@@ -699,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_keeps_the_eight_columns_and_the_location() {
+    fn standard_keeps_the_seven_columns_and_the_location() {
         let env = env();
         save_jobs(&env, main_jobs());
         let mut harness = start(&env, vec![character(MAIN, "Main")]);
@@ -716,16 +735,22 @@ mod tests {
                 "Runs",
                 "Character",
                 "Location",
-                "Status",
                 "Ends"
             ]
         );
-        assert!(!any_plus(&harness), "all eight columns fit at 1280");
+        assert!(!any_plus(&harness), "all seven columns fit at 1280");
         assert!(on_row(&harness, "Manufacturing", &["Home Fort"]));
+        assert!(on_row(&harness, "Manufacturing", &["in 2h"]));
+        assert!(on_row(&harness, "Invention", &["ready to deliver"]));
+        assert!(on_row(&harness, "Reactions", &["ready to deliver"]));
+        assert!(on_row(&harness, "Copying", &["paused"]));
+        assert!(!shown(&harness, "Status"));
+        assert!(!shown(&harness, "active"));
+        assert!(!shown(&harness, "ready"));
     }
 
     #[test]
-    fn technical_shows_the_same_eight_columns_with_no_more_cell() {
+    fn technical_shows_the_same_seven_columns_with_no_more_cell() {
         let env = env();
         save_jobs(&env, main_jobs());
         let mut harness = start(&env, vec![character(MAIN, "Main")]);
@@ -742,11 +767,11 @@ mod tests {
                 "Runs",
                 "Character",
                 "Location",
-                "Status",
                 "Ends"
             ]
         );
         assert!(!any_plus(&harness), "Technical has no +N cell");
+        assert!(!shown(&harness, "Status"));
     }
 
     #[test]
@@ -768,9 +793,10 @@ mod tests {
         }
         click(&mut harness, "Standard");
         harness.run();
-        for present in ["Plan", "Location", "Status"] {
+        for present in ["Plan", "Location"] {
             assert!(shown(&harness, present), "Standard brings back {present}");
         }
+        assert!(!shown(&harness, "Status"));
 
         choose_level(&mut harness, "Summary");
         for absent in ["Plan", "Location", "Status"] {
@@ -800,6 +826,33 @@ mod tests {
         choose_level(&mut harness, "Standard");
         assert!(!shown(&harness, "Activity"));
         assert!(shown(&harness, "Plan"));
+    }
+
+    #[test]
+    fn a_saved_hidden_status_id_matches_no_column() {
+        let env = env();
+        save_jobs(&env, main_jobs());
+        let mut store = store(&env);
+        store
+            .set_setting("columns.jobs", "status")
+            .expect("the old hidden column is saved");
+        let mut harness = start(&env, vec![character(MAIN, "Main")]);
+        loaded(&mut harness);
+        click(&mut harness, "Industry jobs");
+        choose_level(&mut harness, "Standard");
+
+        assert_eq!(
+            header_labels(&harness),
+            [
+                "Product",
+                "Activity",
+                "Plan",
+                "Runs",
+                "Character",
+                "Location",
+                "Ends"
+            ]
+        );
     }
 
     #[test]

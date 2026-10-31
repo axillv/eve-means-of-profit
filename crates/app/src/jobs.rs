@@ -99,7 +99,7 @@ pub fn show(_page: &mut JobsPage, panel: JobsPanel, ui: &mut Ui, cx: &mut Shared
         .iter()
         .filter(|entry| shown_flag || !entry.finished)
         .collect();
-    ui.label(RichText::new(footer(&shown)).color(cx.style.mute));
+    ui.label(RichText::new(footer(&shown)).size(16.0));
 
     let id = Id::new(panel.title());
     let mut level = table::level(ui, id, Level::Summary);
@@ -167,7 +167,6 @@ fn columns() -> Vec<Column> {
         column("runs", "Runs", ColumnKind::Number, 70.0),
         column("character", "Character", ColumnKind::Text, 120.0),
         column("location", "Location", ColumnKind::Text, 180.0),
-        column("status", "Status", ColumnKind::Text, 100.0),
         column("ends", "Ends", ColumnKind::Number, 140.0),
     ]
 }
@@ -205,11 +204,22 @@ fn cells(entry: &Entry, columns: &[Column]) -> Vec<Cell> {
             )),
             "character" => Some(Cell::text(&entry.character)),
             "location" => Some(Cell::text(&entry.location)),
-            "status" => Some(Cell::text(status_text(entry.status))),
-            "ends" => Some(Cell::int(i128::from(entry.end), entry.ends.as_str())),
+            "ends" => Some(Cell::int(
+                i128::from(entry.end),
+                status_and_ends(entry).as_str(),
+            )),
             _ => None,
         })
         .collect()
+}
+
+/// The Ends cell of a job: its status and end date once it is over, else when it ends.
+fn status_and_ends(entry: &Entry) -> String {
+    if entry.finished {
+        format!("{} {}", status_text(entry.status), entry.ends)
+    } else {
+        entry.ends.clone()
+    }
 }
 
 /// Draws the Plan cell of one row. Returns whether it drew the cell.
