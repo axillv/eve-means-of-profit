@@ -38,6 +38,18 @@ fn choose_profile(env: &Env, name: &str) {
         .expect("the choice is saved");
 }
 
+/// Runs frames until the app holds a notice whose text is `text`.
+fn until_notice_text(harness: &mut Harness<'_, App>, text: &str) {
+    for _ in 0..WAIT_STEPS {
+        harness.step();
+        if notices(harness).iter().any(|held| held == text) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!("the notice {text:?} did not come");
+}
+
 #[test]
 fn the_jeve_panel_lists_its_characters_and_whether_the_app_uses_them() {
     let env = env();
@@ -172,14 +184,20 @@ fn a_cancel_the_player_did_not_cause_is_an_error() {
     let mut eve = FakeEve::new(&env, partial);
     eve.cancels_alone = true;
     let mut harness = open(&env, &eve);
+    harness.state_mut().shared_mut().notices.clear();
     harness.get_by_label("Add character").click();
-    until_notice(&mut harness);
+    let expected = format!("Could not log in: {}", EsiError::Cancelled);
+    until_notice_text(&mut harness, &expected);
     let held = &harness.state_mut().shared_mut().notices;
-    assert_eq!(
-        held.first().map(|n| n.text.clone()),
-        Some(format!("Could not log in: {}", EsiError::Cancelled))
+    let cancel = held
+        .iter()
+        .find(|notice| notice.text == expected)
+        .expect("the login error");
+    assert_eq!(cancel.level, Level::Error);
+    assert!(
+        !held.iter().any(|notice| notice.text == "Login cancelled."),
+        "the player did not cancel"
     );
-    assert_eq!(held.first().map(|n| n.level), Some(Level::Error));
 }
 
 #[test]

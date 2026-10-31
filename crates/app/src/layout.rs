@@ -4,6 +4,7 @@
 pub mod add_to;
 pub mod dock_convert;
 pub mod files;
+pub mod gallery;
 pub mod model;
 pub mod panels;
 pub mod saved;

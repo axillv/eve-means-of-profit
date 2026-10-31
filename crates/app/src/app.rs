@@ -899,6 +899,10 @@ impl App {
             | Startup::Cancelled
             | Startup::Failed(_) => self.first_run_screen(ui),
         }
+        if let Some((index, notices)) = layout::gallery::show(ui.ctx(), &mut self.user) {
+            self.layout_shown = Some(index);
+            self.shared.notices.extend(notices);
+        }
         table::sync_sorts(&ui.ctx().clone(), &mut self.shared);
     }
 
@@ -939,6 +943,10 @@ impl App {
                         self.ctx.data_mut(|data| {
                             data.insert_temp(paste_layout_id(), String::new());
                         });
+                        ui.close();
+                    }
+                    if ui.button("Layout gallery…").clicked() {
+                        layout::gallery::open(ui.ctx());
                         ui.close();
                     }
                     ui.separator();
@@ -1990,6 +1998,7 @@ mod tests {
     use std::io::Write;
     use std::ops::ControlFlow;
 
+    use egui_kittest::kittest::Queryable;
     use mop_market::cache::HttpResponse;
     use mop_market::error::MarketError;
     use mop_market::fuzzwork::{BytesHttp, BytesResponse};
@@ -2394,6 +2403,49 @@ mod tests {
         assert!(
             accent.iter().all(|rect| rect.width() < entry.width() / 2.0),
             "no accent fill covers the entry"
+        );
+    }
+
+    /// The `Market watch` premade as the file holds it.
+    const MARKET_WATCH: &str =
+        "EVE Means of Profit layout 1\nname: Market watch\nsplit down 50%\n  Orders\n  Net worth\n";
+
+    #[test]
+    fn the_file_menu_opens_the_gallery_and_market_watch_is_added() {
+        let dir = TempDir::new().expect("a temp folder");
+        let data = dir.path().join("data");
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&data).expect("the data folder");
+        let layouts = data.join("layouts.txt");
+        assert!(
+            !layouts.exists(),
+            "the folder starts without a layouts file"
+        );
+
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(vec2(1280.0, 800.0))
+            .with_max_steps(16)
+            .build_eframe(move |cc| {
+                App::new(&cc.egui_ctx, config(data, cache)).expect("the app starts")
+            });
+        harness.run();
+
+        harness.get_by_label("File").click();
+        harness.run_steps(3);
+        harness.get_by_label("Layout gallery…").click();
+        harness.run_steps(3);
+        assert!(
+            harness.get_by_label("Market watch").rect().width() > 0.0,
+            "the gallery window is open"
+        );
+
+        harness.get_by_label("Market watch").click();
+        harness.run_steps(3);
+        assert_eq!(harness.state().user.names(), ["Market watch"]);
+        assert_eq!(harness.state().layout_shown, Some(0));
+        assert_eq!(
+            fs::read_to_string(&layouts).expect("the file is read"),
+            MARKET_WATCH
         );
     }
 }
