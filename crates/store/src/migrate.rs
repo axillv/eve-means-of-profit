@@ -285,7 +285,7 @@ CREATE TABLE history_settings (
 INSERT INTO history_settings (id, limit_bytes, auto_refresh) VALUES (1, NULL, 1);
 CREATE TABLE accounts (
     id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE CHECK (length(name) > 0)
+    name TEXT COLLATE NOCASE NOT NULL UNIQUE CHECK (length(name) > 0)
 );
 CREATE TABLE account_characters (
     character_id INTEGER PRIMARY KEY CHECK (character_id >= 0),

@@ -11,7 +11,7 @@ use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::error::{Result, StoreError};
 use crate::migrate::Store;
-use crate::{bad_code, from_stored, to_stored_u64};
+use crate::{bad_code, from_stored, id_names, is_taken, to_stored_u64};
 
 const RECORDS: &str = "net_worth_records";
 const ITEMS: &str = "item_set_items";
@@ -719,14 +719,8 @@ fn account_name(name: &str) -> Result<&str> {
 
 /// Whether another account than `except` already uses the name.
 fn name_taken(tx: &Transaction<'_>, name: &str, except: Option<i64>) -> Result<bool> {
-    let holder: Option<i64> = tx
-        .query_row(
-            "SELECT id FROM accounts WHERE name = ?1",
-            params![name],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(matches!(holder, Some(id) if Some(id) != except))
+    let taken = id_names(tx, "SELECT id, name FROM accounts", [])?;
+    Ok(is_taken(&taken, name, except))
 }
 
 /// `NotFound` unless the account exists.
@@ -780,6 +774,23 @@ mod tests {
             store.rename_account(99, "x"),
             Err(StoreError::NotFound)
         ));
+    }
+
+    #[test]
+    fn account_names_ignore_case() {
+        let (_dir, _path, mut store) = open_temp();
+        let id = store.add_account("Main").expect("add");
+        assert!(matches!(
+            store.add_account("main"),
+            Err(StoreError::NameTaken(name)) if name == "main"
+        ));
+        let other = store.add_account("Other").expect("add other");
+        assert!(matches!(
+            store.rename_account(other, "MAIN"),
+            Err(StoreError::NameTaken(name)) if name == "MAIN"
+        ));
+        store.rename_account(id, "MAIN").expect("rename");
+        assert!(names(&store).contains(&(id, "MAIN".to_string(), vec![])));
     }
 
     #[test]
