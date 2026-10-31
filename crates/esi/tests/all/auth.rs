@@ -40,7 +40,7 @@ mod tests {
         116, 24, 223, 180, 151, 153, 224, 37, 79, 250, 96, 125, 216, 173, 187, 186, 22, 212, 37,
         77, 105, 214, 191, 240, 91, 88, 5, 88, 83, 132, 141, 121,
     ];
-    const EXPECTED_SCOPES: [&str; 17] = [
+    const EXPECTED_SCOPES: [&str; 32] = [
         "esi-assets.read_assets.v1",
         "esi-universe.read_structures.v1",
         "esi-search.search_structures.v1",
@@ -58,6 +58,21 @@ mod tests {
         "esi-location.read_location.v1",
         "esi-ui.open_window.v1",
         "esi-ui.write_waypoint.v1",
+        "esi-clones.read_implants.v1",
+        "esi-clones.read_clones.v1",
+        "esi-skills.read_skillqueue.v1",
+        "esi-fittings.read_fittings.v1",
+        "esi-characters.read_agents_research.v1",
+        "esi-characters.read_corporation_roles.v1",
+        "esi-assets.read_corporation_assets.v1",
+        "esi-corporations.read_blueprints.v1",
+        "esi-industry.read_corporation_jobs.v1",
+        "esi-markets.read_corporation_orders.v1",
+        "esi-contracts.read_corporation_contracts.v1",
+        "esi-wallet.read_corporation_wallets.v1",
+        "esi-corporations.read_divisions.v1",
+        "esi-corporations.read_structures.v1",
+        "esi-industry.read_corporation_mining.v1",
     ];
     const JWKS: &[u8] = include_bytes!("../fixtures/jwks.json");
     const RS_DER: &[u8] = include_bytes!("../fixtures/rs256.der");
@@ -297,7 +312,7 @@ mod tests {
             url,
             "https://login.eveonline.com/v2/oauth/authorize?response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A9376%2Feve-means-of-profit&client_id=abc123&scope=esi-assets.read_assets.v1%20esi-wallet.read_character_wallet.v1&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256&state=AAAAAAAAAAAAAAAAAAAAAA"
         );
-        assert_eq!(SCOPES.len(), 17);
+        assert_eq!(SCOPES.len(), 32);
         assert_eq!(SCOPES, EXPECTED_SCOPES);
     }
 
@@ -346,7 +361,7 @@ mod tests {
         assert_eq!(rows["characters"][0]["added_at"], NOW);
         assert_eq!(
             rows["characters"][0]["scopes"].as_array().map(Vec::len),
-            Some(17)
+            Some(32)
         );
         assert_eq!(character.id, CHARACTER);
         assert_eq!(character.login, Login::Ok);
