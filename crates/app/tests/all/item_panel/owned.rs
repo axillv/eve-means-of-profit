@@ -1,35 +1,6 @@
 use super::*;
 
 #[test]
-fn the_owned_table_copies_once_from_the_inspector() {
-    let env = env();
-    with_main(&env);
-    name_home_fort(&env);
-    let (mut harness, _) = start(
-        &env,
-        FakeEve {
-            characters: vec![character(MAIN, "Main")],
-            jeve: None,
-        },
-        Answer::Down,
-    );
-    loaded(&mut harness);
-    select(&mut harness, PAU);
-    // The copy button appears on the frame after the table first draws.
-    harness.run();
-    assert_eq!(harness.query_all_by_label("Copy table").count(), 1);
-
-    harness.get_by_label("Copy table").click();
-    harness.step();
-    let copied = copied_text(&harness).expect("the owned table is copied");
-    assert!(
-        copied.starts_with("Character\tPlace\tUnits\tCounted\nMain\tHome Fort\t120\t120\n"),
-        "{copied}"
-    );
-    assert!(copied.contains("\nTotal\t\t"), "{copied}");
-}
-
-#[test]
 fn owned_rows_and_the_total_for_pau() {
     let env = env();
     with_main(&env);

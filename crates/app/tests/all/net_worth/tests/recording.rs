@@ -552,6 +552,9 @@ fn without_a_download_the_fetched_plex_price_alone_makes_the_copy() {
     let mut harness = start(&dir);
     let plex = FakePlex::page(200, None, &plex_body(false));
     harness.state_mut().shared_mut().plex_http = Arc::new(plex.clone());
+    // Let the start-up read and its one automatic refresh finish before the test changes the
+    // session, so the change is the only refresh this frame records.
+    wait_for_no_request(&mut harness);
     harness
         .state_mut()
         .shared_mut()
@@ -575,6 +578,9 @@ fn without_a_download_a_failed_plex_fetch_saves_no_copy_and_says_so() {
     let mut harness = start(&dir);
     let plex = FakePlex::page(503, None, "");
     harness.state_mut().shared_mut().plex_http = Arc::new(plex.clone());
+    // Let the start-up read and its one automatic refresh finish before the test changes the
+    // session, so the change is the only refresh this frame records.
+    wait_for_no_request(&mut harness);
     harness
         .state_mut()
         .shared_mut()
