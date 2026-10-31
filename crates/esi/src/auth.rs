@@ -15,7 +15,7 @@ use crate::token::{self, AccessToken};
 pub const CALLBACK_PORT: u16 = 9376;
 pub const REDIRECT_URI: &str = "http://localhost:9376/eve-means-of-profit";
 /// The app's public client id from the EVE developer portal. Public by design: native apps log in with PKCE and no secret.
-pub const CLIENT_ID: &str = "96016d6599dd4ee18aac2bfdf86cb448";
+pub const CLIENT_ID: &str = "df70df78146e4ea4ac366538efaf0c23";
 pub const SCOPES: [&str; 32] = [
     "esi-assets.read_assets.v1",
     "esi-universe.read_structures.v1",
