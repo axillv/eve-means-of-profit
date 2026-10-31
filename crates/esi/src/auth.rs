@@ -14,9 +14,9 @@ use crate::token::{self, AccessToken};
 
 pub const CALLBACK_PORT: u16 = 9376;
 pub const REDIRECT_URI: &str = "http://localhost:9376/eve-means-of-profit";
-/// The app's public client id from the EVE developer portal. Empty until it is registered; logins cannot start while it is empty.
-pub const CLIENT_ID: &str = "";
-pub const SCOPES: [&str; 17] = [
+/// The app's public client id from the EVE developer portal. Public by design: native apps log in with PKCE and no secret.
+pub const CLIENT_ID: &str = "96016d6599dd4ee18aac2bfdf86cb448";
+pub const SCOPES: [&str; 32] = [
     "esi-assets.read_assets.v1",
     "esi-universe.read_structures.v1",
     "esi-search.search_structures.v1",
@@ -34,6 +34,21 @@ pub const SCOPES: [&str; 17] = [
     "esi-location.read_location.v1",
     "esi-ui.open_window.v1",
     "esi-ui.write_waypoint.v1",
+    "esi-clones.read_implants.v1",
+    "esi-clones.read_clones.v1",
+    "esi-skills.read_skillqueue.v1",
+    "esi-fittings.read_fittings.v1",
+    "esi-characters.read_agents_research.v1",
+    "esi-characters.read_corporation_roles.v1",
+    "esi-assets.read_corporation_assets.v1",
+    "esi-corporations.read_blueprints.v1",
+    "esi-industry.read_corporation_jobs.v1",
+    "esi-markets.read_corporation_orders.v1",
+    "esi-contracts.read_corporation_contracts.v1",
+    "esi-wallet.read_corporation_wallets.v1",
+    "esi-corporations.read_divisions.v1",
+    "esi-corporations.read_structures.v1",
+    "esi-industry.read_corporation_mining.v1",
 ];
 const AUTHORIZE_URL: &str = "https://login.eveonline.com/v2/oauth/authorize";
 pub const TOKEN_URL: &str = "https://login.eveonline.com/v2/oauth/token";

@@ -1652,16 +1652,16 @@ mod tests {
     }
 
     #[test]
-    fn this_build_has_no_eve_login_and_the_page_knows_it_without_a_hook() {
+    fn this_build_has_an_eve_login_and_the_page_knows_it_without_a_hook() {
         let env = env();
         let eve = FakeEve::new(&env, partial);
         let mut harness = open_with(&env, &eve, false);
         frames(&mut harness);
-        assert!(disabled(&harness, "Add character"));
-        assert!(disabled(&harness, "Log in again"));
+        assert!(!disabled(&harness, "Add character"));
+        assert!(!disabled(&harness, "Log in again"));
         harness.get_by_label("Add character").hover();
         frames(&mut harness);
-        assert!(shown(&harness, "This build has no EVE login yet."));
+        assert!(!shown(&harness, "This build has no EVE login yet."));
         assert_eq!(eve.log(|log| log.begun), 0);
     }
 
