@@ -129,9 +129,10 @@ fn the_rail_groups_the_pages_and_wraps_only_at_spaces() {
         );
     }
 
-    // Every entry is the same width; the rail adds the panel's padding around them.
+    // Every entry is the same width; the rail adds the panel's padding around them and is
+    // 172 px wide.
     let widest = entries.iter().map(|rect| rect.width()).fold(0.0, f32::max);
-    assert!(widest + 16.0 < 140.0, "the rail is under 140 px wide");
+    assert_eq!(widest + 16.0, 172.0, "the rail is 172 px wide");
     assert_eq!(entries[4].width(), widest, "Industry jobs fits its label");
 
     let gap = |above: Rect, below: Rect| below.top() - above.bottom();

@@ -1,9 +1,9 @@
 //! The rail on the left: one entry per shipped page, grouped by what the player does, then the
-//! player's layouts. The entry on show has the accent; a right-click acts on its entry.
+//! player's layouts. The entry on show carries an amber bar; a right-click acts on its entry.
 
 use egui::{
-    Button, Color32, RichText, Sense, Stroke, TextStyle, TextWrapMode, Ui, WidgetInfo, WidgetType,
-    vec2,
+    Align2, Color32, CornerRadius, FontId, Rect, RichText, Sense, Stroke, TextStyle, Ui,
+    WidgetInfo, WidgetType, vec2,
 };
 use egui_phosphor::regular;
 
@@ -12,7 +12,27 @@ use crate::layout::saved::unique_name;
 use crate::theme::Style;
 
 /// Empty space above and below a line between groups.
-const GROUP_SPACE: f32 = 8.0;
+const GROUP_SPACE: f32 = 7.0;
+
+/// The rail's inner margin: 10 above the first entry and 8 at each side.
+const RAIL_MARGIN: egui::Margin = egui::Margin {
+    left: 8,
+    right: 8,
+    top: 10,
+    bottom: 0,
+};
+
+/// The space between an entry's left edge and its icon.
+const ENTRY_PAD: f32 = 10.0;
+
+/// The space between an entry's icon and its label.
+const ENTRY_GAP: f32 = 10.0;
+
+/// The space between two entries.
+const ENTRY_SPACE: f32 = 2.0;
+
+/// The width of the selected entry's bar on its left edge.
+const SELECTED_BAR: f32 = 3.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -104,30 +124,29 @@ fn text_width(ui: &Ui, text: &str) -> f32 {
         .x
 }
 
-/// The space a single word of every label needs, at the Button text size.
-fn widest_word(ui: &Ui) -> f32 {
-    Page::ALL
-        .iter()
-        .flat_map(|page| page.label().split(' '))
-        .map(|word| text_width(ui, word))
-        .fold(0.0, f32::max)
+/// The fill and text colour of a rail entry: the dark amber tint on the page on show, the row
+/// colour on hover, and grey text on the panel otherwise.
+pub(crate) fn entry_colors(style: &Style, selected: bool, hovered: bool) -> (Color32, Color32) {
+    if selected {
+        (style.sel, style.text)
+    } else if hovered {
+        (style.row, style.text)
+    } else {
+        (Color32::TRANSPARENT, style.mute)
+    }
 }
 
-/// The width of the rail: the widest icon, the gap between icon and label, the widest single word
-/// of every label, and the entry and panel padding.
-fn rail_width(ui: &Ui) -> f32 {
-    let icon = Page::ALL
-        .iter()
-        .map(|page| text_width(ui, page.icon()))
-        .fold(0.0, f32::max);
-    let panel_padding = egui::Frame::side_top_panel(ui.style())
-        .total_margin()
-        .sum()
-        .x;
-    icon + ui.spacing().icon_spacing
-        + widest_word(ui)
-        + 2.0 * ui.spacing().button_padding.x
-        + panel_padding
+/// Paints the page on show's mark: a thin amber bar on the left edge of `rect`, with the entry's
+/// left corners rounded.
+pub(crate) fn selected_bar(ui: &Ui, style: &Style, rect: Rect) {
+    let bar = Rect::from_min_size(rect.min, vec2(SELECTED_BAR, rect.height()));
+    let corners = CornerRadius {
+        nw: style.control_radius,
+        sw: style.control_radius,
+        ne: 0,
+        se: 0,
+    };
+    ui.painter().rect_filled(bar, corners, style.accent);
 }
 
 /// Breaks `label` into at most two rows, only at its spaces, filling each row greedily at the
@@ -251,16 +270,12 @@ fn layouts_rail(
     let width = if icons_only {
         style.rail_narrow
     } else {
-        rail_width(ui)
+        style.rail_width
     };
-    let content_width = width
-        - egui::Frame::side_top_panel(ui.style())
-            .total_margin()
-            .sum()
-            .x;
+    let content_width = width - RAIL_MARGIN.sum().x;
     let metrics = Metrics {
         content_width,
-        label_width: widest_word(ui),
+        label_width: (content_width - ENTRY_PAD - style.sizes.rail_icon - ENTRY_GAP).max(0.0),
         icons_only,
     };
     let mut action = None;
@@ -268,7 +283,9 @@ fn layouts_rail(
     egui::Panel::left("rail")
         .exact_size(width)
         .resizable(false)
+        .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(RAIL_MARGIN))
         .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = ENTRY_SPACE;
             if icons_only {
                 ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                     entries(ui, style, shown, names, metrics, &mut action);
@@ -295,7 +312,8 @@ fn divider(ui: &mut Ui, style: &Style) {
     ui.add_space(GROUP_SPACE);
 }
 
-/// Draws one rail entry, accented when it is the one on show, and returns its response.
+/// Draws one rail entry, with the page on show's bar when it is selected, and returns its
+/// response.
 fn entry_button(
     ui: &mut Ui,
     style: &Style,
@@ -305,26 +323,36 @@ fn entry_button(
     hover: &str,
     selected: bool,
 ) -> egui::Response {
-    let (fill, text) = if selected {
-        (style.accent, style.on_accent)
+    let size = vec2(metrics.content_width, style.sizes.rail_row);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let (fill, text) = entry_colors(style, selected, response.hovered());
+    let painter = ui.painter();
+    painter.rect_filled(rect, style.control_radius, fill);
+    let icon_font = FontId::proportional(style.sizes.rail_icon);
+    if metrics.icons_only {
+        painter.text(rect.center(), Align2::CENTER_CENTER, icon, icon_font, text);
     } else {
-        (style.row, style.text)
-    };
-    let drawn = if metrics.icons_only {
-        Button::new(RichText::new(icon).color(text))
-    } else {
+        painter.text(
+            egui::pos2(rect.left() + ENTRY_PAD, rect.center().y),
+            Align2::LEFT_CENTER,
+            icon,
+            icon_font,
+            text,
+        );
+        let label_x = rect.left() + ENTRY_PAD + style.sizes.rail_icon + ENTRY_GAP;
         let rows = label_rows(ui, label, metrics.label_width).join("\n");
-        Button::new((
-            RichText::new(icon).color(text),
-            RichText::new(rows).color(text),
-        ))
-    };
-    let button = drawn
-        .fill(fill)
-        .corner_radius(style.control_radius)
-        .wrap_mode(TextWrapMode::Extend)
-        .min_size(vec2(metrics.content_width, 40.0));
-    let response = ui.add(button);
+        let galley = painter.layout(
+            rows,
+            TextStyle::Body.resolve(ui.style()),
+            text,
+            metrics.label_width,
+        );
+        let label_y = rect.center().y - galley.size().y / 2.0;
+        painter.galley(egui::pos2(label_x, label_y), galley, text);
+    }
+    if selected {
+        selected_bar(ui, style, rect);
+    }
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
     if metrics.icons_only || hover != label {
         response.on_hover_text(hover)
@@ -613,6 +641,88 @@ mod tests {
         type_name(harness, text);
         click(harness, "Rename");
         harness.state().action.clone()
+    }
+
+    /// Whether two lengths are the same to within a fraction of a pixel.
+    fn near(actual: f32, expected: f32) -> bool {
+        (actual - expected).abs() < 0.01
+    }
+
+    /// The rects painted with `fill`, the rail's selected bar among them.
+    fn filled_rects(harness: &Harness<'_, Rail>, fill: Color32) -> Vec<Rect> {
+        fn collect(shape: &egui::Shape, fill: Color32, rects: &mut Vec<Rect>) {
+            if let egui::Shape::Vec(shapes) = shape {
+                for shape in shapes {
+                    collect(shape, fill, rects);
+                }
+            }
+            if let egui::Shape::Rect(rect) = shape
+                && rect.fill == fill
+            {
+                rects.push(rect.rect);
+            }
+        }
+        let mut rects = Vec::new();
+        for clipped in &harness.output().shapes {
+            collect(&clipped.shape, fill, &mut rects);
+        }
+        rects
+    }
+
+    #[test]
+    fn entry_colors_mark_the_page_on_show_and_the_entry_under_the_pointer() {
+        let style = Style::eve_dense();
+        assert_eq!(entry_colors(&style, true, false), (style.sel, style.text));
+        assert_eq!(entry_colors(&style, true, true), (style.sel, style.text));
+        assert_eq!(entry_colors(&style, false, true), (style.row, style.text));
+        assert_eq!(
+            entry_colors(&style, false, false),
+            (Color32::TRANSPARENT, style.mute)
+        );
+    }
+
+    #[test]
+    fn a_rail_entry_is_34_tall_and_156_wide() {
+        let mut harness = rail(Shown::Page(Page::Build), &[]);
+        harness.run_steps(2);
+        let rect = harness.get_by_label(Page::Build.label()).rect();
+        assert!(near(rect.height(), 34.0), "{} tall", rect.height());
+        assert!(near(rect.width(), 156.0), "{} wide", rect.width());
+    }
+
+    #[test]
+    fn the_page_on_show_has_a_thin_amber_bar_on_the_left_of_its_entry() {
+        let style = Style::eve_dense();
+        let mut build = rail(Shown::Page(Page::Build), &[]);
+        build.run_steps(2);
+        let entry = build.get_by_label(Page::Build.label()).rect();
+        let bars = filled_rects(&build, style.accent);
+        assert_eq!(bars.len(), 1, "one amber bar on the rail");
+        let bar = bars[0];
+        assert!(near(bar.width(), 3.0), "{} wide", bar.width());
+        assert!(near(bar.height(), 34.0), "{} tall", bar.height());
+        assert!(near(bar.left(), entry.left()), "on the entry's left edge");
+        assert!(near(bar.top(), entry.top()), "on the entry's top edge");
+
+        let mut today = rail(Shown::Page(Page::Today), &[]);
+        today.run_steps(2);
+        let build_entry = today.get_by_label(Page::Build.label()).rect();
+        assert!(
+            !filled_rects(&today, style.accent)
+                .iter()
+                .any(|bar| near(bar.top(), build_entry.top())),
+            "Build has no amber bar while Today is on show"
+        );
+    }
+
+    #[test]
+    fn a_full_label_fits_the_entry_on_one_row() {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(Default::default(), |ui| {
+            assert_eq!(label_rows(ui, "What to build", 118.0), ["What to build"]);
+            assert_eq!(label_rows(ui, "Industry jobs", 118.0), ["Industry jobs"]);
+        });
+        output.drop_without_applying_deltas();
     }
 
     #[test]
