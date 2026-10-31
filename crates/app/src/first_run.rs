@@ -1,11 +1,13 @@
-//! The first-run screen: checking, downloading and importing the game data, and the two ways it
-//! can stop short (cancelled, or failed).
+//! The first-run screens: checking, downloading and importing the game data, the welcome that
+//! offers trying without a login or importing from jEve, and the two ways a start can stop short
+//! (cancelled, or failed).
 
 use egui::{ProgressBar, RichText, Ui};
 
 use crate::theme::Style;
 
-/// Where the start-up is. [`Startup::Ready`] means the pages can be shown.
+/// Where the start-up is. [`Startup::Welcome`] offers the first choice after a first download;
+/// [`Startup::Ready`] means the pages can be shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Startup {
     Checking,
@@ -19,6 +21,7 @@ pub enum Startup {
     },
     Cancelled,
     Failed(String),
+    Welcome,
     Ready,
 }
 
@@ -27,7 +30,13 @@ pub enum Startup {
 pub enum Reply {
     Cancel,
     TryAgain,
+    TryWithoutLogin,
+    ImportFromJeve,
 }
+
+/// The line under a start that is still getting the game data.
+const WAITING_HINT: &str =
+    "When the game data is ready, try without logging in or import from jEve.";
 
 /// Draws the screen for a start-up that is not ready yet, and reports a button press.
 pub fn show(ui: &mut Ui, style: &Style, startup: &Startup) -> Option<Reply> {
@@ -61,10 +70,43 @@ pub fn show(ui: &mut Ui, style: &Style, startup: &Startup) -> Option<Reply> {
                     reply = Some(Reply::TryAgain);
                 }
             }
+            Startup::Welcome => {
+                ui.heading("Welcome to EVE Means of Profit");
+                ui.label("No EVE login is needed.");
+                ui.add_space(6.0);
+                if ui.button("Try without logging in").clicked() {
+                    reply = Some(Reply::TryWithoutLogin);
+                }
+                ui.label(muted(style, "Product, quantity, paste what you own, buy list."));
+                ui.add_space(6.0);
+                if ui.button("Import from jEve").clicked() {
+                    reply = Some(Reply::ImportFromJeve);
+                }
+                ui.label(muted(
+                    style,
+                    "jEve's characters now; import its history on Net worth and its stockpiles on Stockpiles.",
+                ));
+                ui.add_space(6.0);
+                ui.label(
+                    "Next: log in on Characters for live data, paste your stock on Build, and pick your facility in Settings.",
+                );
+            }
             Startup::Ready => {}
+        }
+        if matches!(
+            startup,
+            Startup::Checking | Startup::Downloading { .. } | Startup::Importing { .. }
+        ) {
+            ui.add_space(6.0);
+            ui.label(muted(style, WAITING_HINT));
         }
     });
     reply
+}
+
+/// Words that explain a button without being part of it.
+fn muted(style: &Style, text: &str) -> RichText {
+    RichText::new(text).color(style.mute)
 }
 
 /// "<done> of <total> MB", or "<done> MB" while the total is not known.

@@ -892,7 +892,8 @@ impl App {
         }
         match self.startup {
             Startup::Ready => self.pages(ui),
-            Startup::Checking
+            Startup::Welcome
+            | Startup::Checking
             | Startup::Downloading { .. }
             | Startup::Importing { .. }
             | Startup::Cancelled
@@ -1498,6 +1499,14 @@ impl App {
         match reply {
             Some(Reply::Cancel) => self.cancel.store(true, Ordering::Relaxed),
             Some(Reply::TryAgain) => self.start_first_run(),
+            Some(Reply::TryWithoutLogin) => {
+                self.startup = Startup::Ready;
+                self.go_to(Page::Build);
+            }
+            Some(Reply::ImportFromJeve) => {
+                self.startup = Startup::Ready;
+                self.go_to(Page::Characters);
+            }
             None => {}
         }
     }
@@ -1668,7 +1677,7 @@ impl App {
                             .notices
                             .push(Notice::info(format!("Game data updated to build {build}.")));
                     } else {
-                        self.startup = Startup::Ready;
+                        self.startup = Startup::Welcome;
                     }
                 }
                 Err(error) if update => {

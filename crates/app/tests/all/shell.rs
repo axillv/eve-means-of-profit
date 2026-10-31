@@ -368,6 +368,16 @@ mod tests {
             .all(|panel| shown(harness, panel))
     }
 
+    /// Finishes a first run: the app starts on Today, waits for the welcome, then takes
+    /// `Try without logging in`.
+    fn finish_first_run(harness: &mut Harness<'_, App>) {
+        harness.state_mut().show_page(Page::Today);
+        until(harness, "the welcome", |h| {
+            shown(h, "Welcome to EVE Means of Profit")
+        });
+        harness.get_by_label("Try without logging in").click();
+    }
+
     /// The app's current zoom factor, which shows the interface size.
     fn zoom(harness: &Harness<'_, App>) -> f32 {
         harness.ctx.zoom_factor()
@@ -488,12 +498,17 @@ mod tests {
     }
 
     #[test]
-    fn the_first_run_downloads_imports_and_then_shows_the_pages() {
+    fn the_first_run_downloads_imports_and_then_shows_the_welcome() {
         let folders = Folders::new();
-        let fake = Fake::new(Latest::Body(latest_body(BUILD)));
+        let (release, gate) = mpsc::channel();
+        let fake = Fake::new(Latest::Body(latest_body(BUILD))).held(1, gate);
         let mut harness = start(fake, &folders);
         harness.run_steps(1);
         assert!(shown(&harness, "Checking for game data…"));
+        assert!(shown(
+            &harness,
+            "When the game data is ready, try without logging in or import from jEve."
+        ));
 
         until(&mut harness, "the download", |h| {
             shown(h, "Getting the game data")
@@ -501,13 +516,73 @@ mod tests {
                     .next()
                     .is_some()
         });
-        until(&mut harness, "the build pages", |h| {
-            shown(h, "Build") && build_page_shown(h)
+        assert!(shown(
+            &harness,
+            "When the game data is ready, try without logging in or import from jEve."
+        ));
+        release
+            .send(())
+            .expect("the download is waiting for the release");
+
+        until(&mut harness, "the welcome", |h| {
+            shown(h, "Welcome to EVE Means of Profit")
         });
+        for text in [
+            "Welcome to EVE Means of Profit",
+            "No EVE login is needed.",
+            "Try without logging in",
+            "Product, quantity, paste what you own, buy list.",
+            "Import from jEve",
+            "jEve's characters now; import its history on Net worth and its stockpiles on Stockpiles.",
+            "Next: log in on Characters for live data, paste your stock on Build, and pick your facility in Settings.",
+        ] {
+            assert!(shown(&harness, text), "{text}");
+        }
+        assert!(!shown(
+            &harness,
+            "When the game data is ready, try without logging in or import from jEve."
+        ));
 
         assert!(folders.sde_db().is_file());
         let mut store = Store::open(&folders.user_db(), NOW).unwrap().store;
         assert_eq!(store.settings().unwrap().last_sde_check, Some(NOW));
+    }
+
+    #[test]
+    fn try_without_logging_in_from_the_welcome_opens_build() {
+        let folders = Folders::new();
+        let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
+        until(&mut harness, "the welcome", |h| {
+            shown(h, "Welcome to EVE Means of Profit")
+        });
+        finish_first_run(&mut harness);
+        until(&mut harness, "the build pages", build_page_shown);
+        assert!(!shown(&harness, "Welcome to EVE Means of Profit"));
+    }
+
+    #[test]
+    fn import_from_jeve_from_the_welcome_opens_characters() {
+        let folders = Folders::new();
+        let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
+        until(&mut harness, "the welcome", |h| {
+            shown(h, "Welcome to EVE Means of Profit")
+        });
+        harness.state_mut().show_page(Page::Today);
+        harness.get_by_label("Import from jEve").click();
+        until(&mut harness, "the characters page", |h| {
+            shown(h, "jEve data") && shown(h, "No jEve data file found.")
+        });
+        assert!(!shown(&harness, "Welcome to EVE Means of Profit"));
+    }
+
+    #[test]
+    fn a_later_start_shows_the_build_pages_without_the_welcome() {
+        let folders = Folders::new();
+        folders.install_game_data();
+        folders.set_last_check(990_000);
+        let mut harness = start(Fake::new(Latest::Body(latest_body(BUILD))), &folders);
+        until(&mut harness, "the build pages", build_page_shown);
+        assert!(!shown(&harness, "Welcome to EVE Means of Profit"));
     }
 
     #[test]
@@ -619,6 +694,10 @@ mod tests {
             shown(h, "Download cancelled.")
         });
         harness.get_by_label("Try again").click();
+        until(&mut harness, "the welcome", |h| {
+            shown(h, "Welcome to EVE Means of Profit")
+        });
+        finish_first_run(&mut harness);
         until(&mut harness, "the build pages", build_page_shown);
         assert!(folders.sde_db().is_file());
     }
@@ -1465,6 +1544,10 @@ mod tests {
         release
             .send(())
             .expect("the download is waiting for the release");
+        until(&mut harness, "the welcome", |h| {
+            shown(h, "Welcome to EVE Means of Profit")
+        });
+        finish_first_run(&mut harness);
         until(&mut harness, "the build pages", build_page_shown);
     }
 
@@ -1484,7 +1567,14 @@ mod tests {
         release
             .send(())
             .expect("the download is waiting for the release");
+        until(&mut harness, "the welcome", |h| {
+            shown(h, "Welcome to EVE Means of Profit")
+        });
+        harness.snapshot("shell-first-run-welcome");
+        finish_first_run(&mut harness);
         until(&mut harness, "the build pages", build_page_shown);
+        harness.remove_cursor();
+        harness.run();
         harness.snapshot("shell-build-empty");
         harness.get_by_label(Page::Setup.label()).click();
         until(&mut harness, "the setup panels", |h| shown(h, "Price rule"));
@@ -1533,6 +1623,10 @@ mod tests {
         release
             .send(())
             .expect("the download is waiting for the release");
+        until(&mut harness, "the welcome", |h| {
+            shown(h, "Welcome to EVE Means of Profit")
+        });
+        finish_first_run(&mut harness);
         until(&mut harness, "the build pages", build_page_shown);
     }
 
