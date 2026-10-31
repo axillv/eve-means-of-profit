@@ -254,8 +254,13 @@ fn chosen_target(choice: &Choice, count: usize, name: &str) -> (Target, usize) {
     }
 }
 
-/// Adds the outcome's panel to the layout it names. A new layout takes the first free name; the
-/// caller saves the result.
+/// Whether the layout under `root` holds a tab equal to `slot`.
+fn holds(root: Option<&Node>, slot: &Slot) -> bool {
+    root.is_some_and(|root| root.slots().contains(&slot))
+}
+
+/// Adds the outcome's panel to the layout it names. A new layout takes the first free name; an
+/// existing layout refuses a tab it already holds. The caller saves the result.
 pub fn add(layouts: &mut Vec<Layout>, outcome: Outcome, panel_name: &str) -> (usize, Notice) {
     let Outcome { target, slot } = outcome;
     match target {
@@ -278,6 +283,12 @@ pub fn add(layouts: &mut Vec<Layout>, outcome: Outcome, panel_name: &str) -> (us
                 return (index, Notice::error("That layout is no longer there."));
             };
             let name = layout.name.clone();
+            if holds(layout.root.as_ref(), &slot) {
+                return (
+                    index,
+                    Notice::error(format!("{panel_name} is already in \"{name}\".")),
+                );
+            }
             match layout.root.take() {
                 None => layout.root = Some(Node::Panel(slot)),
                 Some(old) => {
@@ -371,6 +382,84 @@ mod tests {
             "Buy list",
         );
         assert_eq!(empty[0].root, Some(Node::Panel(buy_list())));
+    }
+
+    #[test]
+    fn an_existing_layout_refuses_a_panel_it_already_holds() {
+        let mut layouts = vec![Layout {
+            name: "Daily industry".to_owned(),
+            root: Some(Node::Split {
+                dir: Dir::Right,
+                percent: 50,
+                first: Box::new(Node::Panel(buy_list())),
+                second: Box::new(Node::Panel(slot("build.steps", Binding::PinPlan(1)))),
+            }),
+        }];
+        let before = text_part(&layouts, 0);
+        let (index, notice) = add(
+            &mut layouts,
+            Outcome {
+                target: Target::Existing(0),
+                slot: buy_list(),
+            },
+            "Buy list",
+        );
+        assert_eq!(index, 0);
+        assert_eq!(
+            notice,
+            Notice::error("Buy list is already in \"Daily industry\".")
+        );
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(text_part(&layouts, 0), before);
+        assert_eq!(
+            text_part(&layouts, 0),
+            "split right 50%\n  Buy list\n  Steps [pinned plan 1]\n"
+        );
+    }
+
+    #[test]
+    fn a_tabs_layout_refuses_a_panel_it_already_holds() {
+        let tabs = Node::Tabs(vec![buy_list(), slot("build.steps", Binding::PinPlan(1))]);
+        let mut layouts = vec![Layout {
+            name: "Ideas".to_owned(),
+            root: Some(tabs.clone()),
+        }];
+        let (index, notice) = add(
+            &mut layouts,
+            Outcome {
+                target: Target::Existing(0),
+                slot: buy_list(),
+            },
+            "Buy list",
+        );
+        assert_eq!(index, 0);
+        assert_eq!(notice, Notice::error("Buy list is already in \"Ideas\"."));
+        assert_eq!(layouts[0].root, Some(tabs));
+    }
+
+    #[test]
+    fn another_binding_is_a_distinct_tab() {
+        let mut layouts = vec![Layout {
+            name: "Ideas".to_owned(),
+            root: Some(Node::Tabs(vec![
+                buy_list(),
+                slot("build.steps", Binding::PinPlan(1)),
+            ])),
+        }];
+        let (index, notice) = add(
+            &mut layouts,
+            Outcome {
+                target: Target::Existing(0),
+                slot: slot("build.buy_list", Binding::PinPlan(1)),
+            },
+            "Buy list",
+        );
+        assert_eq!(index, 0);
+        assert_eq!(notice, Notice::info("Added Buy list to \"Ideas\"."));
+        assert_eq!(
+            text_part(&layouts, 0),
+            "split right 50%\n  tabs\n    Buy list\n    Steps [pinned plan 1]\n  Buy list [pinned plan 1]\n"
+        );
     }
 
     #[test]
