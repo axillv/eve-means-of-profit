@@ -4,8 +4,9 @@
 use std::sync::Arc;
 
 use egui::{
-    Color32, CornerRadius, FontId, Galley, Rect, Response, RichText, Sense, Stroke, StrokeKind,
-    TextStyle, TextWrapMode, Ui, WidgetInfo, WidgetText, WidgetType, vec2,
+    Align, Color32, CornerRadius, FontId, Frame, Galley, Layout, Rect, Response, RichText, Sense,
+    Stroke, StrokeKind, TextStyle, TextWrapMode, Ui, UiBuilder, WidgetInfo, WidgetText, WidgetType,
+    vec2,
 };
 
 use crate::theme::Style;
@@ -141,6 +142,144 @@ pub fn tag(ui: &mut Ui, style: &Style, text: &str, tone: Tone) -> Response {
     paint_centered(ui, rect, galley, color);
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, ui.is_enabled(), text));
     response
+}
+
+/// The page frame: no fill, the page margins around `add`, laid out downwards.
+pub fn page<R>(ui: &mut Ui, style: &Style, add: impl FnOnce(&mut Ui) -> R) -> R {
+    Frame::new()
+        .inner_margin(vec2(style.sizes.page_margin_x, style.sizes.page_margin_y))
+        .show(ui, |ui| ui.vertical(add).inner)
+        .inner
+}
+
+/// The title row of a page: the title and the line under it.
+#[derive(Debug, Clone, Copy)]
+pub struct Header<'a> {
+    /// The page title.
+    pub title: &'a str,
+    /// The grey line beside the title, e.g. when the page was refreshed.
+    pub sub: Option<&'a str>,
+}
+
+/// Draws the page title row with `actions` at its right end, then the gap under it.
+pub fn page_header(ui: &mut Ui, style: &Style, header: Header<'_>, actions: impl FnOnce(&mut Ui)) {
+    // The row and its gap are exact: neither inserts the layout's item spacing.
+    let spacing = ui.spacing().item_spacing;
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let (rect, _) = ui.allocate_exact_size(
+        vec2(ui.available_width(), style.sizes.page_header),
+        Sense::hover(),
+    );
+    {
+        let mut row = ui.new_child(
+            UiBuilder::new()
+                .max_rect(rect)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        row.spacing_mut().item_spacing.x = 14.0;
+        row.label(RichText::new(header.title).heading().strong());
+        if let Some(sub) = header.sub {
+            row.label(RichText::new(sub).color(style.mute));
+        }
+        row.with_layout(Layout::right_to_left(Align::Center), |ui| actions(ui));
+    }
+    ui.add_space(style.sizes.page_header_gap);
+    ui.spacing_mut().item_spacing.y = spacing.y;
+}
+
+/// The title row of a sheet: the title and the grey count after it.
+#[derive(Debug, Clone, Copy)]
+pub struct SheetHeader<'a> {
+    /// The card title.
+    pub title: &'a str,
+    /// The grey words after the title, e.g. "2 ready to deliver".
+    pub count: Option<&'a str>,
+}
+
+/// Draws the sheet title row with `right` content at its right end, then the line under it.
+pub fn sheet_header(
+    ui: &mut Ui,
+    style: &Style,
+    header: SheetHeader<'_>,
+    right: impl FnOnce(&mut Ui),
+) {
+    // The row and the line are exact: neither inserts the layout's item spacing.
+    let spacing = ui.spacing().item_spacing;
+    ui.spacing_mut().item_spacing.y = 0.0;
+    sheet_title_row(ui, style, header, right);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter().hline(
+        rect.left()..=rect.right(),
+        rect.center().y,
+        Stroke::new(1.0, style.line),
+    );
+    ui.spacing_mut().item_spacing.y = spacing.y;
+}
+
+/// A card: the sheet frame with its title row and `body` under it.
+pub fn sheet<R>(
+    ui: &mut Ui,
+    style: &Style,
+    header: SheetHeader<'_>,
+    right: impl FnOnce(&mut Ui),
+    body: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    sheet_frame(style)
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                sheet_header(ui, style, header, right);
+                body(ui)
+            })
+            .inner
+        })
+        .inner
+}
+
+/// A card with no body: only its title row, without the line under it.
+pub fn folded_sheet(
+    ui: &mut Ui,
+    style: &Style,
+    header: SheetHeader<'_>,
+    right: impl FnOnce(&mut Ui),
+) {
+    sheet_frame(style).show(ui, |ui| {
+        ui.vertical(|ui| {
+            sheet_title_row(ui, style, header, right);
+        });
+    });
+}
+
+/// The frame every card sits in: panel fill, a one point outline and the sheet radius.
+fn sheet_frame(style: &Style) -> Frame {
+    Frame::new()
+        .fill(style.panel)
+        .stroke(Stroke::new(1.0, style.line))
+        .corner_radius(CornerRadius::same(style.radius))
+}
+
+/// The 38 px title row of a sheet, inset by the sheet padding, without a line under it.
+fn sheet_title_row(
+    ui: &mut Ui,
+    style: &Style,
+    header: SheetHeader<'_>,
+    right: impl FnOnce(&mut Ui),
+) {
+    let (rect, _) = ui.allocate_exact_size(
+        vec2(ui.available_width(), style.sizes.sheet_header),
+        Sense::hover(),
+    );
+    let inner = rect.shrink2(vec2(style.sizes.sheet_pad, 0.0));
+    let mut row = ui.new_child(
+        UiBuilder::new()
+            .max_rect(inner)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    row.spacing_mut().item_spacing.x = 10.0;
+    row.label(RichText::new(header.title).strong());
+    if let Some(count) = header.count {
+        row.label(RichText::new(count).color(style.mute));
+    }
+    row.with_layout(Layout::right_to_left(Align::Center), |ui| right(ui));
 }
 
 /// Lays `text` out on one line, strong for the main button.
@@ -289,5 +428,142 @@ mod tests {
         harness.run_steps(2);
         assert_eq!(harness.get_by_label("Sell…").rect().height(), 24.0);
         assert_eq!(harness.get_by_label("Copy multibuy").rect().height(), 28.0);
+    }
+
+    fn page_harness() -> (Harness<'static>, Rc<Cell<Rect>>) {
+        let style = Style::eve_dense();
+        let top = Rc::new(Cell::new(Rect::NOTHING));
+        let top_out = Rc::clone(&top);
+        let harness = Harness::builder()
+            .with_size(vec2(800.0, 400.0))
+            .build_ui(move |ui| {
+                style.apply(ui.ctx());
+                top_out.set(ui.available_rect_before_wrap());
+                page(ui, &style, |ui| {
+                    ui.label("first");
+                });
+            });
+        (harness, top)
+    }
+
+    #[test]
+    fn the_page_insets_its_content_by_the_page_margins() {
+        let (mut harness, top) = page_harness();
+        harness.run_steps(2);
+        let rect = harness.get_by_label("first").rect();
+        assert_eq!(rect.left(), top.get().left() + 16.0);
+        assert_eq!(rect.top(), top.get().top() + 12.0);
+    }
+
+    #[test]
+    fn the_page_header_draws_its_parts_and_its_gap() {
+        let style = Style::eve_dense();
+        let top = Rc::new(Cell::new(Rect::NOTHING));
+        let top_out = Rc::clone(&top);
+        let mut harness = Harness::builder()
+            .with_size(vec2(800.0, 400.0))
+            .build_ui(move |ui| {
+                style.apply(ui.ctx());
+                top_out.set(ui.available_rect_before_wrap());
+                page_header(
+                    ui,
+                    &style,
+                    Header {
+                        title: "Today",
+                        sub: Some("Refreshed 18:30 EVE time, 12 min ago"),
+                    },
+                    |ui| {
+                        add_button(ui, &style, "Refresh all", ButtonKind::Act);
+                    },
+                );
+                ui.label("after");
+            });
+        harness.run_steps(2);
+
+        assert!(harness.query_by_label("Today").is_some());
+        assert!(
+            harness
+                .query_by_label("Refreshed 18:30 EVE time, 12 min ago")
+                .is_some()
+        );
+        assert!(harness.query_by_label("Refresh all").is_some());
+        assert_eq!(
+            harness.get_by_label("after").rect().top(),
+            top.get().top() + 44.0
+        );
+        assert_eq!(
+            harness.get_by_label("Refresh all").rect().right(),
+            top.get().right()
+        );
+    }
+
+    #[test]
+    fn a_sheet_draws_its_header_and_body_at_the_mock_up_offsets() {
+        let style = Style::eve_dense();
+        let top = Rc::new(Cell::new(Rect::NOTHING));
+        let top_out = Rc::clone(&top);
+        let mut harness = Harness::builder()
+            .with_size(vec2(800.0, 400.0))
+            .build_ui(move |ui| {
+                style.apply(ui.ctx());
+                top_out.set(ui.available_rect_before_wrap());
+                sheet(
+                    ui,
+                    &style,
+                    SheetHeader {
+                        title: "Jobs",
+                        count: Some("2 ready to deliver"),
+                    },
+                    |_ui| {},
+                    |ui| {
+                        ui.label("body");
+                    },
+                );
+            });
+        harness.run_steps(2);
+
+        assert!(harness.query_by_label("Jobs").is_some());
+        assert!(harness.query_by_label("2 ready to deliver").is_some());
+        assert_eq!(
+            harness.get_by_label("body").rect().top(),
+            top.get().top() + 40.0
+        );
+        assert_eq!(
+            harness.get_by_label("body").rect().left(),
+            top.get().left() + 1.0
+        );
+        assert_eq!(
+            harness.get_by_label("Jobs").rect().left(),
+            top.get().left() + 1.0 + 14.0
+        );
+    }
+
+    #[test]
+    fn a_folded_sheet_is_only_its_title_row() {
+        let style = Style::eve_dense();
+        let height = Rc::new(Cell::new(0.0));
+        let height_out = Rc::clone(&height);
+        let mut harness = Harness::builder()
+            .with_size(vec2(800.0, 400.0))
+            .build_ui(move |ui| {
+                style.apply(ui.ctx());
+                let response = ui.scope(|ui| {
+                    folded_sheet(
+                        ui,
+                        &style,
+                        SheetHeader {
+                            title: "Orders",
+                            count: Some("nothing beaten"),
+                        },
+                        |_ui| {},
+                    );
+                });
+                height_out.set(response.response.rect.height());
+            });
+        harness.run_steps(2);
+
+        assert!(harness.query_by_label("Orders").is_some());
+        assert!(harness.query_by_label("nothing beaten").is_some());
+        assert_eq!(height.get(), 40.0);
     }
 }
