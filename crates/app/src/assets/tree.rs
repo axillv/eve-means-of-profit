@@ -566,6 +566,8 @@ fn footer(rule: PriceRule, published_at: Option<i64>, now: i64) -> String {
     let Some(published_at) = published_at else {
         return "No market prices yet.".to_owned();
     };
+    // A floor at 0 is meant here: a file time later than now has no age to show, and age_text
+    // prints a future time as 0 s.
     let age = age_text(now.saturating_sub(published_at));
     format!("Prices: {} · file made {age} ago", price_text(rule))
 }

@@ -368,6 +368,8 @@ fn grouped_rows(
             .cmp(&b.1.to_lowercase())
             .then_with(|| a.0.cmp(&b.0))
     });
+    // Cannot saturate: order holds at most one group per entry, so the sum is at most twice
+    // entries.len(), far below usize::MAX.
     let mut rows = Vec::with_capacity(entries.len().saturating_add(order.len()));
     let mut index = HashMap::new();
     let mut groups = HashMap::new();
@@ -1085,6 +1087,8 @@ fn oldest_text(updates: &[Option<i64>], now: i64) -> String {
         oldest = Some(oldest.map_or(update, |oldest: i64| oldest.min(update)));
     }
     match oldest {
+        // A floor at 0 is meant here: a stored time later than now has no age to show, and
+        // age_text prints a future time as 0 s.
         Some(oldest) => format!("Oldest data: {}", age_text(now.saturating_sub(oldest))),
         None => "Oldest data: never".to_owned(),
     }
