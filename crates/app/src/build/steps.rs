@@ -578,7 +578,7 @@ fn decided_figure(
         }
         AttemptRule::Confidence(rate) => format!(
             "You: attempts are enough to be {}% sure of every copy (set in Settings).",
-            rate.ppm() / 10_000
+            rate.to_percent_string()
         ),
     };
     Figure {
@@ -1644,6 +1644,26 @@ mod tests {
             .hover,
             "You: attempts are enough to be 90% sure of every copy (set in Settings)."
         );
+        for (ppm, percent) in [
+            (905_000, "90.5"),
+            (950_000, "95"),
+            (990_000, "99"),
+            (999_999, "99.9999"),
+            (1, "0.0001"),
+        ] {
+            assert_eq!(
+                decided_figure(
+                    &view,
+                    AttemptRule::Confidence(mop_core::money::Rate::from_ppm(ppm)),
+                    None,
+                    &mut notices
+                )
+                .hover,
+                format!(
+                    "You: attempts are enough to be {percent}% sure of every copy (set in Settings)."
+                )
+            );
+        }
     }
 
     #[test]
