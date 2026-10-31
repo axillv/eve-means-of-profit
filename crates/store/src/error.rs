@@ -27,6 +27,8 @@ pub enum StoreError {
     InvalidStockpile(String),
     /// A plan's stock source the store will not keep, with the reason the user can read.
     InvalidPlanStock(String),
+    /// A plan's product list the store will not keep, with the reason the user can read.
+    InvalidPlanProducts(String),
     /// Facility costs or fee settings the store will not keep, with the reason the user can read.
     InvalidCosts(String),
     /// A market's price history retention the store will not keep, with the reason the user can read.
@@ -55,6 +57,7 @@ impl fmt::Display for StoreError {
             Self::NotAStructure(id) => write!(f, "{id} is not a structure"),
             Self::InvalidStockpile(reason)
             | Self::InvalidPlanStock(reason)
+            | Self::InvalidPlanProducts(reason)
             | Self::InvalidCosts(reason)
             | Self::InvalidRetention(reason) => {
                 write!(f, "{reason}")
@@ -83,6 +86,7 @@ impl std::error::Error for StoreError {
             | Self::NotAStructure(_)
             | Self::InvalidStockpile(_)
             | Self::InvalidPlanStock(_)
+            | Self::InvalidPlanProducts(_)
             | Self::InvalidCosts(_)
             | Self::InvalidRetention(_)
             | Self::Duplicate

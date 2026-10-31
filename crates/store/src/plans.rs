@@ -297,19 +297,19 @@ fn stored_products(tx: &Transaction<'_>, plan_id: i64) -> Result<Vec<(i64, i64)>
 /// before anything is written, and gives the first product, which the plan's columns follow.
 fn check_products(products: &[PlanProduct]) -> Result<PlanProduct> {
     let Some(first) = products.first().copied() else {
-        return Err(StoreError::InvalidPlanStock(
+        return Err(StoreError::InvalidPlanProducts(
             "a plan needs at least one product".to_owned(),
         ));
     };
     let mut listed = BTreeSet::new();
     for product in products {
         if product.quantity == 0 {
-            return Err(StoreError::InvalidPlanStock(
+            return Err(StoreError::InvalidPlanProducts(
                 "a quantity must be at least one".to_owned(),
             ));
         }
         if !listed.insert(product.type_id) {
-            return Err(StoreError::InvalidPlanStock(
+            return Err(StoreError::InvalidPlanProducts(
                 "each product appears once".to_owned(),
             ));
         }
@@ -908,17 +908,17 @@ mod tests {
 
         assert!(matches!(
             store.set_plan_products(id, &[], 3_000),
-            Err(StoreError::InvalidPlanStock(reason))
+            Err(StoreError::InvalidPlanProducts(reason))
                 if reason == "a plan needs at least one product"
         ));
         assert!(matches!(
             store.set_plan_products(id, &[product(PRODUCT, 0)], 3_000),
-            Err(StoreError::InvalidPlanStock(reason))
+            Err(StoreError::InvalidPlanProducts(reason))
                 if reason == "a quantity must be at least one"
         ));
         assert!(matches!(
             store.set_plan_products(id, &[product(PRODUCT, 1), product(PRODUCT, 2)], 3_000),
-            Err(StoreError::InvalidPlanStock(reason))
+            Err(StoreError::InvalidPlanProducts(reason))
                 if reason == "each product appears once"
         ));
 
