@@ -41,16 +41,6 @@ impl Picture {
     }
 }
 
-/// The image server address of `picture`.
-pub fn url(picture: Picture) -> String {
-    picture.url()
-}
-
-/// The name `picture` is kept under.
-pub fn file_name(picture: Picture) -> String {
-    picture.file_name()
-}
-
 /// The path `picture` is kept at inside `dir`.
 pub fn cache_path(dir: impl AsRef<Path>, picture: Picture) -> PathBuf {
     dir.as_ref().join(picture.file_name())
@@ -190,7 +180,7 @@ pub fn show(ui: &mut Ui, picture: Picture, size: f32) -> Response {
     let ctx = ui.ctx().clone();
     let thread_state = Arc::clone(&state);
     std::thread::spawn(move || {
-        let result = fetch.get(&url(picture));
+        let result = fetch.get(&picture.url());
         if let Ok(mut state) = thread_state.lock() {
             state.pending.remove(&picture);
             match &result {
@@ -303,7 +293,7 @@ mod tests {
     #[test]
     fn a_type_picture_has_the_icon_address_and_name() {
         assert_eq!(
-            url(Picture::Type(34)),
+            Picture::Type(34).url(),
             "https://images.evetech.net/types/34/icon"
         );
         assert_eq!(
@@ -315,11 +305,11 @@ mod tests {
     #[test]
     fn a_character_picture_has_the_portrait_name() {
         assert_eq!(
-            file_name(Picture::Character(90_000_001)),
+            Picture::Character(90_000_001).file_name(),
             "characters-90000001-portrait.png"
         );
         assert_eq!(
-            url(Picture::Character(90_000_001)),
+            Picture::Character(90_000_001).url(),
             "https://images.evetech.net/characters/90000001/portrait"
         );
     }
