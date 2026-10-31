@@ -12,13 +12,15 @@ use crate::empty::{self, Fill};
 use crate::orders::rows::grouped;
 use crate::rail::Page;
 use crate::table::model::{Cell, Column, ColumnKind, Row};
-use crate::table::{Table, hidden_from_text};
+use crate::table::{self, Level, Table, hidden_from_text};
 use rows::{Entry, PlanCell, footer, status_text};
 
 /// The table's name for its saved hidden columns: `columns.jobs`.
 const TABLE: &str = "jobs";
 /// The setting that keeps the chip: `finished` when finished jobs are shown, else empty.
 const CHIPS: &str = "jobs.chips";
+/// The columns Summary shows, in their order: the five a builder checks.
+const SUMMARY: [&str; 5] = ["product", "activity", "runs", "character", "ends"];
 
 /// Why the page has no rows and what fills it: no characters, no fetched jobs, or fetched jobs
 /// that hold none.
@@ -99,23 +101,27 @@ pub fn show(_page: &mut JobsPage, panel: JobsPanel, ui: &mut Ui, cx: &mut Shared
         .collect();
     ui.label(RichText::new(footer(&shown)).color(cx.style.mute));
 
-    let mut hidden = hidden_columns(ui, cx);
+    let id = Id::new(panel.title());
+    let mut level = table::level(ui, id, Level::Summary);
     let all_columns = columns();
-    if column_menu(ui, &all_columns, &mut hidden) {
+    let mut hidden = hidden_columns(ui, cx);
+    let (hidden_changed, picked) = column_menu(ui, level, &all_columns, &mut hidden);
+    if let Some(picked) = picked {
+        level = picked;
+        table::set_level(ui, id, picked);
+    }
+    if hidden_changed {
         ui.data_mut(|data| data.insert_temp(hidden_key(), hidden.clone()));
         cx.save_hidden_columns(TABLE, &hidden);
     }
-    let columns: Vec<Column> = all_columns
-        .into_iter()
-        .filter(|column| !hidden.iter().any(|id| id == column.id))
-        .collect();
+    let columns = columns_for(level, &all_columns, &hidden);
     let table_rows: Vec<Row> = shown
         .iter()
         .enumerate()
         .map(|(index, entry)| Row {
             key: u64::try_from(index).unwrap_or(u64::MAX),
             depth: 0,
-            cells: cells(entry),
+            cells: cells(entry, &columns),
         })
         .collect();
     let style = cx.style;
@@ -132,7 +138,8 @@ pub fn show(_page: &mut JobsPage, panel: JobsPanel, ui: &mut Ui, cx: &mut Shared
             _ => draw_plan(ui, entry, cx),
         }
     };
-    let response = Table::new(Id::new(panel.title()), &columns)
+    let response = Table::new(id, &columns)
+        .level(level)
         .icons("product", &|key| {
             usize::try_from(key)
                 .ok()
@@ -154,32 +161,55 @@ pub fn show(_page: &mut JobsPage, panel: JobsPanel, ui: &mut Ui, cx: &mut Shared
 /// The columns the table can have. Every one of them can be hidden from the Columns menu.
 fn columns() -> Vec<Column> {
     vec![
-        column("activity", "Activity", ColumnKind::Text, 150.0),
         column("product", "Product", ColumnKind::Text, 220.0),
+        column("activity", "Activity", ColumnKind::Text, 150.0),
         column("plan", "Plan", ColumnKind::Text, 150.0),
         column("runs", "Runs", ColumnKind::Number, 70.0),
         column("character", "Character", ColumnKind::Text, 120.0),
-        column("location", "Location", ColumnKind::Text, 200.0),
+        column("location", "Location", ColumnKind::Text, 180.0),
         column("status", "Status", ColumnKind::Text, 100.0),
         column("ends", "Ends", ColumnKind::Number, 140.0),
     ]
 }
 
-fn cells(entry: &Entry) -> Vec<Cell> {
+/// The columns to draw at `level`, after `hidden` is removed: the five Summary columns in their
+/// order, else the full set in `all`'s order.
+fn columns_for(level: Level, all: &[Column], hidden: &[String]) -> Vec<Column> {
+    let shown = |column: &&Column| !hidden.iter().any(|id| id == column.id);
+    match level {
+        Level::Summary => SUMMARY
+            .iter()
+            .filter_map(|id| all.iter().find(|column| column.id == *id))
+            .filter(shown)
+            .cloned()
+            .collect(),
+        Level::Standard | Level::Technical => all.iter().filter(shown).cloned().collect(),
+    }
+}
+
+/// The cells of one job in `columns` order: a lookup by column id.
+fn cells(entry: &Entry, columns: &[Column]) -> Vec<Cell> {
     let plan = match &entry.plan {
         PlanCell::Assigned { name, .. } => name.clone(),
         PlanCell::None | PlanCell::Suggest(_) => String::new(),
     };
-    vec![
-        Cell::text(&entry.activity),
-        Cell::text(&entry.product),
-        Cell::text(plan),
-        Cell::int(i128::from(entry.runs), grouped(u64::from(entry.runs))),
-        Cell::text(&entry.character),
-        Cell::text(&entry.location),
-        Cell::text(status_text(entry.status)),
-        Cell::int(i128::from(entry.end), entry.ends.as_str()),
-    ]
+    columns
+        .iter()
+        .filter_map(|column| match column.id {
+            "product" => Some(Cell::text(&entry.product)),
+            "activity" => Some(Cell::text(&entry.activity)),
+            "plan" => Some(Cell::text(plan.clone())),
+            "runs" => Some(Cell::int(
+                i128::from(entry.runs),
+                grouped(u64::from(entry.runs)),
+            )),
+            "character" => Some(Cell::text(&entry.character)),
+            "location" => Some(Cell::text(&entry.location)),
+            "status" => Some(Cell::text(status_text(entry.status))),
+            "ends" => Some(Cell::int(i128::from(entry.end), entry.ends.as_str())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Draws the Plan cell of one row. Returns whether it drew the cell.
@@ -278,10 +308,18 @@ fn hidden_key() -> Id {
     Id::new("jobs hidden columns")
 }
 
-/// The Columns menu: a tick per column. Returns whether a tick changed.
-fn column_menu(ui: &mut Ui, all: &[Column], hidden: &mut Vec<String>) -> bool {
+/// The Columns menu: the levels, then a tick per column. Returns whether a tick changed and the
+/// level picked.
+fn column_menu(
+    ui: &mut Ui,
+    level: Level,
+    all: &[Column],
+    hidden: &mut Vec<String>,
+) -> (bool, Option<Level>) {
     let mut changed = false;
+    let mut picked = None;
     ui.menu_button("Columns", |ui| {
+        picked = table::level_choices(ui, level);
         for column in all {
             let mut shown = !hidden.iter().any(|id| id == column.id);
             if ui.checkbox(&mut shown, column.label.as_str()).changed() {
@@ -294,7 +332,7 @@ fn column_menu(ui: &mut Ui, all: &[Column], hidden: &mut Vec<String>) -> bool {
             }
         }
     });
-    changed
+    (changed, picked)
 }
 
 fn column(id: &'static str, label: &str, kind: ColumnKind, width: f32) -> Column {

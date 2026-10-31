@@ -12,7 +12,7 @@ mod tests {
     use crate::ui::{click, on_row, shown, snapshot, top, until};
     use egui::vec2;
     use egui_kittest::Harness;
-    use egui_kittest::kittest::Queryable;
+    use egui_kittest::kittest::{NodeT, Queryable};
     use eve_means_of_profit::session::{EveAccess, PendingLogin};
     use eve_means_of_profit::{App, AppConfig};
     use mop_core::freight::Packing;
@@ -405,6 +405,49 @@ mod tests {
         });
     }
 
+    /// Picks `level` from the Columns menu.
+    fn choose_level(harness: &mut Harness<'_, App>, level: &str) {
+        click(harness, "Columns");
+        click(harness, level);
+        harness.run();
+    }
+
+    /// Every label and value in the accessibility tree, in tree order.
+    fn texts(harness: &Harness<'_, App>) -> Vec<String> {
+        harness
+            .root()
+            .children_recursive()
+            .filter_map(|node| {
+                let node = node.accesskit_node();
+                node.label().or_else(|| node.value())
+            })
+            .collect()
+    }
+
+    /// The labels on the table's header row, which holds the Product header.
+    fn header_labels(harness: &Harness<'_, App>) -> Vec<String> {
+        let Some(product) = harness.query_all_by_label("Product").next() else {
+            return Vec::new();
+        };
+        let row = product.rect().center().y;
+        let mut found: Vec<String> = Vec::new();
+        for node in harness.root().children_recursive() {
+            let access = node.accesskit_node();
+            let Some(text) = access.label().or_else(|| access.value()) else {
+                continue;
+            };
+            if (node.rect().center().y - row).abs() <= 3.0 && !found.contains(&text) {
+                found.push(text);
+            }
+        }
+        found
+    }
+
+    /// Whether any text on the page holds a `+`, such as a `+N columns` cell.
+    fn any_plus(harness: &Harness<'_, App>) -> bool {
+        texts(harness).iter().any(|text| text.contains('+'))
+    }
+
     #[test]
     fn the_default_rows_are_the_jobs_still_going_by_end_time() {
         let env = env();
@@ -425,7 +468,6 @@ mod tests {
         assert!(shown(&harness, "paused"));
         assert!(on_row(&harness, "Manufacturing", &["10"]));
         assert!(on_row(&harness, "Manufacturing", &["Main"]));
-        assert!(on_row(&harness, "Manufacturing", &["Home Fort"]));
         assert!(on_row(&harness, "Manufacturing", &["in 2h"]));
         assert!(on_row(&harness, "Reactions", &["ready to deliver"]));
         assert!(on_row(&harness, "Copying", &["paused"]));
@@ -455,6 +497,7 @@ mod tests {
         let mut harness = start(&env, vec![character(MAIN, "Main")]);
         loaded(&mut harness);
         click(&mut harness, "Industry jobs");
+        choose_level(&mut harness, "Standard");
         harness
             .get_all_by_label("Show finished")
             .next()
@@ -567,6 +610,7 @@ mod tests {
         let mut harness = start(&env, vec![character(MAIN, "Main")]);
         loaded(&mut harness);
         click(&mut harness, "Industry jobs");
+        choose_level(&mut harness, "Standard");
 
         // 501 is assigned to B; 503 offers the plans, in list order.
         assert!(on_row(&harness, "Hobgoblin B", &["×"]));
@@ -605,6 +649,7 @@ mod tests {
         let mut harness = start(&env, vec![character(MAIN, "Main")]);
         loaded(&mut harness);
         click(&mut harness, "Industry jobs");
+        choose_level(&mut harness, "Standard");
 
         // 502 is research: no plan applies to it, so its cell is empty.
         assert!(shown(&harness, "ME research"));
@@ -622,11 +667,157 @@ mod tests {
         let mut harness = start(&env, vec![character(MAIN, "Main")]);
         loaded(&mut harness);
         click(&mut harness, "Industry jobs");
+        choose_level(&mut harness, "Standard");
 
         assert!(on_row(&harness, "Manufacturing", &["no plan builds this"]));
         assert!(on_row(&harness, "Reactions", &["no plan builds this"]));
         assert!(!on_row(&harness, "Invention", &["no plan builds this"]));
         assert!(!on_row(&harness, "Copying", &["no plan builds this"]));
+    }
+
+    #[test]
+    fn summary_opens_with_the_five_builder_columns() {
+        let env = env();
+        save_jobs(&env, main_jobs());
+        let mut harness = start(&env, vec![character(MAIN, "Main")]);
+        loaded(&mut harness);
+        click(&mut harness, "Industry jobs");
+
+        assert_eq!(
+            header_labels(&harness),
+            ["Product", "Activity", "Runs", "Character", "Ends"]
+        );
+        assert!(!any_plus(&harness), "no header hides columns behind a +N");
+        assert!(on_row(
+            &harness,
+            "Manufacturing",
+            &["Particle Accelerator Unit", "10", "Main", "in 2h"]
+        ));
+        for absent in ["Plan", "Location", "Status"] {
+            assert!(!shown(&harness, absent), "{absent} is not a Summary column");
+        }
+    }
+
+    #[test]
+    fn standard_keeps_the_eight_columns_and_the_location() {
+        let env = env();
+        save_jobs(&env, main_jobs());
+        let mut harness = start(&env, vec![character(MAIN, "Main")]);
+        loaded(&mut harness);
+        click(&mut harness, "Industry jobs");
+        choose_level(&mut harness, "Standard");
+
+        assert_eq!(
+            header_labels(&harness),
+            [
+                "Product",
+                "Activity",
+                "Plan",
+                "Runs",
+                "Character",
+                "Location",
+                "Status",
+                "Ends"
+            ]
+        );
+        assert!(!any_plus(&harness), "all eight columns fit at 1280");
+        assert!(on_row(&harness, "Manufacturing", &["Home Fort"]));
+    }
+
+    #[test]
+    fn technical_shows_the_same_eight_columns_with_no_more_cell() {
+        let env = env();
+        save_jobs(&env, main_jobs());
+        let mut harness = start(&env, vec![character(MAIN, "Main")]);
+        loaded(&mut harness);
+        click(&mut harness, "Industry jobs");
+        choose_level(&mut harness, "Technical");
+
+        assert_eq!(
+            header_labels(&harness),
+            [
+                "Product",
+                "Activity",
+                "Plan",
+                "Runs",
+                "Character",
+                "Location",
+                "Status",
+                "Ends"
+            ]
+        );
+        assert!(!any_plus(&harness), "Technical has no +N cell");
+    }
+
+    #[test]
+    fn the_columns_menu_switches_between_summary_and_standard() {
+        let env = env();
+        save_jobs(&env, main_jobs());
+        let mut harness = start(&env, vec![character(MAIN, "Main")]);
+        loaded(&mut harness);
+        click(&mut harness, "Industry jobs");
+
+        // Summary is the start, so the three wider columns are gone.
+        assert!(!shown(&harness, "Plan"));
+        assert!(!shown(&harness, "Location"));
+        assert!(!shown(&harness, "Status"));
+
+        click(&mut harness, "Columns");
+        for level in ["Summary", "Standard", "Technical"] {
+            assert!(shown(&harness, level), "the menu offers {level}");
+        }
+        click(&mut harness, "Standard");
+        harness.run();
+        for present in ["Plan", "Location", "Status"] {
+            assert!(shown(&harness, present), "Standard brings back {present}");
+        }
+
+        choose_level(&mut harness, "Summary");
+        for absent in ["Plan", "Location", "Status"] {
+            assert!(!shown(&harness, absent), "Summary removes {absent} again");
+        }
+    }
+
+    #[test]
+    fn a_hidden_summary_column_stays_hidden_at_every_level() {
+        let env = env();
+        save_jobs(&env, main_jobs());
+        let mut store = store(&env);
+        store
+            .set_setting("columns.jobs", "activity")
+            .expect("the hidden column is saved");
+        let mut harness = start(&env, vec![character(MAIN, "Main")]);
+        loaded(&mut harness);
+        click(&mut harness, "Industry jobs");
+
+        assert!(!shown(&harness, "Activity"));
+        assert_eq!(
+            header_labels(&harness),
+            ["Product", "Runs", "Character", "Ends"]
+        );
+
+        // The hidden setting comes before the level, so Standard also leaves it out.
+        choose_level(&mut harness, "Standard");
+        assert!(!shown(&harness, "Activity"));
+        assert!(shown(&harness, "Plan"));
+    }
+
+    #[test]
+    fn summary_draws_no_plan_cells() {
+        let env = env();
+        make_plan(&env, "Hobgoblin A");
+        save_jobs(&env, assigning_jobs());
+        let mut harness = start(&env, vec![character(MAIN, "Main")]);
+        loaded(&mut harness);
+        click(&mut harness, "Industry jobs");
+
+        assert!(!shown(&harness, "Plan"), "the Plan header is absent");
+        assert!(!shown(&harness, "Assign…"));
+        assert!(!shown(&harness, "no plan builds this"));
+
+        // The plan column returns, so the page really was at Summary before.
+        choose_level(&mut harness, "Standard");
+        assert!(shown(&harness, "Plan"));
     }
 
     #[test]
@@ -650,6 +841,7 @@ mod tests {
         let mut harness = start(&env, vec![character(MAIN, "Main")]);
         loaded(&mut harness);
         click(&mut harness, "Industry jobs");
+        choose_level(&mut harness, "Standard");
         click(&mut harness, "Assign…");
         snapshot(&mut harness, "jobs_assign");
     }
