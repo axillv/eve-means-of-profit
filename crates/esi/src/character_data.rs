@@ -497,7 +497,11 @@ fn optional<'a>(object: &'a Value, key: &str) -> Option<&'a Value> {
     object.get(key).filter(|value| !value.is_null())
 }
 
-fn signed<T: TryFrom<i64>>(object: &Value, key: &'static str, route: &str) -> Result<T, EsiError> {
+pub(crate) fn signed<T: TryFrom<i64>>(
+    object: &Value,
+    key: &'static str,
+    route: &str,
+) -> Result<T, EsiError> {
     signed_of(field(object, key, route)?, key, route)
 }
 
@@ -512,7 +516,7 @@ fn signed_of<T: TryFrom<i64>>(
         .ok_or_else(|| bad_data(route, key, &shown(value)))
 }
 
-fn unsigned<T: TryFrom<u64>>(
+pub(crate) fn unsigned<T: TryFrom<u64>>(
     object: &Value,
     key: &'static str,
     route: &str,
@@ -541,7 +545,11 @@ fn optional_unsigned<T: TryFrom<u64>>(
         .transpose()
 }
 
-fn text<'a>(object: &'a Value, key: &'static str, route: &str) -> Result<&'a str, EsiError> {
+pub(crate) fn text<'a>(
+    object: &'a Value,
+    key: &'static str,
+    route: &str,
+) -> Result<&'a str, EsiError> {
     let value = field(object, key, route)?;
     value
         .as_str()

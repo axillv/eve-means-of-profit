@@ -7,7 +7,7 @@ use mop_core::industry::TypeId;
 use mop_core::stock::{ItemId, LocationId};
 use serde_json::Value;
 
-use crate::character_data::{Fetched, array, fetched, field};
+use crate::character_data::{Fetched, array, fetched, signed, text, unsigned};
 use crate::client::{Answer, Client, bad_data};
 use crate::error::EsiError;
 use crate::token::AccessToken;
@@ -82,7 +82,7 @@ fn blueprint(row: &Value, route: &str) -> Result<OwnedBlueprint, EsiError> {
     if location_id < 0 {
         return Err(bad_data(route, "location_id", &location_id.to_string()));
     }
-    let type_id = narrow(unsigned(row, "type_id", route)?, "type_id", route)?;
+    let type_id: TypeId = unsigned(row, "type_id", route)?;
     let me = level(row, "material_efficiency", MAX_ME, route)?;
     let te = level(row, "time_efficiency", MAX_TE, route)?;
     let flag = text(row, "location_flag", route)?.to_owned();
@@ -121,8 +121,7 @@ fn blueprint(row: &Value, route: &str) -> Result<OwnedBlueprint, EsiError> {
 
 /// The runs of a copy: at least one, and within a whole number.
 fn copy_runs(row: &Value, route: &str) -> Result<u32, EsiError> {
-    let runs: u64 = unsigned(row, "runs", route)?;
-    let runs = narrow(runs, "runs", route)?;
+    let runs: u32 = unsigned(row, "runs", route)?;
     if runs == 0 {
         return Err(bad_data(route, "runs", "0"));
     }
@@ -141,40 +140,11 @@ fn original_runs(row: &Value, route: &str) -> Result<(), EsiError> {
 
 /// A whole number EVE allows from 0 up to `max`; anything else is `BadData` naming the field.
 fn level(row: &Value, key: &'static str, max: u8, route: &str) -> Result<u8, EsiError> {
-    let value: u8 = narrow(unsigned(row, key, route)?, key, route)?;
+    let value: u8 = unsigned(row, key, route)?;
     if value > max {
         return Err(bad_data(route, key, &value.to_string()));
     }
     Ok(value)
-}
-
-/// A whole number from EVE that must fit the narrower type, else `BadData` naming the field.
-fn narrow<T: TryFrom<u64>>(value: u64, key: &'static str, route: &str) -> Result<T, EsiError> {
-    T::try_from(value)
-        .ok()
-        .ok_or_else(|| bad_data(route, key, &value.to_string()))
-}
-
-fn unsigned(object: &Value, key: &'static str, route: &str) -> Result<u64, EsiError> {
-    let value = field(object, key, route)?;
-    value
-        .as_u64()
-        .ok_or_else(|| bad_data(route, key, &value.to_string()))
-}
-
-fn signed<T: TryFrom<i64>>(object: &Value, key: &'static str, route: &str) -> Result<T, EsiError> {
-    let value = field(object, key, route)?;
-    value
-        .as_i64()
-        .and_then(|number| T::try_from(number).ok())
-        .ok_or_else(|| bad_data(route, key, &value.to_string()))
-}
-
-fn text<'a>(object: &'a Value, key: &'static str, route: &str) -> Result<&'a str, EsiError> {
-    let value = field(object, key, route)?;
-    value
-        .as_str()
-        .ok_or_else(|| bad_data(route, key, &value.to_string()))
 }
 
 #[cfg(test)]
