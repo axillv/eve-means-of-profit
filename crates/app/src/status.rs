@@ -4,7 +4,10 @@
 //! ` (1 of <n>)` when there are several. With no notice, the idle text shows, followed by each
 //! login character's login state or data age.
 
-use egui::{Align, Layout, Ui};
+use egui::{
+    Align, Color32, CornerRadius, FontId, Layout, Response, RichText, Sense, Stroke, StrokeKind,
+    Ui, WidgetInfo, WidgetType, vec2,
+};
 use mop_esi::character_data::CharacterData;
 use mop_esi::characters::Login;
 
@@ -74,46 +77,57 @@ pub fn show(
     let mut action = None;
     let mut notice_action = false;
     let mut dismiss = false;
-    egui::Panel::bottom("status").show(ui, |ui| {
-        ui.horizontal(|ui| {
-            if let Some(text) = activity {
-                ui.label(text);
-            } else if let Some(first) = notices.first() {
-                let (label, color) = match first.level {
-                    Level::Notice => ("NOTICE", style.mute),
-                    Level::Error => ("ERROR", style.neg),
-                };
-                ui.colored_label(color, label);
-                let count = if notices.len() > 1 {
-                    format!(" (1 of {})", notices.len())
+    let bar = egui::Panel::bottom("status")
+        .exact_size(style.sizes.status_height)
+        .resizable(false)
+        .show_separator_line(false)
+        .frame(bar_frame(style))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 18.0;
+            ui.horizontal(|ui| {
+                if let Some(text) = activity {
+                    ui.label(bar_text(text, style.mute));
+                } else if let Some(first) = notices.first() {
+                    let (label, color) = match first.level {
+                        Level::Notice => ("NOTICE", style.mute),
+                        Level::Error => ("ERROR", style.neg),
+                    };
+                    ui.label(bar_text(label, color));
+                    let count = if notices.len() > 1 {
+                        format!(" (1 of {})", notices.len())
+                    } else {
+                        String::new()
+                    };
+                    ui.label(bar_text(format!("{}{count}", cut(&first.text)), style.mute))
+                        .on_hover_text(first.text.as_str());
+                    if let Some(pending) = first.action
+                        && bar_button(ui, style, button_text(pending)).clicked()
+                    {
+                        action = Some(pending);
+                        notice_action = true;
+                    }
+                    if bar_button(ui, style, "Dismiss").clicked() {
+                        dismiss = true;
+                    }
                 } else {
-                    String::new()
-                };
-                ui.label(format!("{}{count}", cut(&first.text)))
-                    .on_hover_text(first.text.as_str());
-                if let Some(pending) = first.action
-                    && ui.button(button_text(pending)).clicked()
-                {
-                    action = Some(pending);
-                    notice_action = true;
+                    ui.label(bar_text(idle, style.mute));
+                    if !characters.is_empty() {
+                        ui.label(bar_text("·", style.mute));
+                        ui.label(bar_text(characters, style.mute));
+                    }
                 }
-                if ui.button("Dismiss").clicked() {
-                    dismiss = true;
-                }
-            } else {
-                ui.label(idle);
-                if !characters.is_empty() {
-                    ui.label("·");
-                    ui.label(characters);
-                }
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Refresh all").clicked() {
-                    action = Some(Action::RefreshAll);
-                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if bar_button(ui, style, "Refresh all").clicked() {
+                        action = Some(Action::RefreshAll);
+                    }
+                });
             });
         });
-    });
+    ui.painter().hline(
+        bar.response.rect.x_range(),
+        bar.response.rect.top(),
+        Stroke::new(1.0, style.line),
+    );
     if (dismiss || notice_action) && !notices.is_empty() {
         notices.remove(0);
     }
@@ -152,6 +166,47 @@ fn oldest_of(held: &CharacterData) -> Option<i64> {
     [assets, orders, jobs, wallet].into_iter().flatten().min()
 }
 
+/// The bar's frame: the panel colour, 12 px at the sides, nothing above or below.
+fn bar_frame(style: &Style) -> egui::Frame {
+    egui::Frame::new()
+        .fill(style.panel)
+        .inner_margin(egui::Margin {
+            left: 12,
+            right: 12,
+            top: 0,
+            bottom: 0,
+        })
+}
+
+/// One piece of bar text, 13 px in `color`.
+fn bar_text(text: impl Into<String>, color: Color32) -> RichText {
+    RichText::new(text).size(13.0).color(color)
+}
+
+/// One bar button: 22 px tall, 10 px side padding, a 6 px radius, no fill, the line's outline and
+/// the text colour. Drawn in a scope so the bar's spacing stays put.
+fn bar_button(ui: &mut Ui, style: &Style, text: &str) -> Response {
+    ui.scope(|ui| {
+        let galley =
+            ui.painter()
+                .layout_no_wrap(text.to_owned(), FontId::proportional(13.0), style.text);
+        let size = vec2(galley.size().x + 2.0 * 10.0, 22.0);
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        ui.painter().rect(
+            rect,
+            CornerRadius::same(6),
+            Color32::TRANSPARENT,
+            Stroke::new(1.0, style.line),
+            StrokeKind::Inside,
+        );
+        ui.painter()
+            .galley(rect.center() - galley.size() * 0.5, galley, style.text);
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), text));
+        response
+    })
+    .inner
+}
+
 fn button_text(action: Action) -> &'static str {
     match action {
         Action::Update { .. } => "Update",
@@ -177,9 +232,15 @@ mod tests {
     use mop_esi::characters::{Character, Login};
     use mop_esi::places::StructureNames;
 
-    use super::characters_text;
+    use egui::Margin;
+    use egui::vec2;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    use super::{Action, IDLE_TEXT, Notice, bar_frame, characters_text, show};
     use crate::session::eve::NoEve;
     use crate::session::{Saved, Session};
+    use crate::theme::Style;
 
     const NOW: i64 = 1_000_000;
 
@@ -261,5 +322,81 @@ mod tests {
             vec![wallet_data(1, NOW + 60)],
         );
         assert_eq!(characters_text(&session, NOW), "Main: 0s");
+    }
+
+    /// The bar's state: its notices and the action the last frame returned.
+    struct Bar {
+        notices: Vec<Notice>,
+        action: Option<Action>,
+        bottom: f32,
+    }
+
+    fn bar(notices: Vec<Notice>) -> Harness<'static, Bar> {
+        let style = Style::eve_dense();
+        let state = Bar {
+            notices,
+            action: None,
+            bottom: 0.0,
+        };
+        Harness::builder()
+            .with_size(vec2(800.0, 200.0))
+            .build_ui_state(
+                move |ui, bar: &mut Bar| {
+                    style.apply(ui.ctx());
+                    bar.bottom = ui.max_rect().bottom();
+                    let Bar {
+                        notices, action, ..
+                    } = bar;
+                    if let Some(next) = show(ui, &style, notices, None, IDLE_TEXT, "") {
+                        *action = Some(next);
+                    }
+                },
+                state,
+            )
+    }
+
+    fn click(harness: &mut Harness<'_, Bar>, label: &str) {
+        harness.get_by_label(label).click();
+        harness.run_steps(3);
+    }
+
+    #[test]
+    fn the_bar_frame_is_the_panel_with_12_px_sides() {
+        let style = Style::eve_dense();
+        let frame = bar_frame(&style);
+        assert_eq!(frame.fill, style.panel);
+        assert_eq!(
+            frame.inner_margin,
+            Margin {
+                left: 12,
+                right: 12,
+                top: 0,
+                bottom: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn the_refresh_button_is_compact_inside_the_bar_and_refreshes() {
+        let size = Style::eve_dense().sizes.status_height;
+        let mut harness = bar(Vec::new());
+        harness.run_steps(2);
+        let rect = harness.get_by_label("Refresh all").rect();
+        assert_eq!(rect.height(), 22.0);
+        let bottom = harness.state().bottom;
+        assert!(rect.top() >= bottom - size, "{rect:?} below {bottom}");
+        assert!(rect.bottom() <= bottom, "{rect:?} below {bottom}");
+        click(&mut harness, "Refresh all");
+        assert_eq!(harness.state().action, Some(Action::RefreshAll));
+    }
+
+    #[test]
+    fn an_error_shows_its_level_and_text_and_dismiss_removes_it() {
+        let mut harness = bar(vec![Notice::error("Prices could not be read")]);
+        harness.run_steps(2);
+        assert!(harness.query_by_label("ERROR").is_some());
+        assert!(harness.query_by_label("Prices could not be read").is_some());
+        click(&mut harness, "Dismiss");
+        assert!(harness.state().notices.is_empty());
     }
 }
