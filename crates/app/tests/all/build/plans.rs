@@ -1,5 +1,6 @@
 use super::*;
 
+use eve_means_of_profit::theme::Style;
 use rusqlite::Connection;
 
 /// Saves an empty plan named `name` in the env's store.
@@ -46,7 +47,10 @@ fn plan_count(harness: &mut Harness<'_, App>) -> usize {
 /// such buttons a Build with no plan on screen draws.
 fn click_new_plan_in(harness: &mut Harness<'_, App>, panel: &str) {
     let plan_left = harness.get_by_label("Plan").rect().min.x;
-    let buy_left = harness.get_by_label("Buy list").rect().min.x;
+    // A card's header title sits one stroke and one sheet pad inside the panel, so the panel's
+    // left edge is that much left of the title.
+    let inset = Style::eve_dense().sizes.sheet_pad + 1.0;
+    let buy_left = harness.get_by_label("Buy list").rect().min.x - inset;
     let steps_top = harness.get_by_label("Steps").rect().min.y;
     let node = harness
         .get_all_by_label("New plan")

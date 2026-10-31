@@ -4,7 +4,10 @@
 //! and, when its body has a table, a button that copies the table. A user layout instead shows its
 //! tab bar, drags and closes its tabs, and lets each panel follow the selection or be pinned.
 
-use egui::{CornerRadius, Id, RichText, Ui, WidgetText};
+use egui::{
+    Align, CornerRadius, FontId, Id, Layout, Margin, Rect, RichText, Sense, Stroke, Ui, UiBuilder,
+    WidgetText, vec2,
+};
 use egui_dock::{DockArea, DockState, NodeIndex, OverlayType, TabViewer};
 use mop_store::Store;
 use mop_store::StoreError;
@@ -14,6 +17,7 @@ use crate::assets::AssetsPanel;
 use crate::build::BuildPanel;
 use crate::characters::CharactersPanel;
 use crate::jobs::JobsPanel;
+use crate::kit::{self, ButtonKind, SheetHeader, add_small_button};
 use crate::layout::model::{Binding, Follows, PanelInfo, PanelRef, Slot, display_name};
 use crate::net_worth::NetWorthPanel;
 use crate::orders::OrdersPanel;
@@ -185,7 +189,7 @@ pub fn show_page<T: Copy + PartialEq>(
         ui.push_id(page, |ui| {
             ui.scope(|ui| {
                 ui.spacing_mut().interact_size.y = 12.0;
-                ui.spacing_mut().button_padding = egui::vec2(6.0, 0.0);
+                ui.spacing_mut().button_padding = vec2(6.0, 0.0);
                 ui.horizontal(|ui| {
                     ui.menu_button(RichText::new("Panels").size(11.0), |ui| {
                         for &panel in all {
@@ -323,7 +327,7 @@ pub fn show_locked<T: Copy>(
             leaf.tab_bar_hidden = leaf.tabs.len() == 1;
         }
     }
-    let mut viewer = Locked { title, body };
+    let mut viewer = Locked { theme, title, body };
     DockArea::new(state)
         .style(style(ui, theme))
         .hidable_tab_bars(true)
@@ -373,7 +377,7 @@ pub fn show_user(
         selected_plan: names.selected_plan,
         selected_stockpile: names.selected_stockpile,
         pin_name: names.pin_name,
-        mute: theme.mute,
+        theme,
         body,
     };
     // A user drops a tab on the edge of the panel it should split, not on a button in the middle.
@@ -426,6 +430,7 @@ fn binding_key(binding: &Binding) -> (&'static str, i64) {
 /// stockpile panel.
 fn layout_menu(
     ui: &mut Ui,
+    theme: &Style,
     name: &str,
     tab: &mut Slot,
     follows: Option<&Follows>,
@@ -434,7 +439,7 @@ fn layout_menu(
 ) {
     let stockpile = matches!(follows, Some(Follows::Stockpile));
     let follows = follows.filter(|follows| matches!(follows, Follows::Plan | Follows::Stockpile));
-    ui.menu_button("Layout", |ui| {
+    layout_button(ui, theme, |ui| {
         add_to_layout(ui, name);
         if follows.is_none() {
             return;
@@ -486,6 +491,71 @@ fn layout_menu(
     });
 }
 
+/// Draws the `Layout` menu as a small Plain button, so it matches the buttons beside it.
+fn layout_button(ui: &mut Ui, theme: &Style, add: impl FnOnce(&mut Ui)) -> egui::Response {
+    let colors = kit::button_colors(theme, ButtonKind::Plain);
+    let stroke = Stroke::new(1.0, colors.stroke);
+    let text = Stroke::new(1.0, colors.text);
+    let radius = CornerRadius::same(theme.control_radius);
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.y = theme.sizes.small_button;
+        ui.spacing_mut().button_padding = vec2(9.0, 0.0);
+        let widgets = &mut ui.visuals_mut().widgets;
+        widgets.inactive.weak_bg_fill = colors.fill;
+        widgets.inactive.bg_fill = colors.fill;
+        widgets.inactive.bg_stroke = stroke;
+        widgets.inactive.fg_stroke = text;
+        widgets.inactive.corner_radius = radius;
+        // A pressed kit button keeps its fill, and a hovered one keeps it too and takes the
+        // accent outline.
+        widgets.active.weak_bg_fill = colors.fill;
+        widgets.active.bg_fill = colors.fill;
+        widgets.active.bg_stroke = stroke;
+        widgets.active.fg_stroke = text;
+        widgets.active.corner_radius = radius;
+        widgets.hovered.weak_bg_fill = colors.fill;
+        widgets.hovered.bg_fill = colors.fill;
+        widgets.hovered.fg_stroke = text;
+        widgets.hovered.corner_radius = radius;
+        let label = RichText::new("Layout")
+            .font(FontId::proportional(13.0))
+            .color(colors.text);
+        ui.menu_button(label, add).response
+    })
+    .inner
+}
+
+/// Draws a panel's card header: the title row and its line, one point in from the tab body's 1 px
+/// outline, so the panel starts where a `kit::sheet` body does. `right` draws the header's buttons
+/// at the right end; the row lays them out right to left, so the first one added sits rightmost.
+fn panel_header(ui: &mut Ui, theme: &Style, title: &str, right: impl FnOnce(&mut Ui)) {
+    let spacing = ui.spacing().item_spacing.y;
+    ui.spacing_mut().item_spacing.y = 0.0;
+    // The tab body paints its outline inside its rect, so the header content starts under it and
+    // one point in from either side. The row and its line then end 40 points below the panel's
+    // top edge, the same as the stroke, row and line of a sheet card.
+    let (rect, _) = ui.allocate_exact_size(
+        vec2(ui.available_width(), theme.sizes.sheet_header + 2.0),
+        Sense::hover(),
+    );
+    let mut header = ui.new_child(
+        UiBuilder::new()
+            .max_rect(Rect::from_min_max(
+                rect.min + vec2(1.0, 1.0),
+                rect.max - vec2(1.0, 0.0),
+            ))
+            .layout(Layout::top_down(Align::Min)),
+    );
+    header.spacing_mut().item_spacing.y = 0.0;
+    kit::sheet_header(
+        &mut header,
+        theme,
+        SheetHeader { title, count: None },
+        right,
+    );
+    ui.spacing_mut().item_spacing.y = spacing;
+}
+
 /// The text of the re-sort button: how many rows moved since the table kept its order.
 fn resort_label(moved: usize) -> String {
     if moved == 1 {
@@ -500,7 +570,7 @@ struct UserViewer<'a, B> {
     selected_plan: Option<(i64, &'a str)>,
     selected_stockpile: Option<(i64, &'a str)>,
     pin_name: &'a dyn Fn(&Binding) -> Option<String>,
-    mute: egui::Color32,
+    theme: &'a Style,
     body: B,
 }
 
@@ -526,7 +596,7 @@ impl<B: FnMut(&mut Ui, &Slot)> TabViewer for UserViewer<'_, B> {
         let selected_plan = self.selected_plan;
         let selected_stockpile = self.selected_stockpile;
         let pin_name = self.pin_name;
-        let mute = self.mute;
+        let theme = self.theme;
         // The flag was set by the body on the previous frame, so it says whether the panel had a
         // table then.
         let table_shown = ui
@@ -536,30 +606,40 @@ impl<B: FnMut(&mut Ui, &Slot)> TabViewer for UserViewer<'_, B> {
         let moved = ui
             .data(|data| data.get_temp::<usize>(rows_moved(id)))
             .unwrap_or(0);
-        ui.horizontal(|ui| {
-            ui.strong(&name);
+        panel_header(ui, theme, &name, |ui| {
+            if table_shown && moved > 0 {
+                let label = resort_label(moved);
+                if add_small_button(ui, theme, &label, ButtonKind::Plain).clicked() {
+                    ui.data_mut(|data| data.insert_temp(resort_request(id), true));
+                }
+            }
+            if table_shown
+                && add_small_button(ui, theme, "Copy table", ButtonKind::Plain)
+                    .on_hover_text("Copies this table for a spreadsheet (tab-separated).")
+                    .clicked()
+            {
+                ui.data_mut(|data| data.insert_temp(copy_request(id), true));
+            }
+            layout_menu(
+                ui,
+                theme,
+                &name,
+                tab,
+                follows,
+                selected_plan,
+                selected_stockpile,
+            );
+            // The panel's status sits at the left of the header's right end, after its title.
             if tab.binding == Binding::Follow {
                 if let Some(text) = follows.and_then(follows_text) {
-                    ui.label(RichText::new(text).color(mute));
+                    ui.label(RichText::new(text).color(theme.mute));
                 }
             } else {
                 let text = match pin_name(&tab.binding) {
                     Some(pin) => format!("pinned: {pin}"),
                     None => "pinned: deleted".to_owned(),
                 };
-                ui.label(RichText::new(text).color(mute));
-            }
-            layout_menu(ui, &name, tab, follows, selected_plan, selected_stockpile);
-            if table_shown
-                && ui
-                    .button("Copy table")
-                    .on_hover_text("Copies this table for a spreadsheet (tab-separated).")
-                    .clicked()
-            {
-                ui.data_mut(|data| data.insert_temp(copy_request(id), true));
-            }
-            if table_shown && moved > 0 && ui.button(resort_label(moved)).clicked() {
-                ui.data_mut(|data| data.insert_temp(resort_request(id), true));
+                ui.label(RichText::new(text).color(theme.mute));
             }
         });
         // Cleared before the body draws, so a panel whose table stops showing loses the button on
@@ -605,17 +685,26 @@ fn style(ui: &Ui, theme: &Style) -> egui_dock::Style {
     style.buttons.show_tab_bar_hover_expand = 0.0;
     // The pages draw their own headers, so the tab body needs no padding of its own; the Panels
     // strip above the dock takes that room without shrinking the tables.
-    style.tab.tab_body.inner_margin = egui::Margin::ZERO;
+    style.tab.tab_body.inner_margin = Margin::ZERO;
     style.tab.tab_body.corner_radius = CornerRadius::same(theme.radius);
+    // Every panel is a card: the panel fill inside a one point outline, on the page's background.
+    style.tab.tab_body.bg_fill = theme.panel;
+    style.tab.tab_body.stroke = Stroke::new(1.0, theme.line);
+    // The gaps between cards show the page, and light up in the line colour while they are used.
+    style.separator.width = theme.sizes.sheet_gap;
+    style.separator.color_idle = theme.bg;
+    style.separator.color_hovered = theme.line;
+    style.separator.color_dragged = theme.line;
     style
 }
 
-struct Locked<T, B> {
+struct Locked<'a, T, B> {
+    theme: &'a Style,
     title: fn(T) -> &'static str,
     body: B,
 }
 
-impl<T: Copy, B: FnMut(&mut Ui, T)> TabViewer for Locked<T, B> {
+impl<T: Copy, B: FnMut(&mut Ui, T)> TabViewer for Locked<'_, T, B> {
     type Tab = T;
 
     fn id(&mut self, tab: &mut T) -> Id {
@@ -629,6 +718,7 @@ impl<T: Copy, B: FnMut(&mut Ui, T)> TabViewer for Locked<T, B> {
     fn ui(&mut self, ui: &mut Ui, tab: &mut T) {
         let id = self.id(tab);
         let title = (self.title)(*tab);
+        let theme = self.theme;
         // The flag was set by the body on the previous frame, so it says whether the panel had a
         // table then.
         let table_shown = ui
@@ -638,20 +728,21 @@ impl<T: Copy, B: FnMut(&mut Ui, T)> TabViewer for Locked<T, B> {
         let moved = ui
             .data(|data| data.get_temp::<usize>(rows_moved(id)))
             .unwrap_or(0);
-        ui.horizontal(|ui| {
-            ui.strong(title);
-            ui.menu_button("Layout", |ui| add_to_layout(ui, title));
+        panel_header(ui, theme, title, |ui| {
+            if table_shown && moved > 0 {
+                let label = resort_label(moved);
+                if add_small_button(ui, theme, &label, ButtonKind::Plain).clicked() {
+                    ui.data_mut(|data| data.insert_temp(resort_request(id), true));
+                }
+            }
             if table_shown
-                && ui
-                    .button("Copy table")
+                && add_small_button(ui, theme, "Copy table", ButtonKind::Plain)
                     .on_hover_text("Copies this table for a spreadsheet (tab-separated).")
                     .clicked()
             {
                 ui.data_mut(|data| data.insert_temp(copy_request(id), true));
             }
-            if table_shown && moved > 0 && ui.button(resort_label(moved)).clicked() {
-                ui.data_mut(|data| data.insert_temp(resort_request(id), true));
-            }
+            layout_button(ui, theme, |ui| add_to_layout(ui, title));
         });
         // Cleared before the body draws, so a panel whose table stops showing loses the button on
         // the next frame.
@@ -673,6 +764,8 @@ mod tests {
     use egui_dock::Node;
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use tempfile::TempDir;
 
     const SETUP_PANELS: [SetupPanel; 9] = [
@@ -1061,11 +1154,18 @@ mod tests {
     }
 
     /// Clicks the `Layout` menu of the panel whose title is `panel`, not the one of another panel
-    /// that happens to be in the same dock.
+    /// that happens to be in the same dock. The header title sits under the tab title, and the
+    /// panel's menu is the nearest one to its right; the pin tests then assert on the saved slot
+    /// that the menu clicked was this panel's.
     fn click_layout_of(harness: &mut Harness<'_, User>, panel: &str) {
-        let title = text_rect(harness, panel).center();
+        let title = text_rects(harness, panel)
+            .into_iter()
+            .max_by(|a, b| a.top().total_cmp(&b.top()))
+            .map(|rect| rect.center())
+            .unwrap_or_else(|| panic!("\"{panel}\" is not painted"));
         let button = harness
             .get_all_by_label("Layout")
+            .filter(|button| button.rect().center().x >= title.x)
             .min_by(|a, b| {
                 let da = a.rect().center().distance(title);
                 let db = b.rect().center().distance(title);
@@ -1089,9 +1189,98 @@ mod tests {
             )
     }
 
+    /// A locked page whose only panel has a table, so its header shows the table buttons. The body
+    /// says the panel has a table and draws the table's first row.
+    fn table_harness() -> Harness<'static, DockState<BuildPanel>> {
+        let style = Style::eve_dense();
+        Harness::builder()
+            .with_size(vec2(800.0, 600.0))
+            .build_ui_state(
+                move |ui, dock: &mut DockState<BuildPanel>| {
+                    style.apply(ui.ctx());
+                    show_locked(ui, &style, dock, BuildPanel::title, |ui, panel| {
+                        let id = Id::new(BuildPanel::title(panel));
+                        ui.data_mut(|data| data.insert_temp(has_table(id), true));
+                        ui.label("first row");
+                    });
+                },
+                DockState::new(vec![BuildPanel::BuyList]),
+            )
+    }
+
+    #[test]
+    fn a_panel_is_a_card_on_the_page_background() {
+        let theme = Style::eve_dense();
+        let drawn = Rc::new(RefCell::new(None));
+        let out = Rc::clone(&drawn);
+        let mut harness = Harness::builder()
+            .with_size(vec2(400.0, 200.0))
+            .build_ui(move |ui| {
+                *out.borrow_mut() = Some(style(ui, &theme));
+            });
+        harness.run_steps(1);
+        let drawn = drawn.borrow();
+        let drawn = drawn.as_ref().expect("the dock style is drawn");
+        assert_eq!(drawn.tab.tab_body.bg_fill, theme.panel);
+        assert_eq!(
+            drawn.tab.tab_body.stroke,
+            Stroke::new(1.0, theme.line),
+            "the card has a one point outline"
+        );
+        assert_eq!(drawn.tab.tab_body.corner_radius, CornerRadius::same(12));
+        assert_eq!(drawn.tab.tab_body.inner_margin, Margin::ZERO);
+        assert_eq!(drawn.separator.width, 10.0);
+        assert_eq!(
+            drawn.separator.color_idle, theme.bg,
+            "the gaps show the page"
+        );
+        assert_eq!(drawn.separator.color_hovered, theme.line);
+        assert_eq!(drawn.separator.color_dragged, theme.line);
+    }
+
+    #[test]
+    fn a_locked_panel_header_has_its_title_and_small_buttons_in_a_card_row() {
+        let mut harness = table_harness();
+        harness.run_steps(3);
+
+        let title = harness.get_by_label("Buy list").rect();
+        let layout = harness.get_by_label("Layout").rect();
+        let copy = harness.get_by_label("Copy table").rect();
+        assert_eq!(layout.height(), 24.0, "Layout is a small button");
+        assert_eq!(copy.height(), 24.0, "Copy table is a small button");
+        assert!(
+            copy.left() > title.right(),
+            "Copy table sits at the right end of the title row"
+        );
+        assert!(
+            layout.left() < copy.left(),
+            "Layout keeps its place before Copy table"
+        );
+
+        let top = harness
+            .state()
+            .iter_leaves()
+            .next()
+            .map(|(_, leaf)| leaf.rect.top())
+            .expect("the page has one panel");
+        assert_eq!(
+            harness.get_by_label("first row").rect().top(),
+            top + 40.0,
+            "the table starts under the card's stroke, title row and line"
+        );
+    }
+
     /// The rect of the topmost painted text equal to `text`. Tab titles are painted, not widgets,
     /// so this is how a test finds a tab.
     fn text_rect(harness: &Harness<'_, User>, text: &str) -> Rect {
+        text_rects(harness, text)
+            .into_iter()
+            .min_by(|a, b| a.top().total_cmp(&b.top()))
+            .unwrap_or_else(|| panic!("\"{text}\" is not painted"))
+    }
+
+    /// Every rect of painted text equal to `text`, in paint order.
+    fn text_rects(harness: &Harness<'_, User>, text: &str) -> Vec<Rect> {
         fn collect(shape: &egui::Shape, text: &str, found: &mut Vec<Rect>) {
             match shape {
                 egui::Shape::Text(painted) if painted.galley.text() == text => {
@@ -1120,9 +1309,6 @@ mod tests {
             collect(&clipped.shape, text, &mut found);
         }
         found
-            .into_iter()
-            .min_by(|a, b| a.top().total_cmp(&b.top()))
-            .unwrap_or_else(|| panic!("\"{text}\" is not painted"))
     }
 
     fn click_at(harness: &mut Harness<'_, User>, pos: Pos2) {
@@ -1223,6 +1409,23 @@ mod tests {
             saved(&harness.state().dock).ends_with("  Steps\n"),
             "following drops the pin: {}",
             saved(&harness.state().dock)
+        );
+    }
+
+    #[test]
+    fn the_layout_helper_clicks_the_named_panels_menu() {
+        let mut harness = user_harness(
+            user_dock(
+                "EVE Means of Profit layout 1\nname: Test\nsplit right 50%\n  Plans\n  Buy list\n",
+            ),
+            Some((2, "Rifter 31")),
+            None,
+        );
+        harness.run_steps(2);
+        click_layout_of(&mut harness, "Buy list");
+        assert!(
+            shown(&harness, "Pin to \"Rifter 31\""),
+            "the Buy list menu opened, not the Plans one"
         );
     }
 

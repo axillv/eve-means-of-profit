@@ -215,6 +215,9 @@ mod tests {
             .get_all_by_label("Layout")
             .map(|node| node.rect())
             .filter(|rect| (rect.center().y - title.center().y).abs() < 6.0)
+            // The panel's own menu sits at the right end of its header row, to the right of its
+            // title; a panel to its left has one too, nearer to the title's left.
+            .filter(|rect| rect.left() >= title.right())
             .min_by(|a, b| {
                 (a.left() - title.right())
                     .abs()
