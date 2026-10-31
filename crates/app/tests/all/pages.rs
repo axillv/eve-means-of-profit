@@ -7,10 +7,11 @@
 
 mod assets;
 mod build;
-mod data;
+mod login;
+mod net_worth;
 mod rail;
 mod today;
-mod today_net_worth;
+mod what_to_build;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -33,7 +34,7 @@ use eve_means_of_profit::selection::Selection;
 use eve_means_of_profit::session::{EveAccess, NoEve, PendingLogin, Session};
 use eve_means_of_profit::theme::Style;
 use eve_means_of_profit::what_to_build::{
-    self, Blueprint, CharacterSlots, DeadEnd, RankRow, WhatToBuildPage,
+    Blueprint, CharacterSlots, DeadEnd, RankRow, WhatToBuildPage,
 };
 use eve_means_of_profit::worker::Worker;
 use eve_means_of_profit::{App, AppConfig, Shared};
