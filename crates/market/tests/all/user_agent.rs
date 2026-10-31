@@ -44,7 +44,7 @@ mod tests {
         let head = server.join().unwrap();
         assert_eq!(
             user_agent(&head),
-            Some("eve-means-of-profit/0.1.0"),
+            Some(mop_core::user_agent::USER_AGENT),
             "{head}"
         );
     }

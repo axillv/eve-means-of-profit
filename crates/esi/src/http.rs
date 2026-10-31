@@ -71,7 +71,7 @@ pub struct UreqHttp {
 impl UreqHttp {
     pub fn new() -> Self {
         let config = ureq::Agent::config_builder()
-            .user_agent(concat!("eve-means-of-profit/", env!("CARGO_PKG_VERSION")))
+            .user_agent(mop_core::user_agent::USER_AGENT)
             .timeout_global(Some(TIMEOUT))
             .http_status_as_error(false)
             .build();

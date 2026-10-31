@@ -26,7 +26,7 @@ const CHUNK: usize = 64 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const BAD_BODY_CHARS: usize = 200;
-const USER_AGENT: &str = concat!("eve-means-of-profit/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = mop_core::user_agent::USER_AGENT;
 
 /// The network side of the download, behind a trait so the steps can be tested without a server.
 pub trait Fetch {

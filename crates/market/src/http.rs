@@ -31,7 +31,7 @@ impl UreqHttp {
 
 fn agent(timeout: Duration) -> ureq::Agent {
     let config = ureq::Agent::config_builder()
-        .user_agent(concat!("eve-means-of-profit/", env!("CARGO_PKG_VERSION")))
+        .user_agent(mop_core::user_agent::USER_AGENT)
         .timeout_global(Some(timeout))
         .http_status_as_error(false)
         .build();

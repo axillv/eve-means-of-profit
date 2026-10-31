@@ -21,4 +21,5 @@ pub mod profit;
 pub mod reserve;
 pub mod stock;
 pub mod stockpile;
+pub mod user_agent;
 pub mod volume;
