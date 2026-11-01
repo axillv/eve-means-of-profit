@@ -4,6 +4,8 @@ A desktop tool for EVE Online traders and industrialists: prices, hauling, build
 
 Early development; nothing usable yet.
 
+How the parts fit together, where data comes from and what is kept: [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## Build
 ```
 cargo build --release
